@@ -1,0 +1,16 @@
+{
+  "name": "agentgate-workspace",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "bun run --workspaces --if-present build",
+    "typecheck": "bun run --workspaces --if-present typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "packageManager": "bun@1.3.11"
+}

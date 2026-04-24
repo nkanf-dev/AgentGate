@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "issued_at": "2026-04-24T00:00:00Z",
+  "tool_policy": [],
+  "egress_policy": {
+    "host_allowlist": [],
+    "block_sensitive_query_params": ["token", "key", "secret", "password"],
+    "require_purpose_declaration": true
+  },
+  "path_policy": {
+    "workspace_root": ".",
+    "allow_worktree_siblings": false,
+    "blocked_prefixes": ["~/.ssh", "~/.aws", "/etc"]
+  }
+}

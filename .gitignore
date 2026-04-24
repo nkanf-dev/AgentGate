@@ -1,0 +1,9 @@
+agentgate.db
+*.db
+*.db-shm
+*.db-wal
+
+node_modules/
+dist/
+
+.DS_Store
