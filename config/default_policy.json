@@ -1,7 +1,81 @@
 {
   "version": 1,
+  "status": "active_minimal",
   "issued_at": "2026-04-24T00:00:00Z",
-  "tool_policy": [],
+  "rules": [
+    {
+      "id": "input.secret.rewrite_to_handle",
+      "description": "Secret-like input must be converted into SecretHandle placeholders before model execution.",
+      "priority": 100,
+      "surface": "input",
+      "request_kinds": ["input"],
+      "effect": "allow_with_audit",
+      "reason_code": "input_secret_rewritten_to_handles",
+      "when": {
+        "data_classes_any": ["secret"]
+      }
+    },
+    {
+      "id": "runtime.bash.requires_approval",
+      "description": "Shell execution can mutate files, spawn processes, and reach the network.",
+      "priority": 100,
+      "surface": "runtime",
+      "request_kinds": ["tool_attempt"],
+      "effect": "approval_required",
+      "reason_code": "runtime_high_risk_requires_approval",
+      "when": {
+        "tools": ["bash"]
+      }
+    },
+    {
+      "id": "runtime.open_world.requires_approval",
+      "description": "Open-world tool attempts require explicit operator approval.",
+      "priority": 100,
+      "surface": "runtime",
+      "request_kinds": ["tool_attempt"],
+      "effect": "approval_required",
+      "reason_code": "runtime_high_risk_requires_approval",
+      "when": {
+        "open_world": true
+      }
+    },
+    {
+      "id": "runtime.side_effect.requires_approval",
+      "description": "High-risk side effects require explicit operator approval.",
+      "priority": 100,
+      "surface": "runtime",
+      "request_kinds": ["tool_attempt"],
+      "effect": "approval_required",
+      "reason_code": "runtime_high_risk_requires_approval",
+      "when": {
+        "side_effects_any": ["filesystem_write", "network_egress", "process_spawn", "secret_resolve"]
+      }
+    },
+    {
+      "id": "resource.secret_handle.resolve",
+      "description": "SecretHandle resolution is eligible only through the resource surface and same-session scope checks.",
+      "priority": 100,
+      "surface": "resource",
+      "request_kinds": ["resource_access"],
+      "effect": "allow_with_audit",
+      "reason_code": "secret_handle_resolve_allowed",
+      "when": {
+        "operations": ["resolve_secret_handle"],
+        "target_kinds": ["secret_handle"]
+      }
+    }
+  ],
+  "input_policy": {
+    "secret_mode": "secret_handle"
+  },
+  "runtime_policy": {
+    "require_approval_tools": ["bash"],
+    "require_approval_side_effects": ["filesystem_write", "network_egress", "process_spawn", "secret_resolve"],
+    "require_approval_open_world": true
+  },
+  "resource_policy": {
+    "secret_handle_scope": "session_task"
+  },
   "egress_policy": {
     "host_allowlist": [],
     "block_sensitive_query_params": ["token", "key", "secret", "password"],
