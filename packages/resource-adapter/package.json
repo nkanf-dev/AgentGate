@@ -1,5 +1,5 @@
 {
-  "name": "@agentgate/openclaw-adapter",
+  "name": "@agentgate/resource-adapter",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -9,25 +9,11 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./plugin": {
-      "types": "./dist/plugin.d.ts",
-      "default": "./dist/plugin.js"
     }
   },
   "files": [
-    "dist",
-    "openclaw.plugin.json"
+    "dist"
   ],
-  "openclaw": {
-    "extensions": [
-      "./dist/plugin.js"
-    ],
-    "compat": {
-      "pluginApi": ">=2026.3.24-beta.2",
-      "minGatewayVersion": "2026.3.24-beta.2"
-    }
-  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "prepack": "bun run build",
