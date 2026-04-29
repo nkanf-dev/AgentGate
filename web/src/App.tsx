@@ -1,5 +1,5 @@
 import * as React from "react"
-import { useQuery } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   type ColumnDef,
   type ColumnFiltersState,
@@ -14,13 +14,17 @@ import {
 } from "@tanstack/react-table"
 import {
   ChevronDown,
+  Check,
   Columns3,
-  Gauge,
   KeyRound,
   ListFilter,
+  Plug,
   RefreshCw,
+  Save,
+  Settings,
   ShieldCheck,
   Split,
+  X,
 } from "lucide-react"
 import { Bar, BarChart, CartesianGrid, ReferenceLine, XAxis } from "recharts"
 
@@ -84,6 +88,7 @@ import {
   SidebarMenuItem,
   SidebarProvider,
   SidebarTrigger,
+  useSidebar,
 } from "@/components/ui/sidebar"
 import {
   Table,
@@ -100,16 +105,36 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import {
-  approvals,
-  coverage,
-  events,
-  histogram,
+  defaultConfig,
+  fetchConsoleData,
+  loadConfig,
+  resolveApproval,
+  saveConfig,
+  type Approval,
+  type ConsoleConfig,
   type Effect,
+  type EventSurface,
+  type HistogramBucket,
   type SecurityEvent,
   type Surface,
-} from "@/mock-data"
+} from "@/lib/agentgate-api"
+import {
+  effectLabel,
+  requestKindLabel,
+  statusLabel,
+  surfaceLabel,
+  surfaceLabels,
+} from "@/lib/display-labels"
+import { IntegrationsView } from "@/features/integrations/IntegrationsView"
+import { PolicyView } from "@/features/policy/PolicyView"
 
-type View = "events" | "timeline" | "coverage" | "approvals"
+type View =
+  | "events"
+  | "timeline"
+  | "approvals"
+  | "policy"
+  | "integrations"
+  | "settings"
 
 const navItems: Array<{
   value: View
@@ -117,17 +142,20 @@ const navItems: Array<{
   icon: React.ComponentType<{ className?: string }>
   badge?: number
 }> = [
-  { value: "events", label: "Events", icon: ListFilter, badge: events.length },
+  { value: "events", label: "Events", icon: ListFilter },
   { value: "timeline", label: "Timeline", icon: Split },
-  { value: "coverage", label: "Coverage", icon: Gauge },
-  { value: "approvals", label: "Approvals", icon: KeyRound, badge: approvals.length },
+  { value: "approvals", label: "Approvals", icon: KeyRound },
+  { value: "policy", label: "Policy", icon: ShieldCheck },
+  { value: "integrations", label: "Integrations", icon: Plug },
+  { value: "settings", label: "Settings", icon: Settings },
 ]
 
 const effectVariant: Record<Effect, "default" | "secondary" | "destructive" | "outline"> = {
+  allow: "secondary",
   allow_with_audit: "secondary",
   deny: "destructive",
   approval_required: "outline",
-  rewrite: "default",
+  exclusion: "outline",
 }
 
 const surfaceVariant: Record<Surface, "default" | "secondary" | "outline"> = {
@@ -136,16 +164,57 @@ const surfaceVariant: Record<Surface, "default" | "secondary" | "outline"> = {
   resource: "default",
 }
 
+function SurfaceBadge({ surface }: { surface: EventSurface }) {
+  if (surface === "none") {
+    return <Badge variant="outline">{surfaceLabel(surface)}</Badge>
+  }
+  return <Badge variant={surfaceVariant[surface]}>{surfaceLabel(surface)}</Badge>
+}
+
+function ConsoleNavItem({
+  item,
+  active,
+  badge,
+  onSelect,
+}: {
+  item: (typeof navItems)[number]
+  active: boolean
+  badge?: number
+  onSelect: (view: View) => void
+}) {
+  const { isMobile, setOpenMobile } = useSidebar()
+
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        type="button"
+        tooltip={item.label}
+        isActive={active}
+        onClick={() => {
+          onSelect(item.value)
+          if (isMobile) {
+            setOpenMobile(false)
+          }
+        }}
+      >
+        <item.icon />
+        <span>{item.label}</span>
+      </SidebarMenuButton>
+      {badge ? <SidebarMenuBadge>{badge}</SidebarMenuBadge> : null}
+    </SidebarMenuItem>
+  )
+}
+
 const chartConfig = {
-  input: { label: "input", color: "var(--chart-1)" },
-  runtime: { label: "runtime", color: "var(--chart-2)" },
-  resource: { label: "resource", color: "var(--chart-3)" },
+  input: { label: "Input", color: "var(--chart-1)" },
+  runtime: { label: "Runtime", color: "var(--chart-2)" },
+  resource: { label: "Resource", color: "var(--chart-3)" },
 } satisfies ChartConfig
 
 const columns: ColumnDef<SecurityEvent>[] = [
   {
     accessorKey: "created_at",
-    header: "created_at",
+    header: "Timestamp",
     cell: ({ row }) => (
       <span className="font-mono">
         {new Date(row.original.created_at).toLocaleTimeString("en-US", {
@@ -160,26 +229,30 @@ const columns: ColumnDef<SecurityEvent>[] = [
   },
   {
     accessorKey: "effect",
-    header: "effect",
+    header: "Effect",
     cell: ({ row }) => (
-      <Badge variant={effectVariant[row.original.effect]}>{row.original.effect}</Badge>
+      <Badge variant={effectVariant[row.original.effect]}>
+        {effectLabel(row.original.effect)}
+      </Badge>
     ),
   },
-  { accessorKey: "request_kind", header: "request_kind" },
+  {
+    accessorKey: "request_kind",
+    header: "Request Kind",
+    cell: ({ row }) => requestKindLabel(row.original.request_kind),
+  },
   {
     accessorKey: "surface",
-    header: "surface",
-    cell: ({ row }) => (
-      <Badge variant={surfaceVariant[row.original.surface]}>{row.original.surface}</Badge>
-    ),
+    header: "Surface",
+    cell: ({ row }) => <SurfaceBadge surface={row.original.surface} />,
   },
-  { accessorKey: "adapter_id", header: "adapter_id" },
-  { accessorKey: "session_id", header: "session_id" },
-  { accessorKey: "task_id", header: "task_id" },
-  { accessorKey: "reason_code", header: "reason_code" },
+  { accessorKey: "adapter_id", header: "Adapter ID" },
+  { accessorKey: "session_id", header: "Session ID" },
+  { accessorKey: "task_id", header: "Task ID" },
+  { accessorKey: "reason_code", header: "Reason Code" },
   {
     accessorKey: "redacted_summary",
-    header: "redacted_summary",
+    header: "Redacted Summary",
     cell: ({ row }) => (
       <span className="block max-w-[32rem] truncate">
         {row.original.redacted_summary}
@@ -187,10 +260,6 @@ const columns: ColumnDef<SecurityEvent>[] = [
     ),
   },
 ]
-
-function queryMock() {
-  return Promise.resolve({ events, coverage, approvals, histogram })
-}
 
 function formatDate(value: string) {
   return new Date(value).toLocaleString("en-US", {
@@ -207,20 +276,54 @@ function eventMinute(event: SecurityEvent) {
 }
 
 function App() {
+  const queryClient = useQueryClient()
   const [view, setView] = React.useState<View>("events")
-  const [selectedId, setSelectedId] = React.useState(events[0]?.id)
-  const [selectedTimelineId, setSelectedTimelineId] = React.useState(events[0]?.id)
+  const [config, setConfig] = React.useState<ConsoleConfig>(() => loadConfig())
+  const [selectedId, setSelectedId] = React.useState<string>()
+  const [selectedTimelineId, setSelectedTimelineId] = React.useState<string>()
   const [effectFilter, setEffectFilter] = React.useState("all")
   const [surfaceFilter, setSurfaceFilter] = React.useState("all")
   const [queryText, setQueryText] = React.useState("")
-  const { data } = useQuery({
-    queryKey: ["agentgate-console-mock"],
-    queryFn: queryMock,
-    initialData: { events, coverage, approvals, histogram },
+  const { data, error, isFetching, refetch } = useQuery({
+    queryKey: ["agentgate-console", config.baseUrl || defaultConfig.baseUrl, config.operatorToken],
+    queryFn: ({ signal }) =>
+      fetchConsoleData(config.baseUrl || defaultConfig.baseUrl, signal),
+    retry: 1,
   })
+  const approvalMutation = useMutation({
+    mutationFn: ({
+      approvalId,
+      decision,
+    }: {
+      approvalId: string
+      decision: "allow_once" | "deny"
+    }) =>
+      resolveApproval(
+        config.baseUrl || defaultConfig.baseUrl,
+        approvalId,
+        decision
+      ),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["agentgate-console"] })
+    },
+  })
+  const events = data?.events ?? []
+  const coverage = data?.coverage
+  const approvals = data?.approvals ?? []
+  const pendingApprovals = approvals.filter((approval) => approval.status === "pending")
+  const histogram = data?.histogram ?? []
+
+  React.useEffect(() => {
+    if (!selectedId && events[0]) {
+      setSelectedId(events[0].id)
+    }
+    if (!selectedTimelineId && events[0]) {
+      setSelectedTimelineId(events[0].id)
+    }
+  }, [events, selectedId, selectedTimelineId])
 
   const filteredEvents = React.useMemo(() => {
-    return data.events.filter((event) => {
+    return events.filter((event) => {
       const effectMatches = effectFilter === "all" || event.effect === effectFilter
       const surfaceMatches =
         surfaceFilter === "all" || event.surface === surfaceFilter
@@ -240,10 +343,29 @@ function App() {
 
       return effectMatches && surfaceMatches && textMatches
     })
-  }, [data.events, effectFilter, queryText, surfaceFilter])
+  }, [events, effectFilter, queryText, surfaceFilter])
 
   const selectedEvent =
     filteredEvents.find((event) => event.id === selectedId) ?? filteredEvents[0]
+  const coveredSurfaces = coverage?.surfaces ?? {}
+  const dataError = error instanceof Error ? error.message : undefined
+  const configuredBaseUrl = config.baseUrl.trim() || defaultConfig.baseUrl
+  const currentTitle =
+    view === "events"
+      ? "Security Events"
+      : view === "timeline"
+        ? "Timeline"
+        : view === "approvals"
+          ? "Approvals"
+          : view === "policy"
+            ? "Policy"
+            : view === "integrations"
+              ? "Integrations"
+            : "Configuration"
+
+  React.useEffect(() => {
+    document.title = `AgentGate Console - ${currentTitle}`
+  }, [currentTitle])
 
   return (
     <TooltipProvider>
@@ -255,7 +377,7 @@ function App() {
               <div className="min-w-0">
                 <div className="truncate text-sm font-medium">AgentGate</div>
                 <div className="truncate text-xs text-muted-foreground">
-                  shadcn/ui mock
+                  Live Control Plane
                 </div>
               </div>
             </div>
@@ -265,22 +387,24 @@ function App() {
               <SidebarGroupLabel>Console</SidebarGroupLabel>
               <SidebarGroupContent>
                 <SidebarMenu>
-                  {navItems.map((item) => (
-                    <SidebarMenuItem key={item.value}>
-                      <SidebarMenuButton
-                        type="button"
-                        tooltip={item.label}
-                        isActive={view === item.value}
-                        onClick={() => setView(item.value)}
-                      >
-                        <item.icon />
-                        <span>{item.label}</span>
-                      </SidebarMenuButton>
-                      {item.badge ? (
-                        <SidebarMenuBadge>{item.badge}</SidebarMenuBadge>
-                      ) : null}
-                    </SidebarMenuItem>
-                  ))}
+                  {navItems.map((item) => {
+                    const badge =
+                      item.value === "events"
+                        ? events.length
+                        : item.value === "approvals"
+                          ? pendingApprovals.length
+                          : item.badge
+
+                    return (
+                      <ConsoleNavItem
+                        key={item.value}
+                        item={item}
+                        active={view === item.value}
+                        badge={badge}
+                        onSelect={setView}
+                      />
+                    )
+                  })}
                 </SidebarMenu>
               </SidebarGroupContent>
             </SidebarGroup>
@@ -291,11 +415,13 @@ function App() {
               <SidebarGroupContent className="space-y-2 px-2 text-xs">
                 {(["input", "runtime", "resource"] as Surface[]).map((surface) => (
                   <div key={surface} className="flex items-center justify-between gap-2">
-                    <Badge variant={surfaceVariant[surface]}>{surface}</Badge>
+                    <Badge variant={surfaceVariant[surface]}>
+                      {surfaceLabel(surface)}
+                    </Badge>
                     <span className="text-muted-foreground">
-                      {coverage.some((adapter) => adapter.surfaces.includes(surface))
-                        ? "covered"
-                        : "gap"}
+                      {(coveredSurfaces[surface] ?? 0) > 0
+                        ? "Covered"
+                        : "Gap"}
                     </span>
                   </div>
                 ))}
@@ -313,26 +439,38 @@ function App() {
                   <div className="min-w-0">
                     <div className="flex min-w-0 items-center gap-2">
                       <h1 className="truncate text-base font-medium">
-                        Security events
+                        {currentTitle}
                       </h1>
-                      <Badge variant="outline">MOCK DATA</Badge>
+                      <Badge variant={dataError ? "destructive" : "outline"}>
+                        {dataError ? "API ERROR" : "LIVE API"}
+                      </Badge>
                     </div>
                     <p className="truncate text-sm text-muted-foreground">
-                      Dense event log, timeline, coverage, and approvals over mock AgentGate data.
+                      AgentGate Core · {configuredBaseUrl}
                     </p>
                   </div>
                 </div>
-                <Toolbar
-                  queryText={queryText}
-                  effectFilter={effectFilter}
-                  surfaceFilter={surfaceFilter}
-                  onQueryText={setQueryText}
-                  onEffectFilter={setEffectFilter}
-                  onSurfaceFilter={setSurfaceFilter}
-                />
+                {view === "events" || view === "timeline" ? (
+                  <Toolbar
+                    queryText={queryText}
+                    effectFilter={effectFilter}
+                    surfaceFilter={surfaceFilter}
+                    onQueryText={setQueryText}
+                    onEffectFilter={setEffectFilter}
+                    onSurfaceFilter={setSurfaceFilter}
+                    onRefresh={() => void refetch()}
+                    isRefreshing={isFetching}
+                  />
+                ) : (
+                  <RefreshButton
+                    onRefresh={() => void refetch()}
+                    isRefreshing={isFetching}
+                  />
+                )}
               </div>
             </header>
             <main className="min-w-0 flex-1 p-4">
+              <ApiStatus error={dataError} isFetching={isFetching} />
               {view === "events" ? (
                 <EventsView
                   events={filteredEvents}
@@ -343,12 +481,48 @@ function App() {
               ) : null}
               {view === "timeline" ? (
                 <TimelineView
+                  events={events}
+                  histogram={histogram}
                   selectedTimelineId={selectedTimelineId}
                   onSelectedTimelineId={setSelectedTimelineId}
                 />
               ) : null}
-              {view === "coverage" ? <CoverageView /> : null}
-              {view === "approvals" ? <ApprovalsView /> : null}
+              {view === "approvals" ? (
+                <ApprovalsView
+                  approvals={approvals}
+                  error={
+                    approvalMutation.error instanceof Error
+                      ? approvalMutation.error.message
+                      : undefined
+                  }
+                  pendingApprovalId={
+                    approvalMutation.isPending
+                      ? approvalMutation.variables?.approvalId
+                      : undefined
+                  }
+                  onAllowOnce={(approvalId) =>
+                    approvalMutation.mutate({ approvalId, decision: "allow_once" })
+                  }
+                  onDeny={(approvalId) =>
+                    approvalMutation.mutate({ approvalId, decision: "deny" })
+                  }
+                />
+              ) : null}
+              {view === "policy" ? (
+                <PolicyView config={config} />
+              ) : null}
+              {view === "integrations" ? (
+                <IntegrationsView config={config} coverage={coverage} />
+              ) : null}
+              {view === "settings" ? (
+                <SettingsView
+                  config={config}
+                  onConfig={(nextConfig) => {
+                    saveConfig(nextConfig)
+                    setConfig(nextConfig)
+                  }}
+                />
+              ) : null}
             </main>
           </div>
         </SidebarInset>
@@ -364,6 +538,8 @@ function Toolbar({
   onQueryText,
   onEffectFilter,
   onSurfaceFilter,
+  onRefresh,
+  isRefreshing,
 }: {
   queryText: string
   effectFilter: string
@@ -371,6 +547,8 @@ function Toolbar({
   onQueryText: (value: string) => void
   onEffectFilter: (value: string) => void
   onSurfaceFilter: (value: string) => void
+  onRefresh: () => void
+  isRefreshing: boolean
 }) {
   return (
     <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
@@ -382,36 +560,97 @@ function Toolbar({
       />
       <Select value={surfaceFilter} onValueChange={onSurfaceFilter}>
         <SelectTrigger className="sm:w-40">
-          <SelectValue placeholder="surface" />
+          <SelectValue placeholder="Surface" />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="all">All surfaces</SelectItem>
-          <SelectItem value="input">input</SelectItem>
-          <SelectItem value="runtime">runtime</SelectItem>
-          <SelectItem value="resource">resource</SelectItem>
+          <SelectItem value="all">All Surfaces</SelectItem>
+          <SelectItem value="input">{surfaceLabels.input}</SelectItem>
+          <SelectItem value="runtime">{surfaceLabels.runtime}</SelectItem>
+          <SelectItem value="resource">{surfaceLabels.resource}</SelectItem>
         </SelectContent>
       </Select>
       <Select value={effectFilter} onValueChange={onEffectFilter}>
         <SelectTrigger className="sm:w-40">
-          <SelectValue placeholder="effect" />
+          <SelectValue placeholder="Effect" />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="all">All effects</SelectItem>
-          <SelectItem value="allow_with_audit">allow_with_audit</SelectItem>
-          <SelectItem value="deny">deny</SelectItem>
-          <SelectItem value="approval_required">approval_required</SelectItem>
-          <SelectItem value="rewrite">rewrite</SelectItem>
+          <SelectItem value="all">All Effects</SelectItem>
+          <SelectItem value="allow">{effectLabel("allow")}</SelectItem>
+          <SelectItem value="allow_with_audit">
+            {effectLabel("allow_with_audit")}
+          </SelectItem>
+          <SelectItem value="deny">{effectLabel("deny")}</SelectItem>
+          <SelectItem value="approval_required">
+            {effectLabel("approval_required")}
+          </SelectItem>
+          <SelectItem value="exclusion">{effectLabel("exclusion")}</SelectItem>
         </SelectContent>
       </Select>
       <Tooltip>
         <TooltipTrigger asChild>
-          <Button variant="outline" size="icon" aria-label="Refresh mock data">
-            <RefreshCw />
+          <Button
+            variant="outline"
+            size="icon"
+            aria-label="Refresh"
+            onClick={onRefresh}
+          >
+            <RefreshCw className={isRefreshing ? "animate-spin" : undefined} />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>Refresh mock data</TooltipContent>
+        <TooltipContent>Refresh</TooltipContent>
       </Tooltip>
     </div>
+  )
+}
+
+function RefreshButton({
+  onRefresh,
+  isRefreshing,
+}: {
+  onRefresh: () => void
+  isRefreshing: boolean
+}) {
+  return (
+    <div className="flex justify-end">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="outline"
+            size="icon"
+            aria-label="Refresh"
+            onClick={onRefresh}
+          >
+            <RefreshCw className={isRefreshing ? "animate-spin" : undefined} />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Refresh</TooltipContent>
+      </Tooltip>
+    </div>
+  )
+}
+
+function ApiStatus({
+  error,
+  isFetching,
+}: {
+  error?: string
+  isFetching: boolean
+}) {
+  if (!error && !isFetching) {
+    return null
+  }
+
+  return (
+    <Card className="mb-4 min-w-0">
+      <CardContent className="flex min-w-0 flex-wrap items-center gap-2 py-3 text-sm">
+        <Badge variant={error ? "destructive" : "outline"}>
+          {error ? "Connection" : "Loading"}
+        </Badge>
+        <span className="min-w-0 break-words text-muted-foreground">
+          {error ?? "Refreshing…"}
+        </span>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -468,7 +707,7 @@ function EventTable({
     <Card className="min-w-0">
       <CardHeader className="border-b">
         <CardTitle>Events</CardTitle>
-        <CardDescription>{events.length} matching security events</CardDescription>
+        <CardDescription>{events.length} matching events</CardDescription>
         <CardAction>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -490,7 +729,9 @@ function EventTable({
                     checked={column.getIsVisible()}
                     onCheckedChange={(value) => column.toggleVisibility(!!value)}
                   >
-                    {column.id}
+                    {typeof column.columnDef.header === "string"
+                      ? column.columnDef.header
+                      : column.id}
                   </DropdownMenuCheckboxItem>
                 ))}
             </DropdownMenuContent>
@@ -530,7 +771,7 @@ function EventTable({
             ) : (
               <TableRow>
                 <TableCell colSpan={columns.length} className="h-24 text-center">
-                  No events.
+                  No events match the current filters.
                 </TableCell>
               </TableRow>
             )}
@@ -579,7 +820,7 @@ function EventDetail({ event }: { event?: SecurityEvent }) {
     return (
       <Card>
         <CardHeader>
-          <CardTitle>Detail</CardTitle>
+          <CardTitle>Event Detail</CardTitle>
           <CardDescription>No selected event</CardDescription>
         </CardHeader>
       </Card>
@@ -589,33 +830,39 @@ function EventDetail({ event }: { event?: SecurityEvent }) {
   return (
     <Card className="min-w-0 xl:sticky xl:top-24 xl:self-start">
       <CardHeader className="border-b">
-        <CardTitle>Selected event</CardTitle>
+        <CardTitle>Event Detail</CardTitle>
         <CardDescription>{event.decision_id}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="flex flex-wrap gap-2">
-          <Badge variant={effectVariant[event.effect]}>{event.effect}</Badge>
-          <Badge variant={surfaceVariant[event.surface]}>{event.surface}</Badge>
-          <Badge variant="outline">{event.request_kind}</Badge>
+          <Badge variant={effectVariant[event.effect]}>
+            {effectLabel(event.effect)}
+          </Badge>
+          <SurfaceBadge surface={event.surface} />
+          <Badge variant="outline">{requestKindLabel(event.request_kind)}</Badge>
         </div>
         <DetailGrid
           rows={[
-            ["created_at", formatDate(event.created_at)],
-            ["adapter_id", event.adapter_id],
-            ["session_id", event.session_id],
-            ["task_id", event.task_id],
-            ["attempt_id", event.attempt_id ?? "none"],
-            ["approval_id", event.approval_id ?? "none"],
-            ["reason_code", event.reason_code],
-            ["latency_ms", `${event.latency_ms}`],
-            ["policy_version", event.policy_version],
+            ["Timestamp", formatDate(event.created_at)],
+            ["Adapter ID", event.adapter_id],
+            ["Session ID", event.session_id],
+            ["Task ID", event.task_id],
+            ["Attempt ID", event.attempt_id ?? "None"],
+            ["Approval ID", event.approval_id ?? "None"],
+            ["Reason Code", event.reason_code],
+            ["Latency (ms)", event.latency_ms ? `${event.latency_ms}` : "Unknown"],
+            ["Policy Version", event.policy_version ?? "Unknown"],
+            ["Policy Status", event.policy_status ?? "Unknown"],
+            ["Matched Rule", event.selected_rule ?? "None"],
           ]}
         />
         <Separator />
-        <EvidenceSection title="redacted evidence" items={[event.redacted_summary]} />
-        <EvidenceSection title="applied_rules" items={event.applied_rules} />
-        <EvidenceSection title="obligations" items={event.obligations} />
-        <EvidenceSection title="findings / taints / data_classes" items={[...event.findings, ...event.taints, ...event.data_classes]} />
+        <EvidenceSection title="Redacted Evidence" items={[event.redacted_summary]} />
+        <EvidenceSection title="Matched Rules" items={event.matched_rules} />
+        <EvidenceSection title="Applied Rules" items={event.applied_rules} />
+        <EvidenceSection title="Obligations" items={event.obligations} />
+        <EvidenceSection title="Redacted Metadata" items={event.metadata} />
+        <EvidenceSection title="Findings / Taints / Data Classes" items={[...event.findings, ...event.taints, ...event.data_classes]} />
       </CardContent>
     </Card>
   )
@@ -646,17 +893,38 @@ function EvidenceSection({ title, items }: { title: string; items: string[] }) {
             </Badge>
           ))
         ) : (
-          <Badge variant="secondary">none</Badge>
+          <Badge variant="secondary">None</Badge>
         )}
       </div>
     </div>
   )
 }
 
+function EmptyCard({
+  title,
+  description,
+}: {
+  title: string
+  description: string
+}) {
+  return (
+    <Card className="min-w-0">
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+        <CardDescription>{description}</CardDescription>
+      </CardHeader>
+    </Card>
+  )
+}
+
 function TimelineView({
+  events,
+  histogram,
   selectedTimelineId,
   onSelectedTimelineId,
 }: {
+  events: SecurityEvent[]
+  histogram: HistogramBucket[]
   selectedTimelineId?: string
   onSelectedTimelineId: (id: string) => void
 }) {
@@ -664,6 +932,10 @@ function TimelineView({
   const [expandedIds, setExpandedIds] = React.useState<string[]>([])
   const selectedTimelineEvent =
     events.find((event) => event.id === selectedTimelineId) ?? events[0]
+  if (!selectedTimelineEvent) {
+    return <EmptyCard title="Time Flow" description="No events recorded by AgentGate yet." />
+  }
+
   const sessionIds = Array.from(new Set(events.map((event) => event.session_id)))
   const sessionEvents = events.filter(
     (event) => event.session_id === selectedTimelineEvent.session_id
@@ -704,7 +976,7 @@ function TimelineView({
       <div className="min-w-0 space-y-4">
         <Card className="min-w-0">
           <CardHeader className="border-b">
-            <CardTitle>Time flow</CardTitle>
+            <CardTitle>Time Flow</CardTitle>
             <CardDescription>
               {selectedTimelineEvent.session_id} / {selectedTimelineEvent.task_id}
               {selectedMinute === "all" ? "" : ` / ${selectedMinute}`}
@@ -716,7 +988,7 @@ function TimelineView({
                   size="sm"
                   onClick={() => setSelectedMinute("all")}
                 >
-                  All minutes
+                  All Minutes
                 </Button>
                 <Select
                   value={selectedTimelineEvent.session_id}
@@ -767,7 +1039,7 @@ function TimelineView({
         </Card>
         <Card className="min-w-0">
           <CardHeader className="border-b">
-            <CardTitle>Session event tree</CardTitle>
+            <CardTitle>Event Volume</CardTitle>
             <CardDescription>
               {selectedMinute === "all"
                 ? "All minute buckets"
@@ -797,9 +1069,7 @@ function TimelineView({
                           className="h-auto min-w-0 flex-1 justify-start gap-2 whitespace-normal px-2 py-1.5"
                           onClick={() => onSelectedTimelineId(event.id)}
                         >
-                          <Badge variant={surfaceVariant[event.surface]}>
-                            {event.surface}
-                          </Badge>
+                          <SurfaceBadge surface={event.surface} />
                           <span className="font-mono text-xs">{event.decision_id}</span>
                           <span className="min-w-0 truncate text-muted-foreground">
                             {event.reason_code}
@@ -829,10 +1099,10 @@ function TimelineView({
                       <CollapsibleContent className="px-3 py-3">
                         <DetailGrid
                           rows={[
-                            ["created_at", formatDate(event.created_at)],
-                            ["span_kind", `${event.request_kind} + ${event.surface}`],
-                            ["duration", `${event.latency_ms}ms`],
-                            ["summary", event.redacted_summary],
+                            ["Timestamp", formatDate(event.created_at)],
+                            ["Span Kind", `${requestKindLabel(event.request_kind)} + ${surfaceLabel(event.surface)}`],
+                            ["Duration", `${event.latency_ms}ms`],
+                            ["Summary", event.redacted_summary],
                           ]}
                         />
                       </CollapsibleContent>
@@ -861,113 +1131,282 @@ function TimelineSpanDetail({ event }: { event: SecurityEvent }) {
   return (
     <Card className="min-w-0 xl:sticky xl:top-24 xl:self-start">
       <CardHeader className="border-b">
-        <CardTitle>Selected span</CardTitle>
+        <CardTitle>Selected Span</CardTitle>
         <CardDescription>
           {event.session_id} / {event.task_id}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="flex flex-wrap gap-2">
-          <Badge variant={surfaceVariant[event.surface]}>{event.surface}</Badge>
-          <Badge variant="outline">{event.request_kind}</Badge>
-          <Badge variant={effectVariant[event.effect]}>{event.effect}</Badge>
+          <SurfaceBadge surface={event.surface} />
+          <Badge variant="outline">{requestKindLabel(event.request_kind)}</Badge>
+          <Badge variant={effectVariant[event.effect]}>
+            {effectLabel(event.effect)}
+          </Badge>
         </div>
         <DetailGrid
           rows={[
-            ["trace_id", event.session_id],
-            ["task_trace", event.task_id],
-            ["span_id", event.attempt_id ?? event.approval_id ?? event.decision_id],
-            ["span_kind", `${event.request_kind} + ${event.surface}`],
-            ["decision_id", event.decision_id],
-            ["duration", `${event.latency_ms}ms`],
-            ["reason_code", event.reason_code],
-            ["created_at", formatDate(event.created_at)],
+            ["Trace ID", event.session_id],
+            ["Task Trace", event.task_id],
+            ["Span ID", event.attempt_id ?? event.approval_id ?? event.decision_id],
+            ["Span Kind", `${requestKindLabel(event.request_kind)} + ${surfaceLabel(event.surface)}`],
+            ["Decision ID", event.decision_id],
+            ["Duration", `${event.latency_ms}ms`],
+            ["Reason Code", event.reason_code],
+            ["Matched Rule", event.selected_rule ?? "None"],
+            ["Timestamp", formatDate(event.created_at)],
           ]}
         />
         <Separator />
-        <EvidenceSection title="redacted evidence" items={[event.redacted_summary]} />
-        <EvidenceSection title="obligations" items={event.obligations} />
-        <EvidenceSection title="applied_rules" items={event.applied_rules} />
+        <EvidenceSection title="Redacted Evidence" items={[event.redacted_summary]} />
+        <EvidenceSection title="Matched Rules" items={event.matched_rules} />
+        <EvidenceSection title="Obligations" items={event.obligations} />
+        <EvidenceSection title="Applied Rules" items={event.applied_rules} />
+        <EvidenceSection title="Redacted Metadata" items={event.metadata} />
       </CardContent>
     </Card>
   )
 }
 
-function CoverageView() {
-  return (
-    <div className="grid min-w-0 gap-4 lg:grid-cols-2">
-      {coverage.map((adapter) => (
-        <Card key={adapter.adapter_id} className="min-w-0">
-          <CardHeader className="border-b">
-            <CardTitle>{adapter.adapter_id}</CardTitle>
-            <CardDescription>
-              {adapter.host} / {adapter.version}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <EvidenceSection title="surfaces" items={adapter.surfaces} />
-            <EvidenceSection
-              title="supporting_channels"
-              items={adapter.supporting_channels}
-            />
-            <EvidenceSection title="capabilities" items={adapter.capabilities} />
-            <DetailGrid rows={[["last_seen", formatDate(adapter.last_seen)]]} />
-            <EvidenceSection title="coverage warnings" items={adapter.warnings} />
-          </CardContent>
-        </Card>
-      ))}
-    </div>
-  )
-}
-
-function ApprovalsView() {
+function ApprovalsView({
+  approvals,
+  error,
+  pendingApprovalId,
+  onAllowOnce,
+  onDeny,
+}: {
+  approvals: Approval[]
+  error?: string
+  pendingApprovalId?: string
+  onAllowOnce: (approvalId: string) => void
+  onDeny: (approvalId: string) => void
+}) {
   return (
     <Card className="min-w-0">
       <CardHeader className="border-b">
-        <CardTitle>Pending approvals</CardTitle>
+        <CardTitle>Approvals</CardTitle>
         <CardDescription>
-          Operator transport state only; decisions stay in AgentGate Core.
+          Pending rows are paused attempts. Allow Once applies only to the current attempt.
         </CardDescription>
       </CardHeader>
+      {error ? (
+        <CardContent className="border-b py-3">
+          <div className="flex min-w-0 items-center gap-2 text-sm">
+            <Badge variant="destructive">Resolution Failed</Badge>
+            <span className="min-w-0 break-words text-muted-foreground">{error}</span>
+          </div>
+        </CardContent>
+      ) : null}
       <CardContent className="p-0">
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>approval_id</TableHead>
-              <TableHead>created_at</TableHead>
-              <TableHead>session_id</TableHead>
-              <TableHead>task_id</TableHead>
-              <TableHead>attempt_id</TableHead>
-              <TableHead>operator_id</TableHead>
-              <TableHead>reason</TableHead>
-              <TableHead>status</TableHead>
-              <TableHead>expires_in</TableHead>
+              <TableHead>Approval ID</TableHead>
+              <TableHead>Timestamp</TableHead>
+              <TableHead>Session ID</TableHead>
+              <TableHead>Task ID</TableHead>
+              <TableHead>Attempt ID</TableHead>
+              <TableHead>Scope</TableHead>
+              <TableHead>Operator ID</TableHead>
+              <TableHead>Reason</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Expires In</TableHead>
+              <TableHead className="text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {approvals.map((approval) => (
-              <TableRow key={approval.approval_id}>
-                <TableCell className="font-mono">{approval.approval_id}</TableCell>
-                <TableCell>{formatDate(approval.created_at)}</TableCell>
-                <TableCell className="font-mono">{approval.session_id}</TableCell>
-                <TableCell className="font-mono">{approval.task_id}</TableCell>
-                <TableCell className="font-mono">{approval.attempt_id}</TableCell>
-                <TableCell>{approval.operator_id}</TableCell>
-                <TableCell>
-                  <span className="block max-w-[32rem] truncate">
-                    {approval.reason}
-                  </span>
+            {approvals.length ? (
+              approvals.map((approval) => {
+                const pending = approval.status === "pending"
+                const busy = pendingApprovalId === approval.approval_id
+
+                return (
+                  <TableRow key={approval.approval_id}>
+                    <TableCell className="font-mono">{approval.approval_id}</TableCell>
+                    <TableCell>{formatDate(approval.created_at)}</TableCell>
+                    <TableCell className="font-mono">{approval.session_id}</TableCell>
+                    <TableCell className="font-mono">{approval.task_id}</TableCell>
+                    <TableCell className="font-mono">{approval.attempt_id}</TableCell>
+                    <TableCell>
+                      <Badge variant="outline">
+                        {approval.scope === "attempt" ? "This Attempt" : statusLabel(approval.scope)}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>{approval.operator_id}</TableCell>
+                    <TableCell>
+                      <span className="block max-w-[32rem] truncate">
+                        {approval.reason}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <Badge
+                        variant={
+                          approval.status === "denied"
+                            ? "destructive"
+                            : approval.status === "approved"
+                              ? "secondary"
+                              : "outline"
+                        }
+                      >
+                        {statusLabel(approval.status)}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>{approval.expires_in}</TableCell>
+                    <TableCell>
+                      <div className="flex justify-end gap-2">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="outline"
+                              disabled={!pending || busy}
+                              aria-label={`Allow Once · ${approval.approval_id}`}
+                              onClick={() => onAllowOnce(approval.approval_id)}
+                            >
+                              <Check />
+                              <span className="sr-only">
+                                Allow Once for {approval.approval_id}
+                              </span>
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Allow this attempt only</TooltipContent>
+                        </Tooltip>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="outline"
+                              disabled={!pending || busy}
+                              aria-label={`Deny · ${approval.approval_id}`}
+                              onClick={() => onDeny(approval.approval_id)}
+                            >
+                              <X />
+                              <span className="sr-only">
+                                Deny {approval.approval_id}
+                              </span>
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Deny and keep attempt blocked</TooltipContent>
+                        </Tooltip>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )
+              })
+            ) : (
+              <TableRow>
+                <TableCell colSpan={10} className="h-24 text-center">
+                  No pending approvals.
                 </TableCell>
-                <TableCell>
-                  <Badge variant="outline">{approval.status}</Badge>
-                </TableCell>
-                <TableCell>{approval.expires_in}</TableCell>
               </TableRow>
-            ))}
+            )}
           </TableBody>
         </Table>
       </CardContent>
     </Card>
+  )
+}
+
+function SettingsView({
+  config,
+  onConfig,
+}: {
+  config: ConsoleConfig
+  onConfig: (config: ConsoleConfig) => void
+}) {
+  const [draft, setDraft] = React.useState(config)
+
+  React.useEffect(() => {
+    setDraft(config)
+  }, [config])
+
+  const updateDraft = (key: keyof ConsoleConfig, value: string) => {
+    setDraft((current) => ({ ...current, [key]: value }))
+  }
+
+  return (
+    <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
+      <Card className="min-w-0">
+        <CardHeader className="border-b">
+          <CardTitle>AgentGate Connection</CardTitle>
+          <CardDescription>Stored in this browser only.</CardDescription>
+          <CardAction>
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => onConfig({ ...draft, baseUrl: draft.baseUrl.trim() })}
+            >
+              <Save />
+              Save
+            </Button>
+          </CardAction>
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          <Field
+            label="AgentGate Base URL"
+            value={draft.baseUrl}
+            placeholder={defaultConfig.baseUrl}
+            onChange={(value) => updateDraft("baseUrl", value)}
+          />
+          <Field
+            label="Operator Token"
+            value={draft.operatorToken}
+            placeholder="operator-local-token"
+            onChange={(value) => updateDraft("operatorToken", value)}
+            type="password"
+          />
+          <Field
+            label="Admin Token"
+            value={draft.adminToken}
+            placeholder="admin-local-token"
+            onChange={(value) => updateDraft("adminToken", value)}
+            type="password"
+          />
+        </CardContent>
+      </Card>
+      <Card className="min-w-0 xl:sticky xl:top-24 xl:self-start">
+        <CardHeader className="border-b">
+          <CardTitle>Connection Status</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <DetailGrid
+            rows={[
+              ["Base URL", draft.baseUrl || defaultConfig.baseUrl],
+              ["Operator Token", draft.operatorToken ? "Configured" : "Not Set"],
+              ["Admin Token", draft.adminToken ? "Configured" : "Not Set"],
+            ]}
+          />
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+function Field({
+  label,
+  value,
+  placeholder,
+  onChange,
+  type = "text",
+}: {
+  label: string
+  value: string
+  placeholder: string
+  onChange: (value: string) => void
+  type?: string
+}) {
+  return (
+    <label className="grid min-w-0 gap-2">
+      <span className="text-sm font-medium">{label}</span>
+      <Input
+        type={type}
+        value={value}
+        placeholder={placeholder}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
   )
 }
 

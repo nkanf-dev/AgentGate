@@ -1,19 +1,18 @@
-# AgentGate Web Mock
+# AgentGate Web Console
 
-This app is the current frontend mock for AgentGate's operator console.
+This app is the operator console for a live AgentGate Core instance.
 
-## Mock Status
+## Runtime Data
 
-This is explicitly a static mock:
-
-- Mock data lives in `src/mock-data.ts`.
-- The UI displays a `MOCK DATA` badge in the header.
-- No real AgentGate Core API calls are made yet.
-- The mock data mirrors the intended `/v1/events`, `/v1/coverage`, and approvals shapes.
+- The console calls the real AgentGate API. It does not use mock event data.
+- Configure the Core URL with `VITE_AGENTGATE_BASE_URL`.
+- Configure the operator bearer token with `VITE_AGENTGATE_OPERATOR_TOKEN`.
+- Runtime overrides are stored in this browser through the Settings page.
+- Feishu app secrets must stay in deployment secrets or server-side environment configuration, not in this browser UI.
 
 ## Component Constraint
 
-The mock intentionally uses mature components instead of hand-rolled UI primitives:
+Use mature components instead of hand-rolled UI primitives:
 
 - shadcn/ui generated components in `src/components/ui/*`
 - Radix primitives through shadcn/ui
