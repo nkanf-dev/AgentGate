@@ -181,7 +181,7 @@ func TestPolicyValidateAndPublish(t *testing.T) {
 				"request_kinds": ["tool_attempt"],
 				"effect": "deny",
 				"reason_code": "runtime_bash_denied",
-				"when": {"tools": ["bash"]}
+					"when": {"language": "cel", "expression": "action.tool == \"bash\""}
 			}],
 			"input_policy": {"secret_mode": "secret_handle"},
 			"resource_policy": {"secret_handle_scope": "session_task"},
@@ -223,7 +223,7 @@ func TestPolicyValidateAndPublish(t *testing.T) {
 				"request_kinds": ["tool_attempt"],
 				"effect": "deny",
 				"reason_code": "runtime_bash_denied",
-				"when": {"tools": ["bash"]}
+					"when": {"language": "cel", "expression": "action.tool == \"bash\""}
 			}],
 			"input_policy": {"secret_mode": "secret_handle"},
 			"resource_policy": {"secret_handle_scope": "session_task"},

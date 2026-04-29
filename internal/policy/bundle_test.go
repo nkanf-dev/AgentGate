@@ -73,7 +73,6 @@ func TestLoadDefaultPolicy(t *testing.T) {
 }
 
 func TestPolicyPriorityAndEffectComposition(t *testing.T) {
-	deny := true
 	bundle := Bundle{
 		Version:  1,
 		Status:   "test",
@@ -92,7 +91,7 @@ func TestPolicyPriorityAndEffectComposition(t *testing.T) {
 				RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 				Effect:       types.EffectAllowWithAudit,
 				ReasonCode:   "low_allow",
-				When:         Condition{Tools: []string{"bash"}},
+				When:         celCond(`action.tool == "bash"`),
 			},
 			{
 				ID:           "runtime.high.deny",
@@ -101,7 +100,7 @@ func TestPolicyPriorityAndEffectComposition(t *testing.T) {
 				RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 				Effect:       types.EffectDeny,
 				ReasonCode:   "high_deny",
-				When:         Condition{OpenWorld: &deny},
+				When:         celCond(`action.open_world == true`),
 				Obligations:  []Obligation{{Type: "task_control", Params: map[string]interface{}{"action": "abort_task"}}},
 			},
 		},
@@ -133,7 +132,7 @@ func TestEvaluateBundlesUsesBundlePriorityBeforeRulePriority(t *testing.T) {
 		RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 		Effect:       types.EffectDeny,
 		ReasonCode:   "low_bundle_deny",
-		When:         Condition{Tools: []string{"bash"}},
+		When:         celCond(`action.tool == "bash"`),
 	})
 	high := testBundle("high", 100, Rule{
 		ID:           "runtime.bash.approve.high_bundle",
@@ -142,7 +141,7 @@ func TestEvaluateBundlesUsesBundlePriorityBeforeRulePriority(t *testing.T) {
 		RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 		Effect:       types.EffectApprovalRequired,
 		ReasonCode:   "high_bundle_approval",
-		When:         Condition{Tools: []string{"bash"}},
+		When:         celCond(`action.tool == "bash"`),
 	})
 
 	evaluation := EvaluateBundles([]Bundle{low, high}, types.PolicyRequest{
@@ -171,7 +170,7 @@ func TestEvaluateBundlesAppliesSameBundleAndRulePriorityTogether(t *testing.T) {
 			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 			Effect:       types.EffectAllowWithAudit,
 			ReasonCode:   "audit",
-			When:         Condition{Tools: []string{"bash"}},
+			When:         celCond(`action.tool == "bash"`),
 		},
 		Rule{
 			ID:           "runtime.bash.deny",
@@ -180,7 +179,7 @@ func TestEvaluateBundlesAppliesSameBundleAndRulePriorityTogether(t *testing.T) {
 			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 			Effect:       types.EffectDeny,
 			ReasonCode:   "deny",
-			When:         Condition{Tools: []string{"bash"}},
+			When:         celCond(`action.tool == "bash"`),
 		},
 	)
 
@@ -206,7 +205,7 @@ func TestEvaluateBundlesFailsClosedWithoutActiveBundle(t *testing.T) {
 		RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 		Effect:       types.EffectApprovalRequired,
 		ReasonCode:   "approval",
-		When:         Condition{Tools: []string{"bash"}},
+		When:         celCond(`action.tool == "bash"`),
 	})
 	bundle.Status = BundleStatusInactive
 
@@ -270,28 +269,28 @@ func TestPolicyValidationRejectsMalformedRules(t *testing.T) {
 			want: "compact token",
 		},
 		{
-			name: "blank condition value",
+			name: "missing cel language",
 			mutate: func(bundle Bundle) Bundle {
-				bundle.Rules[0].When.Tools = []string{""}
+				bundle.Rules[0].When.Language = ""
 				return bundle
 			},
-			want: "blank",
+			want: "unsupported",
 		},
 		{
-			name: "duplicate condition value",
+			name: "blank cel expression",
 			mutate: func(bundle Bundle) Bundle {
-				bundle.Rules[0].When.Tools = []string{"bash", "BASH"}
+				bundle.Rules[0].When.Expression = ""
 				return bundle
 			},
-			want: "duplicate",
+			want: "requires expression",
 		},
 		{
-			name: "unknown taint",
+			name: "unsupported condition language",
 			mutate: func(bundle Bundle) Bundle {
-				bundle.Rules[0].When.TaintsAny = []types.Taint{"made_up"}
+				bundle.Rules[0].When.Language = "structured"
 				return bundle
 			},
-			want: "unsupported taint",
+			want: "unsupported",
 		},
 		{
 			name: "sensitive obligation param",
@@ -414,7 +413,7 @@ func TestWildcardDoesNotMatchMissingField(t *testing.T) {
 			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 			Effect:       types.EffectApprovalRequired,
 			ReasonCode:   "any_tool_requires_approval",
-			When:         Condition{Tools: []string{"*"}},
+			When:         celCond(`action.tool != ""`),
 		},
 	})
 	if err := bundle.Validate(); err != nil {
@@ -429,7 +428,7 @@ func TestWildcardDoesNotMatchMissingField(t *testing.T) {
 	}
 }
 
-func TestConditionsCombineWithAndSemantics(t *testing.T) {
+func TestCELConditionsExpressAndSemantics(t *testing.T) {
 	bundle := minimalBundle([]Rule{
 		{
 			ID:           "runtime.bash.write.approval",
@@ -438,10 +437,9 @@ func TestConditionsCombineWithAndSemantics(t *testing.T) {
 			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 			Effect:       types.EffectApprovalRequired,
 			ReasonCode:   "bash_write_requires_approval",
-			When: Condition{
-				Tools:          []string{"bash"},
-				SideEffectsAll: []string{"filesystem_write", "process_spawn"},
-			},
+			When: celCond(`action.tool == "bash" &&
+					action.side_effects.exists(x, x == "filesystem_write") &&
+					action.side_effects.exists(x, x == "process_spawn")`),
 		},
 	})
 	if err := bundle.Validate(); err != nil {
@@ -453,7 +451,7 @@ func TestConditionsCombineWithAndSemantics(t *testing.T) {
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	})
 	if miss.Effect != types.EffectAllowWithAudit {
-		t.Fatalf("side_effects_all should not match partial set: %#v", miss)
+		t.Fatalf("cel conjunction should not match partial set: %#v", miss)
 	}
 	hit := bundle.Evaluate(types.PolicyRequest{
 		RequestKind: types.RequestKindToolAttempt,
@@ -461,7 +459,7 @@ func TestConditionsCombineWithAndSemantics(t *testing.T) {
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	})
 	if hit.Effect != types.EffectApprovalRequired {
-		t.Fatalf("side_effects_all should match full set: %#v", hit)
+		t.Fatalf("cel conjunction should match full set: %#v", hit)
 	}
 }
 
@@ -511,6 +509,49 @@ func TestCELConditionMatchesPolicyFacts(t *testing.T) {
 	}
 }
 
+func TestCELConditionMatchesSessionFacts(t *testing.T) {
+	bundle := minimalBundle([]Rule{
+		{
+			ID:           "runtime.session.deny_escalation",
+			Priority:     20,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectApprovalRequired,
+			ReasonCode:   "session_deny_escalation",
+			When: celCond(`session_facts.deny_count > 5 &&
+				session_facts.distinct_targets.size() > 2 &&
+				session_facts.side_effect_sequence.exists(x, x == "network_egress")`),
+		},
+	})
+	if err := bundle.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	miss := bundle.Evaluate(types.PolicyRequest{
+		RequestKind: types.RequestKindToolAttempt,
+		Action:      types.ActionContext{Tool: "bash"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	}, types.SessionFacts{
+		DenyCount:          5,
+		DistinctTargets:    []string{"a", "b", "c"},
+		SideEffectSequence: []string{"network_egress"},
+	})
+	if miss.Effect != types.EffectAllowWithAudit {
+		t.Fatalf("session facts below threshold should not match: %#v", miss)
+	}
+	hit := bundle.Evaluate(types.PolicyRequest{
+		RequestKind: types.RequestKindToolAttempt,
+		Action:      types.ActionContext{Tool: "bash"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	}, types.SessionFacts{
+		DenyCount:          6,
+		DistinctTargets:    []string{"a", "b", "c"},
+		SideEffectSequence: []string{"filesystem_write", "network_egress"},
+	})
+	if hit.Effect != types.EffectApprovalRequired || hit.SelectedRule != "runtime.session.deny_escalation" {
+		t.Fatalf("session facts should match escalation rule: %#v", hit)
+	}
+}
+
 func TestPolicyValidationRejectsInvalidCELCondition(t *testing.T) {
 	bundle := minimalBundle([]Rule{
 		{
@@ -544,7 +585,7 @@ func TestPolicyValidationRejectsImplicitCatchAll(t *testing.T) {
 		},
 	})
 	err := bundle.Validate()
-	if err == nil || !strings.Contains(err.Error(), "always:true") {
+	if err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("expected implicit catch-all validation error, got %v", err)
 	}
 }
@@ -558,7 +599,7 @@ func TestPolicyExplicitAlwaysCatchAll(t *testing.T) {
 			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 			Effect:       types.EffectApprovalRequired,
 			ReasonCode:   "explicit_catch_all",
-			When:         Condition{Always: true},
+			When:         celCond(`true`),
 		},
 	})
 	if err := bundle.Validate(); err != nil {
@@ -573,21 +614,21 @@ func TestPolicyExplicitAlwaysCatchAll(t *testing.T) {
 	}
 }
 
-func TestPolicyValidationRejectsAlwaysWithOtherConditions(t *testing.T) {
+func TestPolicyValidationRejectsBlankCELExpression(t *testing.T) {
 	bundle := minimalBundle([]Rule{
 		{
-			ID:           "runtime.bad.always",
+			ID:           "runtime.bad.blank_cel",
 			Priority:     1,
 			Surface:      types.SurfaceRuntime,
 			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 			Effect:       types.EffectApprovalRequired,
-			ReasonCode:   "bad_always",
-			When:         Condition{Always: true, Tools: []string{"bash"}},
+			ReasonCode:   "bad_blank_cel",
+			When:         Condition{Language: "cel", Expression: ""},
 		},
 	})
 	err := bundle.Validate()
-	if err == nil || !strings.Contains(err.Error(), "always") {
-		t.Fatalf("expected always validation error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "requires expression") {
+		t.Fatalf("expected blank cel validation error, got %v", err)
 	}
 }
 
@@ -600,7 +641,7 @@ func TestDenyAddsDefaultAbortTaskObligation(t *testing.T) {
 			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 			Effect:       types.EffectDeny,
 			ReasonCode:   "deny_without_obligation",
-			When:         Condition{Tools: []string{"bash"}},
+			When:         celCond(`action.tool == "bash"`),
 		},
 	})
 	if err := bundle.Validate(); err != nil {
@@ -649,6 +690,13 @@ func minimalBundle(rules []Rule) Bundle {
 		ResourcePolicy: ResourcePolicy{
 			SecretHandleScope: "session_task",
 		},
+	}
+}
+
+func celCond(expression string) Condition {
+	return Condition{
+		Language:   "cel",
+		Expression: expression,
 	}
 }
 

@@ -12,7 +12,8 @@
       "effect": "allow_with_audit",
       "reason_code": "input_secret_rewritten_to_handles",
       "when": {
-        "data_classes_any": ["secret"]
+        "language": "cel",
+        "expression": "content.data_classes.exists(x, x == \"secret\")"
       }
     },
     {
@@ -24,7 +25,8 @@
       "effect": "approval_required",
       "reason_code": "runtime_high_risk_requires_approval",
       "when": {
-        "tools": ["bash"]
+        "language": "cel",
+        "expression": "action.tool == \"bash\""
       }
     },
     {
@@ -36,7 +38,8 @@
       "effect": "approval_required",
       "reason_code": "runtime_high_risk_requires_approval",
       "when": {
-        "open_world": true
+        "language": "cel",
+        "expression": "action.open_world == true"
       }
     },
     {
@@ -48,7 +51,8 @@
       "effect": "approval_required",
       "reason_code": "runtime_high_risk_requires_approval",
       "when": {
-        "side_effects_any": ["filesystem_write", "network_egress", "process_spawn", "secret_resolve"]
+        "language": "cel",
+        "expression": "action.side_effects.exists(x, x in [\"filesystem_write\", \"network_egress\", \"process_spawn\", \"secret_resolve\"])"
       }
     },
     {
@@ -60,8 +64,8 @@
       "effect": "allow_with_audit",
       "reason_code": "secret_handle_resolve_allowed",
       "when": {
-        "operations": ["resolve_secret_handle"],
-        "target_kinds": ["secret_handle"]
+        "language": "cel",
+        "expression": "action.operation == \"resolve_secret_handle\" && target.kind == \"secret_handle\""
       }
     }
   ],

@@ -39,6 +39,7 @@ type Engine struct {
 type EventStore interface {
 	AppendEvent(event types.EventEnvelope) error
 	ListEvents(limit int) ([]types.EventEnvelope, error)
+	GetEventByDecisionID(decisionID string) (types.EventEnvelope, bool, error)
 }
 
 type StateStore interface {
@@ -63,6 +64,9 @@ type StateStore interface {
 	GetPolicyBundle(bundleID string) (policy.Bundle, bool, error)
 	ListPolicyBundles(includeArchived bool) ([]policy.Bundle, error)
 	ArchivePolicyBundle(bundleID string, updatedAt time.Time) error
+	GetSessionFacts(sessionID string) (types.SessionFactsRecord, bool, error)
+	UpsertSessionFacts(record types.SessionFactsRecord) error
+	UpdateSessionFacts(sessionID string, update func(types.SessionFactsRecord, bool) (types.SessionFactsRecord, error)) error
 }
 
 type Option func(*Engine)
@@ -1183,7 +1187,8 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 		obligations = append([]types.Obligation(nil), patch.obligations...)
 	} else {
 		inputFacts := enrichPolicyFacts(&req)
-		policyEvaluation = policy.EvaluateBundles(activeBundles, req)
+		sessionFacts := e.sessionFactsForDecision(req.Session.SessionID)
+		policyEvaluation = policy.EvaluateBundles(activeBundles, req, sessionFacts)
 		effect = policyEvaluation.Effect
 		reason = policyEvaluation.ReasonCode
 		appliedRules = append([]string(nil), policyEvaluation.AppliedRules...)
@@ -1249,6 +1254,12 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 			"request_kind":        req.RequestKind,
 			"actor_user":          req.Actor.UserID,
 			"host_id":             req.Actor.HostID,
+			"operation":           req.Action.Operation,
+			"tool":                req.Action.Tool,
+			"side_effects":        append([]string(nil), req.Action.SideEffects...),
+			"open_world":          req.Action.OpenWorld,
+			"target_kind":         req.Target.Kind,
+			"target_identifier":   req.Target.Identifier,
 			"applied_rules":       appliedRules,
 			"obligations":         obligationTypes(obligations),
 			"task_id":             req.Session.TaskID,
@@ -1297,6 +1308,7 @@ func (e *Engine) Report(req types.ReportRequest) (types.ReportResponse, error) {
 	}); err != nil {
 		return types.ReportResponse{}, errStatus(http.StatusInternalServerError, "event_store_write_failed", err.Error())
 	}
+	go e.updateSessionFactsFromReport(req, now)
 
 	return types.ReportResponse{Accepted: true, RecordedAt: now}, nil
 }
@@ -1745,6 +1757,166 @@ func (e *Engine) hasCoverage(surface types.Surface) bool {
 		}
 	}
 	return false
+}
+
+func (e *Engine) sessionFactsForDecision(sessionID string) types.SessionFacts {
+	if sessionID == "" || e.stateStore == nil {
+		return types.SessionFacts{}
+	}
+	record, found, err := e.stateStore.GetSessionFacts(sessionID)
+	if err != nil || !found {
+		return types.SessionFacts{}
+	}
+	return normalizeSessionFacts(record.Facts)
+}
+
+func (e *Engine) updateSessionFactsFromReport(report types.ReportRequest, reportedAt time.Time) {
+	if e.stateStore == nil || report.DecisionID == "" {
+		return
+	}
+	decisionEvent, found, err := e.lookupDecisionEvent(report.DecisionID)
+	if err != nil || !found || decisionEvent.SessionID == "" {
+		return
+	}
+	_ = e.stateStore.UpdateSessionFacts(decisionEvent.SessionID, func(record types.SessionFactsRecord, found bool) (types.SessionFactsRecord, error) {
+		if !found {
+			record = types.SessionFactsRecord{
+				SessionID: decisionEvent.SessionID,
+				Facts: types.SessionFacts{
+					DistinctTargets:     []string{},
+					DistinctTools:       []string{},
+					DistinctReasonCodes: []string{},
+					SideEffectSequence:  []string{},
+				},
+			}
+		}
+		record.AdapterID = firstNonEmpty(record.AdapterID, report.AdapterID, decisionEvent.AdapterID, stringValue(decisionEvent.Metadata["host_id"]))
+		record.UpdatedAt = reportedAt
+		record.Facts = updateSessionFacts(record.Facts, decisionEvent, reportedAt)
+		return record, nil
+	})
+}
+
+func (e *Engine) lookupDecisionEvent(decisionID string) (types.EventEnvelope, bool, error) {
+	if e.eventStore != nil {
+		event, found, err := e.eventStore.GetEventByDecisionID(decisionID)
+		if err != nil || found {
+			return event, found, err
+		}
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for index := len(e.events) - 1; index >= 0; index-- {
+		event := e.events[index]
+		if event.DecisionID == decisionID && event.EventType == "policy_decision" {
+			return event, true, nil
+		}
+	}
+	return types.EventEnvelope{}, false, nil
+}
+
+func updateSessionFacts(facts types.SessionFacts, event types.EventEnvelope, reportedAt time.Time) types.SessionFacts {
+	facts = normalizeSessionFacts(facts)
+	facts.RequestCount++
+	switch event.Effect {
+	case types.EffectDeny, types.EffectExclusion:
+		facts.DenyCount++
+	case types.EffectApprovalRequired:
+		facts.ApprovalCount++
+	case types.EffectAllow, types.EffectAllowWithAudit:
+		facts.AllowCount++
+	}
+	facts.LastEffect = string(event.Effect)
+	if facts.FirstRequestAt == nil || facts.FirstRequestAt.IsZero() {
+		first := reportedAt
+		if !event.OccurredAt.IsZero() {
+			first = event.OccurredAt
+		}
+		facts.FirstRequestAt = &first
+	}
+	last := reportedAt
+	facts.LastRequestAt = &last
+	facts.DistinctTargets = addDistinct(facts.DistinctTargets, stringValue(event.Metadata["target_identifier"]))
+	facts.DistinctTools = addDistinct(facts.DistinctTools, stringValue(event.Metadata["tool"]))
+	facts.DistinctReasonCodes = addDistinct(facts.DistinctReasonCodes, event.Summary)
+	facts.SideEffectSequence = appendCapped(facts.SideEffectSequence, stringSliceValue(event.Metadata["side_effects"]), 20)
+	return facts
+}
+
+func normalizeSessionFacts(facts types.SessionFacts) types.SessionFacts {
+	if facts.DistinctTargets == nil {
+		facts.DistinctTargets = []string{}
+	}
+	if facts.DistinctTools == nil {
+		facts.DistinctTools = []string{}
+	}
+	if facts.DistinctReasonCodes == nil {
+		facts.DistinctReasonCodes = []string{}
+	}
+	if facts.SideEffectSequence == nil {
+		facts.SideEffectSequence = []string{}
+	}
+	return facts
+}
+
+func addDistinct(values []string, candidate string) []string {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return values
+	}
+	for _, value := range values {
+		if value == candidate {
+			return values
+		}
+	}
+	return append(values, candidate)
+}
+
+func appendCapped(values []string, additions []string, cap int) []string {
+	for _, addition := range additions {
+		if strings.TrimSpace(addition) != "" {
+			values = append(values, addition)
+		}
+	}
+	if cap > 0 && len(values) > cap {
+		values = values[len(values)-cap:]
+	}
+	return values
+}
+
+func stringValue(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	default:
+		return ""
+	}
+}
+
+func stringSliceValue(value interface{}) []string {
+	switch typed := value.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []interface{}:
+		result := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				result = append(result, text)
+			}
+		}
+		return result
+	default:
+		return nil
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (e *Engine) appendEvent(event types.EventEnvelope) error {

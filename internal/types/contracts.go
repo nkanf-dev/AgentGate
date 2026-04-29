@@ -169,6 +169,27 @@ type DecisionContext struct {
 	Raw     map[string]interface{} `json:"raw,omitempty"`
 }
 
+type SessionFactsRecord struct {
+	SessionID string       `json:"session_id"`
+	AdapterID string       `json:"adapter_id,omitempty"`
+	UpdatedAt time.Time    `json:"updated_at"`
+	Facts     SessionFacts `json:"facts"`
+}
+
+type SessionFacts struct {
+	RequestCount        int        `json:"request_count"`
+	DenyCount           int        `json:"deny_count"`
+	ApprovalCount       int        `json:"approval_count"`
+	AllowCount          int        `json:"allow_count"`
+	DistinctTargets     []string   `json:"distinct_targets"`
+	DistinctTools       []string   `json:"distinct_tools"`
+	DistinctReasonCodes []string   `json:"distinct_reason_codes"`
+	SideEffectSequence  []string   `json:"side_effect_sequence"`
+	LastEffect          string     `json:"last_effect,omitempty"`
+	LastRequestAt       *time.Time `json:"last_request_at,omitempty"`
+	FirstRequestAt      *time.Time `json:"first_request_at,omitempty"`
+}
+
 type Obligation struct {
 	Type   string                 `json:"type"`
 	Params map[string]interface{} `json:"params,omitempty"`

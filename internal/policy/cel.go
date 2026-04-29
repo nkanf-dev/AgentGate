@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/agentgate/agentgate/internal/types"
 	"github.com/google/cel-go/cel"
@@ -22,7 +23,7 @@ func compileCELCondition(expression string) error {
 	return nil
 }
 
-func evaluateCELCondition(expression string, request types.PolicyRequest) (bool, error) {
+func evaluateCELCondition(expression string, request types.PolicyRequest, sessionFacts types.SessionFacts) (bool, error) {
 	env, err := newCELEnv()
 	if err != nil {
 		return false, err
@@ -38,7 +39,7 @@ func evaluateCELCondition(expression string, request types.PolicyRequest) (bool,
 	if err != nil {
 		return false, err
 	}
-	value, _, err := program.Eval(celActivation(request))
+	value, _, err := program.Eval(celActivation(request, sessionFacts))
 	if err != nil {
 		return false, err
 	}
@@ -60,10 +61,11 @@ func newCELEnv() (*cel.Env, error) {
 		cel.Variable("content", cel.DynType),
 		cel.Variable("context", cel.DynType),
 		cel.Variable("policy", cel.DynType),
+		cel.Variable("session_facts", cel.DynType),
 	)
 }
 
-func celActivation(request types.PolicyRequest) map[string]interface{} {
+func celActivation(request types.PolicyRequest, sessionFacts types.SessionFacts) map[string]interface{} {
 	return map[string]interface{}{
 		"request_kind": string(request.RequestKind),
 		"surface":      string(request.Context.Surface),
@@ -97,7 +99,27 @@ func celActivation(request types.PolicyRequest) map[string]interface{} {
 			"raw":     request.Context.Raw,
 		},
 		"policy": request.Policy,
+		"session_facts": map[string]interface{}{
+			"request_count":         sessionFacts.RequestCount,
+			"deny_count":            sessionFacts.DenyCount,
+			"approval_count":        sessionFacts.ApprovalCount,
+			"allow_count":           sessionFacts.AllowCount,
+			"distinct_targets":      sessionFacts.DistinctTargets,
+			"distinct_tools":        sessionFacts.DistinctTools,
+			"distinct_reason_codes": sessionFacts.DistinctReasonCodes,
+			"side_effect_sequence":  sessionFacts.SideEffectSequence,
+			"last_effect":           sessionFacts.LastEffect,
+			"last_request_at":       timeString(sessionFacts.LastRequestAt),
+			"first_request_at":      timeString(sessionFacts.FirstRequestAt),
+		},
 	}
+}
+
+func timeString(value *time.Time) string {
+	if value == nil || value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
 }
 
 func dataClassStrings(values []types.DataClass) []string {

@@ -65,6 +65,75 @@ func TestSQLiteStoreEventEnvelopeRoundTrip(t *testing.T) {
 	if events[0].Surface != types.SurfaceInput || events[0].Effect != types.EffectAllowWithAudit {
 		t.Fatalf("surface/effect did not round trip: %#v", events[0])
 	}
+	decisionEvent, found, err := store.GetEventByDecisionID("dec_1")
+	if err != nil {
+		t.Fatalf("get decision event: %v", err)
+	}
+	if !found || decisionEvent.EventID != "evt_1" {
+		t.Fatalf("decision event lookup failed: found=%v event=%#v", found, decisionEvent)
+	}
+}
+
+func TestSQLiteStoreSessionFactsRoundTrip(t *testing.T) {
+	store, err := OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
+	first := now.Add(-time.Minute)
+	record := types.SessionFactsRecord{
+		SessionID: "sess_facts",
+		AdapterID: "openclaw-main",
+		UpdatedAt: now,
+		Facts: types.SessionFacts{
+			RequestCount:        2,
+			DenyCount:           1,
+			ApprovalCount:       1,
+			DistinctTargets:     []string{"api/a", "api/b"},
+			DistinctTools:       []string{"bash"},
+			DistinctReasonCodes: []string{"runtime_high_risk_requires_approval"},
+			SideEffectSequence:  []string{"network_egress"},
+			LastEffect:          "approval_required",
+			LastRequestAt:       &now,
+			FirstRequestAt:      &first,
+		},
+	}
+	if err := store.UpsertSessionFacts(record); err != nil {
+		t.Fatalf("upsert session facts: %v", err)
+	}
+	got, found, err := store.GetSessionFacts("sess_facts")
+	if err != nil {
+		t.Fatalf("get session facts: %v", err)
+	}
+	if !found {
+		t.Fatal("expected session facts")
+	}
+	if got.Facts.RequestCount != 2 || got.Facts.DenyCount != 1 || len(got.Facts.DistinctTargets) != 2 {
+		t.Fatalf("facts did not round trip: %#v", got)
+	}
+	if got.Facts.LastRequestAt == nil || !got.Facts.LastRequestAt.Equal(now) {
+		t.Fatalf("last_request_at did not round trip: %#v", got.Facts.LastRequestAt)
+	}
+	if err := store.UpdateSessionFacts("sess_facts", func(existing types.SessionFactsRecord, found bool) (types.SessionFactsRecord, error) {
+		if !found {
+			t.Fatal("expected existing session facts in update callback")
+		}
+		existing.Facts.RequestCount++
+		existing.Facts.SideEffectSequence = append(existing.Facts.SideEffectSequence, "filesystem_write")
+		existing.UpdatedAt = now.Add(time.Minute)
+		return existing, nil
+	}); err != nil {
+		t.Fatalf("update session facts: %v", err)
+	}
+	updated, found, err := store.GetSessionFacts("sess_facts")
+	if err != nil {
+		t.Fatalf("get updated session facts: %v", err)
+	}
+	if !found || updated.Facts.RequestCount != 3 || len(updated.Facts.SideEffectSequence) != 2 {
+		t.Fatalf("updated facts did not persist: found=%v record=%#v", found, updated)
+	}
 }
 
 func TestSQLiteStoreStateRoundTrip(t *testing.T) {
@@ -213,7 +282,7 @@ func TestSQLiteStorePolicyVersionLifecycle(t *testing.T) {
 		RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 		Effect:       types.EffectDeny,
 		ReasonCode:   "runtime_bash_denied",
-		When:         policy.Condition{Tools: []string{"bash"}},
+		When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
 	})
 	if _, err := store.SavePolicyVersion(second, "admin", "deny bash", 0, second.IssuedAt); err != nil {
 		t.Fatalf("save second policy: %v", err)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -410,7 +411,7 @@ func TestPublishPolicyValidatesAndAffectsDecisions(t *testing.T) {
 		RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 		Effect:       types.EffectDeny,
 		ReasonCode:   "runtime_bash_denied",
-		When:         policy.Condition{Tools: []string{"bash"}},
+		When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
 	})
 	published, err := engine.PublishPolicy(PolicyPublishRequest{
 		Bundle:     bundle,
@@ -454,7 +455,7 @@ func TestRollbackPolicyCreatesNewActiveVersion(t *testing.T) {
 		RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 		Effect:       types.EffectDeny,
 		ReasonCode:   "runtime_bash_denied",
-		When:         policy.Condition{Tools: []string{"bash"}},
+		When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
 	})
 	if _, err := engine.PublishPolicy(PolicyPublishRequest{Bundle: bundle, OperatorID: "admin"}); err != nil {
 		t.Fatalf("publish policy: %v", err)
@@ -541,6 +542,134 @@ func TestPolicyDecisionEventIncludesPolicyTraceMetadata(t *testing.T) {
 	}
 }
 
+func TestSessionFactsAreUpdatedAfterReportAndInjectedIntoCEL(t *testing.T) {
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "runtime.block.target",
+			Priority:     200,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectDeny,
+			ReasonCode:   "runtime_target_denied",
+			When:         policy.Condition{Language: "cel", Expression: `target.identifier == "blocked-api"`},
+			Obligations: []policy.Obligation{{
+				Type:   "task_control",
+				Params: map[string]interface{}{"action": "abort_task"},
+			}},
+		},
+		{
+			ID:           "runtime.session.history.approval",
+			Priority:     100,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectApprovalRequired,
+			ReasonCode:   "runtime_session_history_requires_approval",
+			When: policy.Condition{
+				Language: "cel",
+				Expression: `session_facts.deny_count >= 1 &&
+					session_facts.distinct_targets.exists(x, x == "blocked-api") &&
+					session_facts.side_effect_sequence.exists(x, x == "network_egress")`,
+			},
+		},
+	})
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(bundle))
+
+	first, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_history_first",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_history", TaskID: "task_1", AttemptID: "attempt_1"},
+		Action:      types.ActionContext{Tool: "fetch", Operation: "fetch", SideEffects: []string{"network_egress"}},
+		Target:      types.TargetContext{Kind: "api", Identifier: "blocked-api"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("first decide: %v", err)
+	}
+	if first.Effect != types.EffectDeny {
+		t.Fatalf("first effect = %q, want deny", first.Effect)
+	}
+	if _, err := engine.Report(types.ReportRequest{
+		RequestID:  first.RequestID,
+		DecisionID: first.DecisionID,
+		AdapterID:  "openclaw-main",
+		Surface:    types.SurfaceRuntime,
+		Outcome:    "blocked",
+	}); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	waitForSessionFacts(t, stateStore, "sess_history", func(facts types.SessionFacts) bool {
+		return facts.DenyCount == 1 && len(facts.SideEffectSequence) == 1
+	})
+
+	second, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_history_second",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_history", TaskID: "task_1", AttemptID: "attempt_2"},
+		Action:      types.ActionContext{Tool: "fetch", Operation: "fetch", SideEffects: []string{"network_egress"}},
+		Target:      types.TargetContext{Kind: "api", Identifier: "new-api"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("second decide: %v", err)
+	}
+	if second.Effect != types.EffectApprovalRequired || second.Explanation.PolicyTrace.SelectedRule != "runtime.session.history.approval" {
+		t.Fatalf("session facts were not injected into policy evaluation: %#v", second)
+	}
+}
+
+func TestSessionFactsIgnoreReportsWithoutDecisionEvent(t *testing.T) {
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
+
+	if _, err := engine.Report(types.ReportRequest{
+		RequestID:  "req_unknown",
+		DecisionID: "dec_unknown",
+		AdapterID:  "openclaw-main",
+		Surface:    types.SurfaceRuntime,
+		Outcome:    "blocked",
+	}); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	_, found, err := stateStore.GetSessionFacts("sess_unknown")
+	if err != nil {
+		t.Fatalf("get session facts: %v", err)
+	}
+	if found {
+		t.Fatal("report without matching decision event should not create session facts")
+	}
+}
+
+func TestSessionFactsSideEffectSequenceIsCapped(t *testing.T) {
+	facts := types.SessionFacts{}
+	for index := 0; index < 25; index++ {
+		facts = updateSessionFacts(facts, types.EventEnvelope{
+			Effect:     types.EffectAllowWithAudit,
+			Summary:    "allow",
+			Metadata:   map[string]interface{}{"side_effects": []string{fmt.Sprintf("effect_%02d", index)}},
+			OccurredAt: time.Date(2026, 4, 29, 12, index, 0, 0, time.UTC),
+		}, time.Date(2026, 4, 29, 12, index, 1, 0, time.UTC))
+	}
+	if len(facts.SideEffectSequence) != 20 {
+		t.Fatalf("side effect cap = %d, want 20: %#v", len(facts.SideEffectSequence), facts.SideEffectSequence)
+	}
+	if facts.SideEffectSequence[0] != "effect_05" || facts.SideEffectSequence[19] != "effect_24" {
+		t.Fatalf("unexpected capped sequence: %#v", facts.SideEffectSequence)
+	}
+}
+
 func TestInputSecretFailsClosedWithoutPolicyRule(t *testing.T) {
 	bundle := coreTestBundle([]policy.Rule{
 		{
@@ -550,7 +679,7 @@ func TestInputSecretFailsClosedWithoutPolicyRule(t *testing.T) {
 			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 			Effect:       types.EffectAllowWithAudit,
 			ReasonCode:   "runtime_only",
-			When:         policy.Condition{Tools: []string{"read"}},
+			When:         policy.Condition{Language: "cel", Expression: `action.tool == "read"`},
 		},
 	})
 	engine := NewEngine(WithPolicyBundle(bundle))
@@ -592,7 +721,7 @@ func TestResourceSecretFailsClosedWithoutPolicyRule(t *testing.T) {
 			RequestKinds: []types.RequestKind{types.RequestKindInput},
 			Effect:       types.EffectAllowWithAudit,
 			ReasonCode:   "input_secret_rewritten_to_handles",
-			When:         policy.Condition{DataClassesAny: []types.DataClass{types.DataClassSecret}},
+			When:         policy.Condition{Language: "cel", Expression: `content.data_classes.exists(x, x == "secret")`},
 		},
 	})
 	engine := NewEngine(WithPolicyBundle(bundle))
@@ -648,10 +777,7 @@ func TestPolicyDenyOverridesRuntimeApprovalInCore(t *testing.T) {
 		RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 		Effect:       types.EffectDeny,
 		ReasonCode:   "runtime_bash_root_denied",
-		When: policy.Condition{
-			Tools:             []string{"bash"},
-			TargetIdentifiers: []string{"root-shell"},
-		},
+		When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash" && target.identifier == "root-shell"`},
 		Obligations: []policy.Obligation{{
 			Type: "task_control",
 			Params: map[string]interface{}{
@@ -938,6 +1064,26 @@ func eventEffect(events []types.EventEnvelope, eventType string) types.Effect {
 		}
 	}
 	return ""
+}
+
+func waitForSessionFacts(t *testing.T, stateStore *store.SQLiteStore, sessionID string, ready func(types.SessionFacts) bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		record, found, err := stateStore.GetSessionFacts(sessionID)
+		if err != nil {
+			t.Fatalf("get session facts: %v", err)
+		}
+		if found && ready(record.Facts) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	record, found, err := stateStore.GetSessionFacts(sessionID)
+	if err != nil {
+		t.Fatalf("get session facts after wait: %v", err)
+	}
+	t.Fatalf("session facts not ready: found=%v record=%#v", found, record)
 }
 
 func coreTestBundle(rules []policy.Rule) policy.Bundle {

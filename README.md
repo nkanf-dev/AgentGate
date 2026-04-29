@@ -50,7 +50,7 @@ Policies are organized into **Bundles**, each containing ordered **Rules**. Acti
 | `approval_required` | Pause the attempt pending operator approval. |
 | `exclusion` | Explicit exclusion effect with block semantics. |
 
-**Conditions** can be written as structured matchers (tool, operation, side effects, target kind, taint, data class, actor) or as [CEL](https://github.com/google/cel-spec) expressions against the request fact model.
+**Conditions** are [CEL](https://github.com/google/cel-spec) expressions against the request fact model and Core-owned session facts.
 
 **Obligations** are actions executed on match: redact audit fields, rewrite input, create a SecretHandle, request approval, pause or abort a task.
 
@@ -280,7 +280,7 @@ The console connects to a live AgentGate Core instance. All data is real; there 
 
 **Approvals** - Pending approval queue. Allow once (attempt-scoped) or deny.
 
-**Policy** - Bundle and rule management. Structured condition editor and CEL editor with fact model completion. Validate, save, publish, archive.
+**Policy** - Bundle and rule management. CEL rule editor with fact model completion. Validate, save, publish, archive.
 
 **Integrations** - Integration Definition management. Live adapter matching, surface coverage, and health status (`connected` / `stale` / `missing` / `disabled`). Health is computed by Core; the console renders it.
 

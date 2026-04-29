@@ -182,19 +182,8 @@ export type ConsoleData = {
 }
 
 export type PolicyCondition = {
-  language?: "cel"
-  expression?: string
-  always?: boolean
-  tools?: string[]
-  operations?: string[]
-  side_effects_any?: string[]
-  side_effects_all?: string[]
-  open_world?: boolean
-  target_kinds?: string[]
-  target_identifiers?: string[]
-  taints_any?: string[]
-  data_classes_any?: string[]
-  actor_user_ids?: string[]
+  language: "cel"
+  expression: string
 }
 
 export type PolicyRule = {

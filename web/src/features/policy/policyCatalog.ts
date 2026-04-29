@@ -110,6 +110,11 @@ export const celSnippets = [
     label: "Injection Taint",
     expression: 'context.taints.exists(x, x == "possible_prompt_injection")',
   },
+  {
+    label: "Session Escalation",
+    expression:
+      'session_facts.deny_count > 5 && session_facts.distinct_targets.size() > 10',
+  },
 ] as const
 
 export type CelCompletionItem = {
@@ -147,6 +152,18 @@ export const celFactCompletions = [
   { label: "context.taints", type: "property", detail: "list<string>", info: "Taints such as untrusted_external or possible_prompt_injection." },
   { label: "context.raw", type: "property", detail: "map", info: "Raw context map provided by the adapter." },
   { label: "policy", type: "variable", detail: "Policy Input Map", info: "Additional context injected by policy evaluation." },
+  { label: "session_facts", type: "variable", detail: "Session History Facts", info: "Core-owned facts aggregated from reported decisions in the current session." },
+  { label: "session_facts.request_count", type: "property", detail: "int", info: "Number of reported decisions observed for this session." },
+  { label: "session_facts.deny_count", type: "property", detail: "int", info: "Reported deny or exclusion decisions observed for this session." },
+  { label: "session_facts.approval_count", type: "property", detail: "int", info: "Reported approval_required decisions observed for this session." },
+  { label: "session_facts.allow_count", type: "property", detail: "int", info: "Reported allow or allow_with_audit decisions observed for this session." },
+  { label: "session_facts.distinct_targets", type: "property", detail: "list<string>", info: "Distinct target identifiers observed in this session." },
+  { label: "session_facts.distinct_tools", type: "property", detail: "list<string>", info: "Distinct tools observed in this session." },
+  { label: "session_facts.distinct_reason_codes", type: "property", detail: "list<string>", info: "Distinct decision reason codes observed in this session." },
+  { label: "session_facts.side_effect_sequence", type: "property", detail: "list<string>", info: "Recent side effects observed in this session, capped by Core." },
+  { label: "session_facts.last_effect", type: "property", detail: "string", info: "Most recent reported decision effect." },
+  { label: "session_facts.last_request_at", type: "property", detail: "string", info: "Timestamp of the most recent reported decision." },
+  { label: "session_facts.first_request_at", type: "property", detail: "string", info: "Timestamp of the first reported decision in this session." },
 ] as const satisfies readonly CelCompletionItem[]
 
 export const celMacroCompletions = [

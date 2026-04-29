@@ -17,21 +17,23 @@ import {
   requestKindLabel,
   statusLabel,
   surfaceLabel,
-  dataClassLabel,
-  taintLabel,
 } from "@/lib/display-labels"
 import {
   defaultObligationParams,
   obligationTypeOptions,
-  policyDataClasses,
   policyRequestKinds,
-  policyTaints,
   obligationCatalog,
-  ruleFactSuggestions,
 } from "./policyCatalog"
 
 type PolicyObligation = NonNullable<PolicyRule["obligations"]>[number]
 const obligationTypes = obligationTypeOptions()
+function defaultCELCondition(): PolicyCondition {
+  return {
+    language: "cel",
+    expression: 'action.tool == "bash"',
+  }
+}
+
 const CelExpressionEditor = React.lazy(() =>
   import("./CelExpressionEditor").then((module) => ({
     default: module.CelExpressionEditor,
@@ -53,7 +55,7 @@ export function RuleEditor({
     <div className="space-y-4">
       <RuleIdentityEditor rule={rule} onChange={onChange} />
       <WhenEditor
-        condition={rule.when ?? { tools: ["bash"] }}
+        condition={rule.when ?? defaultCELCondition()}
         onChange={(when) => onChange({ when })}
       />
       <ObligationsEditor
@@ -167,131 +169,30 @@ function WhenEditor({
   condition: PolicyCondition
   onChange: (condition: PolicyCondition) => void
 }) {
-  const mode = condition.language === "cel" || condition.expression ? "cel" : "structured"
+  const expression = condition.expression ?? defaultCELCondition().expression
 
   return (
     <section className="space-y-3 rounded-md border p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <div className="text-sm font-medium">Conditions</div>
-          <div className="text-xs text-muted-foreground">Match against request facts.</div>
+          <div className="text-xs text-muted-foreground">CEL expression evaluated against request and session facts.</div>
         </div>
-        <Select
-          value={mode}
-          onValueChange={(value) => {
-            if (value === "cel") {
-              onChange({
-                language: "cel",
-                expression:
-                  condition.expression ??
-                  'action.tool == "bash" && action.side_effects.exists(x, x == "network_egress")',
-              })
-              return
-            }
-            onChange({ tools: condition.tools?.length ? condition.tools : ["bash"] })
-          }}
-        >
-          <SelectTrigger className="w-40">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="structured">Structured</SelectItem>
-            <SelectItem value="cel">CEL</SelectItem>
-          </SelectContent>
-        </Select>
+        <Badge variant="outline">CEL</Badge>
       </div>
 
-      {mode === "cel" ? (
-        <React.Suspense fallback={<div className="rounded-md border p-3 text-sm text-muted-foreground">Loading CEL editor…</div>}>
-          <CelExpressionEditor
-            value={condition.expression ?? ""}
-            onChange={(expression) =>
-              onChange({
-                ...condition,
-                language: "cel",
-                expression,
-              })
-            }
-          />
-        </React.Suspense>
-      ) : (
-        <StructuredWhenEditor condition={condition} onChange={onChange} />
-      )}
-    </section>
-  )
-}
-
-function StructuredWhenEditor({
-  condition,
-  onChange,
-}: {
-  condition: PolicyCondition
-  onChange: (condition: PolicyCondition) => void
-}) {
-  const update = (patch: Partial<PolicyCondition>) => {
-    const next = { ...condition, ...patch }
-    delete next.language
-    delete next.expression
-    onChange(removeEmptyConditionFields(next))
-  }
-
-  return (
-    <div className="space-y-4">
-      <div className="grid gap-2 sm:grid-cols-2">
-        <Select
-          value={condition.always ? "always" : "facts"}
-          onValueChange={(value) =>
-            onChange(value === "always" ? { always: true } : { tools: ["bash"] })
-          }
-        >
-          <SelectTrigger>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="facts">Match selected facts</SelectItem>
-            <SelectItem value="always">Explicit catch-all</SelectItem>
-          </SelectContent>
-        </Select>
-        <Select
-          value={
-            condition.open_world === undefined
-              ? "unset"
-              : condition.open_world
-                ? "true"
-                : "false"
-          }
-          disabled={Boolean(condition.always)}
-          onValueChange={(value) =>
-            update({
-              open_world:
-                value === "unset" ? undefined : value === "true",
+      <React.Suspense fallback={<div className="rounded-md border p-3 text-sm text-muted-foreground">Loading CEL editor…</div>}>
+        <CelExpressionEditor
+          value={expression}
+          onChange={(nextExpression) =>
+            onChange({
+              language: "cel",
+              expression: nextExpression,
             })
           }
-        >
-          <SelectTrigger>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="unset">Open world ignored</SelectItem>
-            <SelectItem value="true">Open world true</SelectItem>
-            <SelectItem value="false">Open world false</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-      <fieldset disabled={Boolean(condition.always)} className="space-y-4 disabled:opacity-50">
-        <TokenPicker title="Tools" value={condition.tools ?? []} options={ruleFactSuggestions.tools} onChange={(tools) => update({ tools })} />
-        <TokenPicker title="Operations" value={condition.operations ?? []} options={ruleFactSuggestions.operations} onChange={(operations) => update({ operations })} />
-        <TokenPicker title="Any Side Effect" value={condition.side_effects_any ?? []} options={ruleFactSuggestions.sideEffects} onChange={(side_effects_any) => update({ side_effects_any })} />
-        <TokenPicker title="All Side Effects" value={condition.side_effects_all ?? []} options={ruleFactSuggestions.sideEffects} onChange={(side_effects_all) => update({ side_effects_all })} />
-        <TokenPicker title="Target Kinds" value={condition.target_kinds ?? []} options={ruleFactSuggestions.targetKinds} onChange={(target_kinds) => update({ target_kinds })} />
-        <TokenPicker title="Taints" value={condition.taints_any ?? []} options={policyTaints} formatOption={taintLabel} onChange={(taints_any) => update({ taints_any })} />
-        <TokenPicker title="Data Classes" value={condition.data_classes_any ?? []} options={policyDataClasses} formatOption={dataClassLabel} onChange={(data_classes_any) => update({ data_classes_any })} />
-        <div className="grid gap-2 md:grid-cols-2">
-          <ListInput title="Target Identifiers" value={condition.target_identifiers ?? []} onChange={(target_identifiers) => update({ target_identifiers })} />
-          <ListInput title="Actor User IDs" value={condition.actor_user_ids ?? []} onChange={(actor_user_ids) => update({ actor_user_ids })} />
-        </div>
-      </fieldset>
-    </div>
+        />
+      </React.Suspense>
+    </section>
   )
 }
 
@@ -591,10 +492,6 @@ function commaList(value: string) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean)
-}
-
-function removeEmptyConditionFields(condition: PolicyCondition): PolicyCondition {
-  return removeEmptyObjectFields(condition) as PolicyCondition
 }
 
 function removeEmptyObjectFields<T extends Record<string, unknown>>(value: T): T {

@@ -60,19 +60,8 @@ type Rule struct {
 }
 
 type Condition struct {
-	Language          string            `json:"language,omitempty"`
-	Expression        string            `json:"expression,omitempty"`
-	Always            bool              `json:"always,omitempty"`
-	Tools             []string          `json:"tools,omitempty"`
-	Operations        []string          `json:"operations,omitempty"`
-	SideEffectsAny    []string          `json:"side_effects_any,omitempty"`
-	SideEffectsAll    []string          `json:"side_effects_all,omitempty"`
-	OpenWorld         *bool             `json:"open_world,omitempty"`
-	TargetKinds       []string          `json:"target_kinds,omitempty"`
-	TargetIdentifiers []string          `json:"target_identifiers,omitempty"`
-	TaintsAny         []types.Taint     `json:"taints_any,omitempty"`
-	DataClassesAny    []types.DataClass `json:"data_classes_any,omitempty"`
-	ActorUserIDs      []string          `json:"actor_user_ids,omitempty"`
+	Language   string `json:"language"`
+	Expression string `json:"expression"`
 }
 
 type Obligation struct {
@@ -127,7 +116,6 @@ type PathPolicy struct {
 }
 
 func DefaultBundle() Bundle {
-	trueValue := true
 	return Bundle{
 		Version:  1,
 		Status:   "active_minimal",
@@ -141,7 +129,10 @@ func DefaultBundle() Bundle {
 				RequestKinds: []types.RequestKind{types.RequestKindInput},
 				Effect:       types.EffectAllowWithAudit,
 				ReasonCode:   "input_secret_rewritten_to_handles",
-				When:         Condition{DataClassesAny: []types.DataClass{types.DataClassSecret}},
+				When: Condition{
+					Language:   "cel",
+					Expression: `content.data_classes.exists(x, x == "secret")`,
+				},
 			},
 			{
 				ID:           "runtime.bash.requires_approval",
@@ -151,7 +142,10 @@ func DefaultBundle() Bundle {
 				RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "runtime_high_risk_requires_approval",
-				When:         Condition{Tools: []string{"bash"}},
+				When: Condition{
+					Language:   "cel",
+					Expression: `action.tool == "bash"`,
+				},
 			},
 			{
 				ID:           "runtime.open_world.requires_approval",
@@ -161,7 +155,10 @@ func DefaultBundle() Bundle {
 				RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "runtime_high_risk_requires_approval",
-				When:         Condition{OpenWorld: &trueValue},
+				When: Condition{
+					Language:   "cel",
+					Expression: `action.open_world == true`,
+				},
 			},
 			{
 				ID:           "runtime.side_effect.requires_approval",
@@ -171,12 +168,10 @@ func DefaultBundle() Bundle {
 				RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "runtime_high_risk_requires_approval",
-				When: Condition{SideEffectsAny: []string{
-					"filesystem_write",
-					"network_egress",
-					"process_spawn",
-					"secret_resolve",
-				}},
+				When: Condition{
+					Language:   "cel",
+					Expression: `action.side_effects.exists(x, x in ["filesystem_write", "network_egress", "process_spawn", "secret_resolve"])`,
+				},
 			},
 			{
 				ID:           "resource.secret_handle.resolve",
@@ -187,8 +182,8 @@ func DefaultBundle() Bundle {
 				Effect:       types.EffectAllowWithAudit,
 				ReasonCode:   "secret_handle_resolve_allowed",
 				When: Condition{
-					Operations:  []string{"resolve_secret_handle"},
-					TargetKinds: []string{"secret_handle"},
+					Language:   "cel",
+					Expression: `action.operation == "resolve_secret_handle" && target.kind == "secret_handle"`,
 				},
 			},
 		},
@@ -316,7 +311,7 @@ func (b Bundle) StatusValue() string {
 	return "active"
 }
 
-func (b Bundle) Evaluate(request types.PolicyRequest) Evaluation {
+func (b Bundle) Evaluate(request types.PolicyRequest, sessionFacts ...types.SessionFacts) Evaluation {
 	return EvaluateBundles([]Bundle{
 		{
 			BundleID:       "default",
@@ -332,10 +327,10 @@ func (b Bundle) Evaluate(request types.PolicyRequest) Evaluation {
 			EgressPolicy:   b.EgressPolicy,
 			PathPolicy:     b.PathPolicy,
 		},
-	}, request)
+	}, request, sessionFacts...)
 }
 
-func EvaluateBundles(bundles []Bundle, request types.PolicyRequest) Evaluation {
+func EvaluateBundles(bundles []Bundle, request types.PolicyRequest, sessionFacts ...types.SessionFacts) Evaluation {
 	if !validRequestKind(request.RequestKind) || !validSurface(request.Context.Surface) {
 		return Evaluation{
 			Effect:       types.EffectDeny,
@@ -364,7 +359,7 @@ func EvaluateBundles(bundles []Bundle, request types.PolicyRequest) Evaluation {
 		}
 		activeBundleSeen = true
 		for _, rule := range bundle.Rules {
-			matches, err := ruleMatches(rule, request)
+			matches, err := ruleMatches(rule, request, firstSessionFacts(sessionFacts))
 			if err != nil {
 				return Evaluation{
 					Effect:       types.EffectDeny,
@@ -475,7 +470,7 @@ func (b Bundle) RequiresRuntimeApproval(request types.PolicyRequest) bool {
 	return b.Evaluate(request).Effect == types.EffectApprovalRequired
 }
 
-func ruleMatches(rule Rule, request types.PolicyRequest) (bool, error) {
+func ruleMatches(rule Rule, request types.PolicyRequest, sessionFacts types.SessionFacts) (bool, error) {
 	if rule.Surface != request.Context.Surface {
 		return false, nil
 	}
@@ -483,47 +478,11 @@ func ruleMatches(rule Rule, request types.PolicyRequest) (bool, error) {
 		return false, nil
 	}
 	condition := rule.When
-	if condition.Always {
-		return true, nil
+	matches, err := evaluateCELCondition(condition.Expression, request, sessionFacts)
+	if err != nil {
+		return false, err
 	}
-	if len(condition.Tools) > 0 && !containsStringPattern(condition.Tools, request.Action.Tool) {
-		return false, nil
-	}
-	if len(condition.Operations) > 0 && !containsStringPattern(condition.Operations, request.Action.Operation) {
-		return false, nil
-	}
-	if len(condition.SideEffectsAny) > 0 && !intersectsString(condition.SideEffectsAny, request.Action.SideEffects) {
-		return false, nil
-	}
-	if len(condition.SideEffectsAll) > 0 && !containsAllString(request.Action.SideEffects, condition.SideEffectsAll) {
-		return false, nil
-	}
-	if condition.OpenWorld != nil && request.Action.OpenWorld != *condition.OpenWorld {
-		return false, nil
-	}
-	if len(condition.TargetKinds) > 0 && !containsStringPattern(condition.TargetKinds, request.Target.Kind) {
-		return false, nil
-	}
-	if len(condition.TargetIdentifiers) > 0 && !containsStringPattern(condition.TargetIdentifiers, request.Target.Identifier) {
-		return false, nil
-	}
-	if len(condition.TaintsAny) > 0 && !intersectsTaint(condition.TaintsAny, request.Context.Taints) {
-		return false, nil
-	}
-	if len(condition.DataClassesAny) > 0 && !intersectsDataClass(condition.DataClassesAny, request.Content.DataClasses) {
-		return false, nil
-	}
-	if len(condition.ActorUserIDs) > 0 && !containsStringPattern(condition.ActorUserIDs, request.Actor.UserID) {
-		return false, nil
-	}
-	if strings.TrimSpace(condition.Expression) != "" {
-		matches, err := evaluateCELCondition(condition.Expression, request)
-		if err != nil {
-			return false, err
-		}
-		return matches, nil
-	}
-	return true, nil
+	return matches, nil
 }
 
 func compatibleObligations(selected types.Effect, candidate types.Effect) bool {
@@ -599,56 +558,27 @@ func containsRequestKind(values []types.RequestKind, candidate types.RequestKind
 	return false
 }
 
-func containsStringPattern(patterns []string, candidate string) bool {
-	if candidate == "" {
-		return false
+func firstSessionFacts(values []types.SessionFacts) types.SessionFacts {
+	if len(values) == 0 {
+		return normalizeSessionFacts(types.SessionFacts{})
 	}
-	for _, pattern := range patterns {
-		if pattern == "*" || strings.EqualFold(pattern, candidate) {
-			return true
-		}
-	}
-	return false
+	return normalizeSessionFacts(values[0])
 }
 
-func intersectsString(left []string, right []string) bool {
-	for _, candidate := range right {
-		if containsStringPattern(left, candidate) {
-			return true
-		}
+func normalizeSessionFacts(facts types.SessionFacts) types.SessionFacts {
+	if facts.DistinctTargets == nil {
+		facts.DistinctTargets = []string{}
 	}
-	return false
-}
-
-func containsAllString(values []string, required []string) bool {
-	for _, value := range required {
-		if !containsStringPattern(values, value) {
-			return false
-		}
+	if facts.DistinctTools == nil {
+		facts.DistinctTools = []string{}
 	}
-	return true
-}
-
-func intersectsTaint(left []types.Taint, right []types.Taint) bool {
-	for _, l := range left {
-		for _, r := range right {
-			if l == r {
-				return true
-			}
-		}
+	if facts.DistinctReasonCodes == nil {
+		facts.DistinctReasonCodes = []string{}
 	}
-	return false
-}
-
-func intersectsDataClass(left []types.DataClass, right []types.DataClass) bool {
-	for _, l := range left {
-		for _, r := range right {
-			if l == r {
-				return true
-			}
-		}
+	if facts.SideEffectSequence == nil {
+		facts.SideEffectSequence = []string{}
 	}
-	return false
+	return facts
 }
 
 func validSurface(surface types.Surface) bool {
@@ -688,84 +618,14 @@ func validEffect(effect types.Effect) bool {
 }
 
 func validateCondition(ruleID string, condition Condition) error {
-	if condition.Always && !conditionOnlyAlways(condition) {
-		return fmt.Errorf("rule %q condition always cannot be combined with other match fields", ruleID)
-	}
-	if !condition.Always && conditionEmpty(condition) {
-		return fmt.Errorf("rule %q condition must be explicit; use always:true for intentional catch-all", ruleID)
-	}
-	if condition.Language != "" && condition.Language != "cel" {
+	if condition.Language != "cel" {
 		return fmt.Errorf("rule %q condition language %q is unsupported", ruleID, condition.Language)
 	}
-	if condition.Language == "cel" && strings.TrimSpace(condition.Expression) == "" {
+	if strings.TrimSpace(condition.Expression) == "" {
 		return fmt.Errorf("rule %q condition language cel requires expression", ruleID)
 	}
-	if condition.Language == "" && strings.TrimSpace(condition.Expression) != "" {
-		return fmt.Errorf("rule %q condition expression requires language", ruleID)
-	}
-	if condition.Language == "cel" {
-		if err := compileCELCondition(condition.Expression); err != nil {
-			return fmt.Errorf("rule %q condition cel expression invalid: %w", ruleID, err)
-		}
-	}
-	checks := []struct {
-		name   string
-		values []string
-	}{
-		{name: "tools", values: condition.Tools},
-		{name: "operations", values: condition.Operations},
-		{name: "side_effects_any", values: condition.SideEffectsAny},
-		{name: "side_effects_all", values: condition.SideEffectsAll},
-		{name: "target_kinds", values: condition.TargetKinds},
-		{name: "target_identifiers", values: condition.TargetIdentifiers},
-		{name: "actor_user_ids", values: condition.ActorUserIDs},
-	}
-	for _, check := range checks {
-		if err := validateStringList(ruleID, check.name, check.values); err != nil {
-			return err
-		}
-	}
-	if err := validateTaintList(ruleID, condition.TaintsAny); err != nil {
-		return err
-	}
-	if err := validateDataClassList(ruleID, condition.DataClassesAny); err != nil {
-		return err
-	}
-	return nil
-}
-
-func conditionOnlyAlways(condition Condition) bool {
-	empty := condition
-	empty.Always = false
-	return conditionEmpty(empty)
-}
-
-func conditionEmpty(condition Condition) bool {
-	return condition.Language == "" &&
-		strings.TrimSpace(condition.Expression) == "" &&
-		len(condition.Tools) == 0 &&
-		len(condition.Operations) == 0 &&
-		len(condition.SideEffectsAny) == 0 &&
-		len(condition.SideEffectsAll) == 0 &&
-		condition.OpenWorld == nil &&
-		len(condition.TargetKinds) == 0 &&
-		len(condition.TargetIdentifiers) == 0 &&
-		len(condition.TaintsAny) == 0 &&
-		len(condition.DataClassesAny) == 0 &&
-		len(condition.ActorUserIDs) == 0
-}
-
-func validateStringList(ruleID string, field string, values []string) error {
-	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		if value == "" || strings.TrimSpace(value) != value {
-			return fmt.Errorf("rule %q condition %s contains blank or padded value", ruleID, field)
-		}
-		normalized := strings.ToLower(value)
-		if _, exists := seen[normalized]; exists {
-			return fmt.Errorf("rule %q condition %s contains duplicate value %q", ruleID, field, value)
-		}
-		seen[normalized] = struct{}{}
+	if err := compileCELCondition(condition.Expression); err != nil {
+		return fmt.Errorf("rule %q condition cel expression invalid: %w", ruleID, err)
 	}
 	return nil
 }
@@ -791,38 +651,6 @@ func validateObligationCompatibility(rule Rule, obligation Obligation) error {
 		default:
 			return fmt.Errorf("rule %q has unsupported task_control action %q", rule.ID, action)
 		}
-	}
-	return nil
-}
-
-func validateTaintList(ruleID string, values []types.Taint) error {
-	seen := make(map[types.Taint]struct{}, len(values))
-	for _, value := range values {
-		switch value {
-		case types.TaintUntrustedExternal, types.TaintPossibleInjection, types.TaintEmbeddedInstruction, types.TaintSecretBearing:
-		default:
-			return fmt.Errorf("rule %q condition taints_any has unsupported taint %q", ruleID, value)
-		}
-		if _, exists := seen[value]; exists {
-			return fmt.Errorf("rule %q condition taints_any contains duplicate value %q", ruleID, value)
-		}
-		seen[value] = struct{}{}
-	}
-	return nil
-}
-
-func validateDataClassList(ruleID string, values []types.DataClass) error {
-	seen := make(map[types.DataClass]struct{}, len(values))
-	for _, value := range values {
-		switch value {
-		case types.DataClassPII, types.DataClassSecret, types.DataClassBusiness, types.DataClassFinancial, types.DataClassCredential:
-		default:
-			return fmt.Errorf("rule %q condition data_classes_any has unsupported data class %q", ruleID, value)
-		}
-		if _, exists := seen[value]; exists {
-			return fmt.Errorf("rule %q condition data_classes_any contains duplicate value %q", ruleID, value)
-		}
-		seen[value] = struct{}{}
 	}
 	return nil
 }

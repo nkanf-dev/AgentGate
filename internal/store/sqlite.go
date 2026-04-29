@@ -146,6 +146,13 @@ CREATE TABLE IF NOT EXISTS secret_handles (
 	created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS session_facts (
+	session_id TEXT PRIMARY KEY,
+	adapter_id TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	facts JSON NOT NULL DEFAULT '{}'
+);
+
 CREATE TABLE IF NOT EXISTS policy_versions (
 	version INTEGER PRIMARY KEY,
 	bundle_json TEXT NOT NULL,
@@ -462,6 +469,73 @@ LIMIT ?
 	return events, nil
 }
 
+func (s *SQLiteStore) GetEventByDecisionID(decisionID string) (types.EventEnvelope, bool, error) {
+	row := s.db.QueryRowContext(context.Background(), `
+SELECT
+	event_id,
+	event_type,
+	COALESCE(request_id, ''),
+	COALESCE(decision_id, ''),
+	COALESCE(session_id, ''),
+	COALESCE(adapter_id, ''),
+	COALESCE(surface, ''),
+	COALESCE(effect, ''),
+	summary,
+	metadata_json,
+	occurred_at
+FROM event_envelopes
+WHERE decision_id = ? AND event_type = 'policy_decision'
+ORDER BY occurred_at DESC, created_at DESC
+LIMIT 1
+`, decisionID)
+	event, err := scanEvent(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return types.EventEnvelope{}, false, nil
+		}
+		return types.EventEnvelope{}, false, fmt.Errorf("get event by decision id: %w", err)
+	}
+	return event, true, nil
+}
+
+type eventScanner interface {
+	Scan(dest ...interface{}) error
+}
+
+func scanEvent(scanner eventScanner) (types.EventEnvelope, error) {
+	var event types.EventEnvelope
+	var surface string
+	var effect string
+	var metadataJSON string
+	var occurredAt string
+	if err := scanner.Scan(
+		&event.EventID,
+		&event.EventType,
+		&event.RequestID,
+		&event.DecisionID,
+		&event.SessionID,
+		&event.AdapterID,
+		&surface,
+		&effect,
+		&event.Summary,
+		&metadataJSON,
+		&occurredAt,
+	); err != nil {
+		return types.EventEnvelope{}, err
+	}
+	event.Surface = types.Surface(surface)
+	event.Effect = types.Effect(effect)
+	if err := json.Unmarshal([]byte(metadataJSON), &event.Metadata); err != nil {
+		return types.EventEnvelope{}, fmt.Errorf("unmarshal event metadata: %w", err)
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, occurredAt)
+	if err != nil {
+		return types.EventEnvelope{}, fmt.Errorf("parse event time: %w", err)
+	}
+	event.OccurredAt = parsed
+	return event, nil
+}
+
 func (s *SQLiteStore) SaveApproval(approval types.ApprovalRecord) error {
 	var resolvedAt interface{}
 	if approval.ResolvedAt != nil {
@@ -628,6 +702,131 @@ WHERE session_id = ? AND task_id = ? AND attempt_id = ?
 	}
 	grant.ExpiresAt = parsed
 	return grant, true, nil
+}
+
+func (s *SQLiteStore) GetSessionFacts(sessionID string) (types.SessionFactsRecord, bool, error) {
+	row := s.db.QueryRowContext(context.Background(), `
+SELECT
+	session_id,
+	adapter_id,
+	updated_at,
+	facts
+FROM session_facts
+WHERE session_id = ?
+`, sessionID)
+	var record types.SessionFactsRecord
+	var updatedAt string
+	var factsJSON string
+	if err := row.Scan(&record.SessionID, &record.AdapterID, &updatedAt, &factsJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return types.SessionFactsRecord{}, false, nil
+		}
+		return types.SessionFactsRecord{}, false, fmt.Errorf("get session facts: %w", err)
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, updatedAt)
+	if err != nil {
+		return types.SessionFactsRecord{}, false, fmt.Errorf("parse session facts updated_at: %w", err)
+	}
+	record.UpdatedAt = parsed
+	if err := json.Unmarshal([]byte(factsJSON), &record.Facts); err != nil {
+		return types.SessionFactsRecord{}, false, fmt.Errorf("unmarshal session facts: %w", err)
+	}
+	return record, true, nil
+}
+
+func (s *SQLiteStore) UpsertSessionFacts(record types.SessionFactsRecord) error {
+	factsJSON, err := json.Marshal(record.Facts)
+	if err != nil {
+		return fmt.Errorf("marshal session facts: %w", err)
+	}
+	_, err = s.db.ExecContext(context.Background(), `
+INSERT INTO session_facts (
+	session_id,
+	adapter_id,
+	updated_at,
+	facts
+) VALUES (?, ?, ?, ?)
+ON CONFLICT(session_id) DO UPDATE SET
+	adapter_id = excluded.adapter_id,
+	updated_at = excluded.updated_at,
+	facts = excluded.facts
+`, record.SessionID, record.AdapterID, record.UpdatedAt.Format(time.RFC3339Nano), string(factsJSON))
+	if err != nil {
+		return fmt.Errorf("upsert session facts: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UpdateSessionFacts(sessionID string, update func(types.SessionFactsRecord, bool) (types.SessionFactsRecord, error)) error {
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return fmt.Errorf("begin session facts update: %w", err)
+	}
+	defer tx.Rollback()
+
+	record, found, err := getSessionFactsTx(tx, sessionID)
+	if err != nil {
+		return err
+	}
+	next, err := update(record, found)
+	if err != nil {
+		return err
+	}
+	if next.SessionID == "" {
+		next.SessionID = sessionID
+	}
+	factsJSON, err := json.Marshal(next.Facts)
+	if err != nil {
+		return fmt.Errorf("marshal session facts: %w", err)
+	}
+	if _, err := tx.ExecContext(context.Background(), `
+INSERT INTO session_facts (
+	session_id,
+	adapter_id,
+	updated_at,
+	facts
+) VALUES (?, ?, ?, ?)
+ON CONFLICT(session_id) DO UPDATE SET
+	adapter_id = excluded.adapter_id,
+	updated_at = excluded.updated_at,
+	facts = excluded.facts
+`, next.SessionID, next.AdapterID, next.UpdatedAt.Format(time.RFC3339Nano), string(factsJSON)); err != nil {
+		return fmt.Errorf("upsert session facts: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit session facts update: %w", err)
+	}
+	return nil
+}
+
+func getSessionFactsTx(tx *sql.Tx, sessionID string) (types.SessionFactsRecord, bool, error) {
+	row := tx.QueryRowContext(context.Background(), `
+SELECT
+	session_id,
+	adapter_id,
+	updated_at,
+	facts
+FROM session_facts
+WHERE session_id = ?
+`, sessionID)
+	var record types.SessionFactsRecord
+	var updatedAt string
+	var factsJSON string
+	if err := row.Scan(&record.SessionID, &record.AdapterID, &updatedAt, &factsJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return types.SessionFactsRecord{}, false, nil
+		}
+		return types.SessionFactsRecord{}, false, fmt.Errorf("get session facts: %w", err)
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, updatedAt)
+	if err != nil {
+		return types.SessionFactsRecord{}, false, fmt.Errorf("parse session facts updated_at: %w", err)
+	}
+	record.UpdatedAt = parsed
+	if err := json.Unmarshal([]byte(factsJSON), &record.Facts); err != nil {
+		return types.SessionFactsRecord{}, false, fmt.Errorf("unmarshal session facts: %w", err)
+	}
+	return record, true, nil
 }
 
 func (s *SQLiteStore) SaveSecretHandle(handle types.SecretHandle, value string) error {

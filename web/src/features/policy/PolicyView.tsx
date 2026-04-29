@@ -209,7 +209,7 @@ export function PolicyView({ config }: { config: ConsoleConfig }) {
       request_kinds: ["tool_attempt"],
       effect: "approval_required",
       reason_code: "runtime_requires_approval",
-      when: { tools: ["bash"] },
+      when: { language: "cel", expression: 'action.tool == "bash"' },
     }
     const next = { ...bundle, rules: [...bundle.rules, nextRule] }
     setSelectedRuleIndex(next.rules.length - 1)

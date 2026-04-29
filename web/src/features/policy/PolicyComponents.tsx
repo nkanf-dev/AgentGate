@@ -216,7 +216,7 @@ export function newPolicyBundle(): PolicyBundle {
         request_kinds: ["tool_attempt"],
         effect: "approval_required",
         reason_code: "runtime_high_risk_requires_approval",
-        when: { tools: ["bash"] },
+        when: { language: "cel", expression: 'action.tool == "bash"' },
       },
     ],
     input_policy: { secret_mode: "secret_handle" },
