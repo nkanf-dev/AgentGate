@@ -1,33 +1,30 @@
-import http from "node:http";
 import * as lark from "@larksuiteoapi/node-sdk";
-import type { InteractiveCardActionEvent } from "@larksuiteoapi/node-sdk";
+import type { CardActionEvent, NormalizedMessage } from "@larksuiteoapi/node-sdk";
 
 import { AgentGateHTTPError, AgentGateTransportClient } from "./agentgate.js";
 import { buildApprovalCard, buildResolvedCard } from "./card.js";
 import type { ApprovalCardPayload, ApprovalRecord, EventEnvelope, FeishuApprovalAdapterConfig } from "./types.js";
 
+const APPROVAL_COMMAND = /^\/?(approve|allow|deny)\s+([A-Za-z0-9._:-]+)\s*$/i;
+
 export class FeishuApprovalAdapter {
-  private readonly config: Required<
-    Pick<
-      FeishuApprovalAdapterConfig,
-      "adapterId" | "domain" | "cardCallbackPath" | "cardCallbackPort" | "pollIntervalMs"
-    >
-  > &
+  private readonly config: Required<Pick<FeishuApprovalAdapterConfig, "adapterId" | "domain" | "pollIntervalMs">> &
     FeishuApprovalAdapterConfig;
   private readonly agentGate: AgentGateTransportClient;
   private readonly client: lark.Client;
+  private readonly channel: lark.LarkChannel;
   private readonly sentApprovals = new Set<string>();
+  private readonly approvalMessages = new Map<string, string>();
+  private readonly resolvedApprovals = new Set<string>();
   private pollTimer: ReturnType<typeof setTimeout> | undefined;
-  private server: http.Server | undefined;
 
   constructor(config: FeishuApprovalAdapterConfig) {
     this.config = {
       domain: "feishu",
-      cardCallbackPath: "/feishu/card",
-      cardCallbackPort: 8787,
       pollIntervalMs: 2000,
       ...config,
     };
+    const domain = this.config.domain === "lark" ? lark.Domain.Lark : lark.Domain.Feishu;
     this.agentGate = new AgentGateTransportClient({
       baseUrl: this.config.agentGateBaseUrl,
       adapterToken: this.config.adapterToken,
@@ -37,13 +34,36 @@ export class FeishuApprovalAdapter {
       appId: this.config.appId,
       appSecret: this.config.appSecret,
       appType: lark.AppType.SelfBuild,
-      domain: this.config.domain === "lark" ? lark.Domain.Lark : lark.Domain.Feishu,
+      domain,
+    });
+    this.channel = lark.createLarkChannel({
+      appId: this.config.appId,
+      appSecret: this.config.appSecret,
+      domain,
+      transport: "websocket",
+      includeRawInMessage: true,
+      policy: {
+        groupAllowlist: [this.config.receiveId],
+        dmMode: "disabled",
+        requireMention: false,
+      },
+    });
+    this.channel.on("cardAction", (event) => void this.handleCardActionEvent(event));
+    this.channel.on("message", (message) => void this.handleMessage(message));
+    this.channel.on("error", (error) => {
+      console.error("[agentgate-feishu] channel error:", error);
+    });
+    this.channel.on("reconnecting", () => {
+      console.warn("[agentgate-feishu] reconnecting to Feishu long connection");
+    });
+    this.channel.on("reconnected", () => {
+      console.log("[agentgate-feishu] Feishu long connection reconnected");
     });
   }
 
   async start(): Promise<void> {
     await this.agentGate.registerFeishuTransport(this.config.adapterId, this.config.integrationId);
-    this.startCardCallbackServer();
+    await this.channel.connect();
     await this.pollOnce();
     this.schedulePoll();
   }
@@ -53,27 +73,33 @@ export class FeishuApprovalAdapter {
       clearTimeout(this.pollTimer);
       this.pollTimer = undefined;
     }
-    if (this.server !== undefined) {
-      await new Promise<void>((resolve, reject) => {
-        this.server?.close((error?: Error) => (error ? reject(error) : resolve()));
-      });
-      this.server = undefined;
-    }
+    await this.channel.disconnect();
   }
 
   async pollOnce(): Promise<void> {
     const approvals = await this.agentGate.approvals();
     for (const approval of approvals) {
+      if (approval.channel && approval.channel !== this.config.adapterId) {
+        continue;
+      }
       const payload = approvalPayloadFromApproval(approval);
       if (payload === undefined || this.sentApprovals.has(payload.approvalId)) {
         continue;
       }
-      await this.sendApprovalCard(payload);
+      const messageId = await this.sendApprovalCard(payload);
       this.sentApprovals.add(payload.approvalId);
+      if (messageId) {
+        this.approvalMessages.set(payload.approvalId, messageId);
+      }
     }
   }
 
   async sendApprovalCard(payload: ApprovalCardPayload): Promise<string | undefined> {
+    console.log("[agentgate-feishu] sending approval card", {
+      approvalId: payload.approvalId,
+      sessionId: payload.sessionId,
+      taskId: payload.taskId,
+    });
     const response = await this.client.im.message.create({
       params: {
         receive_id_type: this.config.receiveIdType,
@@ -89,36 +115,142 @@ export class FeishuApprovalAdapter {
     return data?.message_id;
   }
 
-  private startCardCallbackServer(): void {
-    const handler = new lark.CardActionHandler(
-      {
-        encryptKey: this.config.encryptKey,
-        verificationToken: this.config.verificationToken,
-      },
-      async (event: InteractiveCardActionEvent) => this.handleCardAction(event),
-    );
-    this.server = http.createServer();
-    this.server.on("request", lark.adaptDefault(this.config.cardCallbackPath, handler));
-    this.server.listen(this.config.cardCallbackPort);
+  private async handleCardActionEvent(event: CardActionEvent): Promise<void> {
+    console.log("[agentgate-feishu] received card action", {
+      messageId: event.messageId,
+      chatId: event.chatId,
+      operatorOpenId: event.operator.openId,
+      action: event.action,
+    });
+    const value = objectValue(event.action.value);
+    const approvalId = stringValue(value.approval_id);
+    const decision = normalizeDecision(value.decision);
+    const operatorId = event.operator.openId || event.operator.userId || "feishu-user";
+    if (approvalId === undefined || decision === undefined) {
+      return;
+    }
+    await this.resolveAndUpdate(approvalId, decision, operatorId);
   }
 
-  private async handleCardAction(event: InteractiveCardActionEvent): Promise<Record<string, unknown>> {
-    const value = actionValue(event);
-    const approvalId = stringValue(value.approval_id);
-    const decision = value.decision === "allow_once" ? "allow_once" : value.decision === "deny" ? "deny" : undefined;
-    const operatorId = cardOperatorId(event);
-    if (approvalId === undefined || decision === undefined) {
-      return buildResolvedCard("denied", operatorId);
+  private async handleMessage(message: NormalizedMessage): Promise<void> {
+    console.log("[agentgate-feishu] received message", {
+      messageId: message.messageId,
+      chatId: message.chatId,
+      chatType: message.chatType,
+      senderId: message.senderId,
+      content: message.content,
+      mentionedBot: message.mentionedBot,
+    });
+    if (message.chatId !== this.config.receiveId) {
+      return;
+    }
+    const match = message.content.trim().match(APPROVAL_COMMAND);
+    if (!match) {
+      return;
+    }
+    const decision = match[1].toLowerCase() === "deny" ? "deny" : "allow_once";
+    const approvalId = match[2];
+    const operatorId = message.senderId || "feishu-user";
+    try {
+      const status = await this.resolveAndUpdate(approvalId, decision, operatorId);
+      await this.channel.send(this.config.receiveId, {
+        text:
+          status === "approved"
+            ? `Approval ${approvalId} approved by ${operatorId}.`
+            : status === "expired"
+              ? `Approval ${approvalId} has already expired.`
+              : `Approval ${approvalId} denied by ${operatorId}.`,
+      });
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : String(error);
+      console.error("[agentgate-feishu] message approval command failed", {
+        approvalId,
+        decision,
+        operatorId,
+        error: messageText,
+      });
+      await this.channel.send(this.config.receiveId, {
+        text: `Approval ${approvalId} could not be resolved: ${messageText}`,
+      });
+    }
+  }
+
+  private async resolveAndUpdate(
+    approvalId: string,
+    decision: "allow_once" | "deny",
+    operatorId: string,
+  ): Promise<"approved" | "denied" | "expired"> {
+    console.log("[agentgate-feishu] resolving approval", {
+      approvalId,
+      decision,
+      operatorId,
+    });
+    try {
+      const result = await this.agentGate.resolveApproval(approvalId, decision, operatorId);
+      const status = result.status === "approved" ? "approved" : result.status === "expired" ? "expired" : "denied";
+      console.log("[agentgate-feishu] approval resolved", {
+        approvalId,
+        decision,
+        operatorId,
+        status,
+      });
+      await this.updateApprovalCard(approvalId, status, operatorId);
+      return status;
+    } catch (error) {
+      if (error instanceof AgentGateHTTPError && error.code === "approval_expired") {
+        console.warn("[agentgate-feishu] approval already expired", {
+          approvalId,
+          operatorId,
+        });
+        await this.updateApprovalCard(approvalId, "expired", operatorId);
+        return "expired";
+      }
+      if (error instanceof AgentGateHTTPError && error.code === "approval_already_resolved") {
+        console.warn("[agentgate-feishu] approval already resolved", {
+          approvalId,
+          operatorId,
+        });
+        return "denied";
+      }
+      throw error;
+    }
+  }
+
+  private async updateApprovalCard(
+    approvalId: string,
+    status: "approved" | "denied" | "expired",
+    operatorId: string,
+  ): Promise<void> {
+    if (this.resolvedApprovals.has(approvalId)) {
+      return;
+    }
+    const messageId = this.approvalMessages.get(approvalId);
+    this.resolvedApprovals.add(approvalId);
+    if (messageId) {
+      try {
+        await this.channel.recallMessage(messageId);
+      } catch (error) {
+        console.warn(`[agentgate-feishu] failed to recall approval card ${approvalId}:`, error);
+      }
     }
 
     try {
-      const result = await this.agentGate.resolveApproval(approvalId, decision, operatorId);
-      return buildResolvedCard(result.status === "approved" ? "approved" : result.status === "expired" ? "expired" : "denied", operatorId);
-    } catch (error) {
-      if (error instanceof AgentGateHTTPError && error.code === "approval_expired") {
-        return buildResolvedCard("expired", operatorId);
+      const response = await this.client.im.message.create({
+        params: {
+          receive_id_type: this.config.receiveIdType,
+        },
+        data: {
+          receive_id: this.config.receiveId,
+          msg_type: "interactive",
+          content: JSON.stringify(buildResolvedCard(status, operatorId)),
+        },
+      });
+      const resolvedMessageId = (response.data as { message_id?: string } | undefined)?.message_id;
+      if (resolvedMessageId) {
+        this.approvalMessages.set(approvalId, resolvedMessageId);
       }
-      throw error;
+    } catch (error) {
+      console.warn(`[agentgate-feishu] failed to send resolved approval card ${approvalId}:`, error);
     }
   }
 
@@ -126,6 +258,8 @@ export class FeishuApprovalAdapter {
     this.pollTimer = setTimeout(async () => {
       try {
         await this.pollOnce();
+      } catch (error) {
+        console.error("[agentgate-feishu] poll failed:", error);
       } finally {
         this.schedulePoll();
       }
@@ -173,23 +307,12 @@ export function approvalPayloadFromEvent(event: EventEnvelope): ApprovalCardPayl
   };
 }
 
-function actionValue(event: InteractiveCardActionEvent): Record<string, unknown> {
-  const candidate = (event as { action?: { value?: unknown } }).action?.value;
-  return typeof candidate === "object" && candidate !== null && !Array.isArray(candidate)
-    ? (candidate as Record<string, unknown>)
-    : {};
+function normalizeDecision(value: unknown): "allow_once" | "deny" | undefined {
+  return value === "allow_once" ? "allow_once" : value === "deny" ? "deny" : undefined;
 }
 
-function cardOperatorId(event: InteractiveCardActionEvent): string {
-  const operator = (event as { operator?: Record<string, unknown>; user?: Record<string, unknown> }).operator ?? {};
-  const user = (event as { user?: Record<string, unknown> }).user ?? {};
-  return (
-    stringValue(operator.open_id) ??
-    stringValue(operator.user_id) ??
-    stringValue(user.open_id) ??
-    stringValue(user.user_id) ??
-    "feishu-user"
-  );
+function objectValue(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 function stringValue(value: unknown): string | undefined {

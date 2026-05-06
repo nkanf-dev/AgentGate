@@ -9,9 +9,7 @@ process.on("SIGINT", () => void shutdown());
 process.on("SIGTERM", () => void shutdown());
 
 await adapter.start();
-console.log(
-  `AgentGate Feishu adapter started on :${config.cardCallbackPort ?? 8787}${config.cardCallbackPath ?? "/feishu/card"}`,
-);
+console.log("AgentGate Feishu adapter started with Feishu long connection transport");
 
 async function shutdown(): Promise<void> {
   await adapter.stop();
@@ -30,10 +28,6 @@ function readConfig(): FeishuApprovalAdapterConfig {
     receiveId: requiredEnv("FEISHU_RECEIVE_ID"),
     receiveIdType: (env("FEISHU_RECEIVE_ID_TYPE") ?? "chat_id") as FeishuApprovalAdapterConfig["receiveIdType"],
     domain: (env("FEISHU_DOMAIN") ?? "feishu") as FeishuApprovalAdapterConfig["domain"],
-    encryptKey: env("FEISHU_ENCRYPT_KEY"),
-    verificationToken: env("FEISHU_VERIFICATION_TOKEN"),
-    cardCallbackPath: env("FEISHU_CARD_CALLBACK_PATH") ?? "/feishu/card",
-    cardCallbackPort: numberEnv("FEISHU_CARD_CALLBACK_PORT") ?? 8787,
     pollIntervalMs: numberEnv("AGENTGATE_FEISHU_POLL_MS") ?? 2000,
   };
 }

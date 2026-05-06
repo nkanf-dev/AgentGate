@@ -43,9 +43,13 @@ const plugin = {
     registerHook(api, config.inputHookName, createAgentGateInputHook(client, config), {
       priority: 1000,
     });
-    registerHook(api, config.runtimeHookName, createAgentGateToolHook(client, config), {
-      priority: 1000,
-    });
+    registerOptionalHook(
+      api,
+      config.runtimeHookName,
+      createAgentGateToolHook(client, config),
+      { priority: 1000 },
+      logger,
+    );
 
     logger?.info?.("AgentGate OpenClaw adapter registered", {
       adapter_id: config.adapterId,
@@ -85,6 +89,24 @@ function registerHook(
     return;
   }
   throw new Error("OpenClaw plugin API does not expose on() or registerHook()");
+}
+
+function registerOptionalHook(
+  api: OpenClawPluginApi,
+  hookName: string,
+  handler: unknown,
+  options: Record<string, unknown>,
+  logger?: LoggerLike,
+): void {
+  try {
+    registerHook(api, hookName, handler, options);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger?.warn?.("AgentGate optional hook registration skipped", {
+      hook_name: hookName,
+      error: message,
+    });
+  }
 }
 
 function readPluginConfig(api: OpenClawPluginApi): AgentGateOpenClawConfig {

@@ -212,3 +212,24 @@ export interface EventEnvelope {
 export interface EventsResponse {
   events: EventEnvelope[];
 }
+
+export type ApprovalStatus = "pending" | "approved" | "denied" | "expired";
+
+export interface ApprovalRecord {
+  approval_id: string;
+  request_id?: string;
+  session_id: string;
+  task_id?: string;
+  attempt_id?: string;
+  status: ApprovalStatus;
+  reason: string;
+  operator_id?: string;
+  channel?: string;
+  created_at: string;
+  expires_at: string;
+  resolved_at?: string;
+}
+
+export interface ApprovalsResponse {
+  approvals: ApprovalRecord[];
+}

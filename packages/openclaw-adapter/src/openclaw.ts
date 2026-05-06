@@ -1,5 +1,4 @@
-import type { AgentGateClient } from "./client.js";
-import { decideOrDeny } from "./client.js";
+import { AgentGateClient, decideOrDeny, waitForApprovalDecision } from "./client.js";
 import type {
   AdapterRegistration,
   GuardDecision,
@@ -23,6 +22,8 @@ export interface AgentGateOpenClawConfig {
   runtimeHookName?: string;
   adapter_token?: string;
   adapterToken?: string;
+  operator_token?: string;
+  operatorToken?: string;
 }
 
 export interface NormalizedAgentGateOpenClawConfig {
@@ -33,6 +34,7 @@ export interface NormalizedAgentGateOpenClawConfig {
   inputHookName: string;
   runtimeHookName: string;
   adapterToken?: string;
+  operatorToken?: string;
 }
 
 export interface OpenClawInputEvent {
@@ -77,6 +79,8 @@ export interface OpenClawToolAttemptEvent {
   agentId?: string;
   tool?: string;
   toolName?: string;
+  command?: string;
+  cwd?: string;
   params?: Record<string, unknown>;
   args?: Record<string, unknown>;
   taints?: string[];
@@ -87,13 +91,21 @@ export interface OpenClawToolAttemptEvent {
 
 export interface OpenClawHookResult {
   block?: boolean;
-  requireApproval?: boolean;
   reason?: string;
   bodyForAgent?: string;
   content?: string;
   prompt?: string;
   params?: Record<string, unknown>;
   args?: Record<string, unknown>;
+}
+
+export interface OpenClawToolContext {
+  agentId?: string;
+  sessionKey?: string;
+  sessionId?: string;
+  runId?: string;
+  toolName?: string;
+  toolCallId?: string;
 }
 
 export function normalizeConfig(config: AgentGateOpenClawConfig = {}): NormalizedAgentGateOpenClawConfig {
@@ -109,6 +121,7 @@ export function normalizeConfig(config: AgentGateOpenClawConfig = {}): Normalize
     inputHookName: config.inputHookName ?? config.input_hook_name ?? "before_prompt_build",
     runtimeHookName: config.runtimeHookName ?? config.runtime_hook_name ?? "before_tool_call",
     adapterToken: config.adapterToken ?? config.adapter_token ?? readEnv("AGENTGATE_ADAPTER_TOKEN"),
+    operatorToken: config.operatorToken ?? config.operator_token ?? readEnv("AGENTGATE_OPERATOR_TOKEN"),
   };
 }
 
@@ -136,10 +149,11 @@ export function createAgentGateInputHook(
   config: NormalizedAgentGateOpenClawConfig,
 ) {
   return async function agentGateInputHook(event: OpenClawInputEvent): Promise<OpenClawHookResult> {
-    const request = mapInputEventToPolicyRequest(event);
+    const request = mapInputEventToPolicyRequest(event, config.integrationId);
     const decision = await decideOrDeny(client, request);
-    await reportDecision(client, config.adapterId, "input", decision, "input_hook_decided");
-    return applyInputDecision(event, decision);
+    const finalDecision = await resolveApprovalIfNeeded(client, decision, config.operatorToken);
+    await reportDecision(client, config.adapterId, "input", finalDecision, "input_hook_decided");
+    return applyInputDecision(event, finalDecision);
   };
 }
 
@@ -147,15 +161,22 @@ export function createAgentGateToolHook(
   client: AgentGateClient,
   config: NormalizedAgentGateOpenClawConfig,
 ) {
-  return async function agentGateToolHook(event: OpenClawToolAttemptEvent): Promise<OpenClawHookResult> {
-    const request = mapToolAttemptToPolicyRequest(event);
+  return async function agentGateToolHook(
+    event: OpenClawToolAttemptEvent,
+    ctx?: OpenClawToolContext,
+  ): Promise<OpenClawHookResult> {
+    const request = mapToolAttemptToPolicyRequest(event, ctx, config.integrationId);
     const decision = await decideOrDeny(client, request);
-    await reportDecision(client, config.adapterId, "runtime", decision, "runtime_hook_decided");
-    return applyRuntimeDecision(decision);
+    const finalDecision = await resolveApprovalIfNeeded(client, decision, config.operatorToken);
+    await reportDecision(client, config.adapterId, "runtime", finalDecision, "runtime_hook_decided");
+    return applyRuntimeDecision(finalDecision);
   };
 }
 
-export function mapInputEventToPolicyRequest(event: OpenClawInputEvent): PolicyRequest {
+export function mapInputEventToPolicyRequest(
+  event: OpenClawInputEvent,
+  integrationId?: string,
+): PolicyRequest {
   const sessionId = stringValue(event.session_id ?? event.sessionId ?? event.sessionKey, "unknown-session");
   const taskId = stringValue(event.task_id ?? event.taskId, sessionId);
   const text = stringValue(event.bodyForAgent ?? event.prompt ?? event.content ?? event.text ?? event.body, "");
@@ -190,19 +211,25 @@ export function mapInputEventToPolicyRequest(event: OpenClawInputEvent): PolicyR
         metadata: event.metadata ?? {},
       },
     },
-    policy: {},
+    policy: integrationId ? { integration_id: integrationId } : {},
   };
 }
 
-export function mapToolAttemptToPolicyRequest(event: OpenClawToolAttemptEvent): PolicyRequest {
-  const sessionId = stringValue(event.session_id ?? event.sessionId ?? event.sessionKey, "unknown-session");
-  const taskId = stringValue(event.task_id ?? event.taskId, sessionId);
+export function mapToolAttemptToPolicyRequest(
+  event: OpenClawToolAttemptEvent,
+  ctx?: OpenClawToolContext,
+  integrationId?: string,
+): PolicyRequest {
+  const sessionId = stringValue(event.session_id ?? event.sessionId ?? ctx?.sessionId ?? event.sessionKey ?? ctx?.sessionKey, "unknown-session");
+  const taskId = stringValue(event.task_id ?? event.taskId ?? ctx?.runId, sessionId);
   const attemptId = stringValue(
-    event.attempt_id ?? event.attemptId ?? event.toolCallId ?? event.runId,
+    event.attempt_id ?? event.attemptId ?? event.toolCallId ?? ctx?.toolCallId ?? event.runId ?? ctx?.runId,
     `attempt_${Date.now()}`,
   );
-  const tool = stringValue(event.tool ?? event.toolName, "unknown_tool");
+  const tool = stringValue(event.tool ?? event.toolName ?? ctx?.toolName, "unknown_tool");
   const args = objectValue(event.args ?? event.params);
+  const operation = inferOperation(tool, args);
+  const sideEffects = inferSideEffects(tool, args);
 
   return {
     request_id: `req_tool_${attemptId}`,
@@ -210,7 +237,7 @@ export function mapToolAttemptToPolicyRequest(event: OpenClawToolAttemptEvent): 
     actor: {
       user_id: stringValue(event.user_id ?? event.userId, undefined),
       host_id: stringValue(event.host_id ?? event.hostId, "openclaw"),
-      agent_id: stringValue(event.agent_id ?? event.agentId, undefined),
+      agent_id: stringValue(event.agent_id ?? event.agentId ?? ctx?.agentId, undefined),
     },
     session: {
       session_id: sessionId,
@@ -219,12 +246,12 @@ export function mapToolAttemptToPolicyRequest(event: OpenClawToolAttemptEvent): 
     },
     action: {
       tool,
-      operation: tool === "bash" ? "execute" : tool,
-      side_effects: inferSideEffects(tool),
-      open_world: tool === "bash",
+      operation,
+      side_effects: sideEffects,
+      open_world: isCommandExecutionTool(tool),
     },
     target: {
-      kind: tool === "bash" ? "process" : "tool",
+      kind: isCommandExecutionTool(tool) ? "process" : "tool",
     },
     content: {
       summary: JSON.stringify(args).slice(0, 500),
@@ -233,9 +260,15 @@ export function mapToolAttemptToPolicyRequest(event: OpenClawToolAttemptEvent): 
     context: {
       surface: "runtime",
       taints: arrayValue(event.taints) as never,
-      raw: { args },
+      raw: {
+        args,
+        run_id: stringValue(event.runId ?? ctx?.runId, undefined),
+        tool_call_id: stringValue(event.toolCallId ?? ctx?.toolCallId, undefined),
+        session_key: stringValue(event.sessionKey ?? ctx?.sessionKey, undefined),
+        integration_id: integrationId,
+      },
     },
-    policy: {},
+    policy: integrationId ? { integration_id: integrationId } : {},
   };
 }
 
@@ -245,9 +278,6 @@ export function applyInputDecision(
 ): OpenClawHookResult {
   if (decision.effect === "deny" || decision.effect === "exclusion") {
     return { block: true, reason: decision.reason_code };
-  }
-  if (decision.effect === "approval_required") {
-    return { requireApproval: true, reason: decision.reason_code };
   }
 
   const rewrite = findRewriteInput(decision.obligations);
@@ -269,9 +299,6 @@ export function applyInputDecision(
 export function applyRuntimeDecision(decision: GuardDecision): OpenClawHookResult {
   if (decision.effect === "deny" || decision.effect === "exclusion") {
     return { block: true, reason: decision.reason_code };
-  }
-  if (decision.effect === "approval_required") {
-    return { requireApproval: true, reason: decision.reason_code };
   }
 
   const rewriteArgs = findRewriteToolArgs(decision.obligations);
@@ -303,6 +330,72 @@ async function reportDecision(
   }
 }
 
+async function resolveApprovalIfNeeded(
+  client: AgentGateClient,
+  decision: GuardDecision,
+  operatorToken?: string,
+): Promise<GuardDecision> {
+  if (decision.effect !== "approval_required") {
+    return decision;
+  }
+
+  const approvalId = approvalIDFromObligations(decision.obligations);
+  if (!approvalId) {
+    return {
+      ...decision,
+      effect: "deny",
+      reason_code: "approval_missing_id",
+      obligations: appendAudit(decision.obligations, "approval id missing from obligations"),
+    };
+  }
+
+  if (!operatorToken) {
+    return {
+      ...decision,
+      effect: "deny",
+      reason_code: "approval_poll_unauthorized",
+      obligations: appendAudit(decision.obligations, "operator token missing for approval polling"),
+    };
+  }
+
+  const operatorClient = clientForOperator(client, operatorToken);
+  const approval = await waitForApprovalDecision(operatorClient, approvalId);
+  if (!approval) {
+    return {
+      ...decision,
+      effect: "deny",
+      reason_code: "approval_timeout",
+      obligations: appendAudit(decision.obligations, `approval ${approvalId} timed out waiting for resolution`),
+    };
+  }
+
+  if (approval.status === "approved") {
+    return {
+      ...decision,
+      effect: "allow_with_audit",
+      reason_code: "user_allow_once_valid",
+      obligations: stripApprovalControl(decision.obligations),
+    };
+  }
+
+  return {
+    ...decision,
+    effect: "deny",
+    reason_code: approval.status === "expired" ? "approval_expired" : "approval_denied",
+    obligations: appendAudit(
+      stripApprovalControl(decision.obligations),
+      `approval ${approvalId} resolved as ${approval.status}`,
+    ),
+  };
+}
+
+function clientForOperator(client: AgentGateClient, operatorToken: string): AgentGateClient {
+  return new AgentGateClient({
+    baseUrl: client.getBaseUrl(),
+    token: operatorToken,
+  });
+}
+
 function findRewriteInput(obligations: Obligation[]): string | undefined {
   for (const obligation of obligations) {
     if (obligation.type !== "rewrite_input") {
@@ -329,17 +422,70 @@ function findRewriteToolArgs(obligations: Obligation[]): Record<string, unknown>
   return undefined;
 }
 
-function inferSideEffects(tool: string): string[] {
-  if (tool === "bash") {
+function approvalIDFromObligations(obligations: Obligation[]): string | undefined {
+  for (const obligation of obligations) {
+    if (obligation.type !== "approval_request") {
+      continue;
+    }
+    const approvalId = obligation.params?.approval_id;
+    if (typeof approvalId === "string" && approvalId.length > 0) {
+      return approvalId;
+    }
+  }
+  return undefined;
+}
+
+function stripApprovalControl(obligations: Obligation[]): Obligation[] {
+  return obligations.filter(
+    (obligation) => obligation.type !== "approval_request" && obligation.type !== "task_control",
+  );
+}
+
+function appendAudit(obligations: Obligation[], message: string): Obligation[] {
+  return [
+    ...stripApprovalControl(obligations),
+    {
+      type: "audit_event",
+      params: {
+        severity: "info",
+        message,
+      },
+    },
+  ];
+}
+
+function inferSideEffects(tool: string, args: Record<string, unknown>): string[] {
+  if (isCommandExecutionTool(tool)) {
     return ["filesystem_read", "filesystem_write", "network_egress", "process_spawn"];
   }
-  if (tool === "write" || tool === "edit") {
+  if (tool === "write" || tool === "edit" || tool === "patch") {
     return ["filesystem_write"];
   }
-  if (tool === "read" || tool === "grep" || tool === "rg") {
+  if (tool === "read" || tool === "grep" || tool === "rg" || tool === "glob" || hasPathArgument(args)) {
     return ["filesystem_read"];
   }
   return [];
+}
+
+function inferOperation(tool: string, args: Record<string, unknown>): string {
+  if (isCommandExecutionTool(tool)) {
+    return "execute";
+  }
+  if (tool === "read" || tool === "grep" || tool === "rg" || tool === "glob" || hasPathArgument(args)) {
+    return "read";
+  }
+  if (tool === "write" || tool === "edit" || tool === "patch") {
+    return "write";
+  }
+  return tool;
+}
+
+function isCommandExecutionTool(tool: string): boolean {
+  return tool === "bash" || tool === "exec" || tool === "shell" || tool === "terminal";
+}
+
+function hasPathArgument(args: Record<string, unknown>): boolean {
+  return typeof args.path === "string" || typeof args.file === "string" || typeof args.cwd === "string";
 }
 
 function stringValue(value: unknown, fallback: string): string;

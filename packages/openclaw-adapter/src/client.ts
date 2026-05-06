@@ -1,4 +1,6 @@
 import type {
+  ApprovalRecord,
+  ApprovalsResponse,
   AdapterRegistration,
   CoverageResponse,
   EventsResponse,
@@ -26,6 +28,10 @@ export class AgentGateClient {
     this.fetchImpl = options.fetch ?? fetch;
   }
 
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
   register(request: AdapterRegistration): Promise<RegistrationResult> {
     return this.post<RegistrationResult>("/v1/register", request);
   }
@@ -45,6 +51,11 @@ export class AgentGateClient {
   events(limit?: number): Promise<EventsResponse> {
     const suffix = limit === undefined ? "" : `?limit=${encodeURIComponent(limit)}`;
     return this.get<EventsResponse>(`/v1/events${suffix}`);
+  }
+
+  approvals(limit?: number): Promise<ApprovalsResponse> {
+    const suffix = limit === undefined ? "" : `?limit=${encodeURIComponent(limit)}`;
+    return this.get<ApprovalsResponse>(`/v1/approvals${suffix}`);
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
@@ -72,6 +83,30 @@ export class AgentGateClient {
       ...(extra ?? {}),
     };
   }
+}
+
+export async function waitForApprovalDecision(
+  client: AgentGateClient,
+  approvalId: string,
+  options: {
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+  } = {},
+): Promise<ApprovalRecord | undefined> {
+  const timeoutMs = options.timeoutMs ?? 10 * 60 * 1000;
+  const pollIntervalMs = options.pollIntervalMs ?? 1000;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() <= deadline) {
+    const response = await client.approvals(200);
+    const approval = response.approvals.find((entry) => entry.approval_id === approvalId);
+    if (approval && approval.status !== "pending") {
+      return approval;
+    }
+    await sleep(pollIntervalMs);
+  }
+
+  return undefined;
 }
 
 export async function decideOrDeny(
@@ -117,4 +152,8 @@ async function parseResponse<T>(response: Response): Promise<T> {
   }
 
   return response.json() as Promise<T>;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -11,10 +11,6 @@ export interface FeishuApprovalAdapterConfig {
   receiveId: string;
   receiveIdType: "chat_id" | "open_id" | "user_id" | "union_id" | "email";
   domain?: FeishuDomain;
-  encryptKey?: string;
-  verificationToken?: string;
-  cardCallbackPath?: string;
-  cardCallbackPort?: number;
   pollIntervalMs?: number;
 }
 
