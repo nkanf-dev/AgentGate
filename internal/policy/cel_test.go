@@ -80,8 +80,8 @@ func TestEvaluateCELConditionSessionFacts(t *testing.T) {
 	req.Context.Surface = types.SurfaceRuntime
 
 	facts := types.SessionFacts{
-		RequestCount: 5,
-		DenyCount:    2,
+		RequestCount:  5,
+		DenyCount:     2,
 		DistinctTools: []string{"bash", "read"},
 	}
 

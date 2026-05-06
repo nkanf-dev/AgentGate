@@ -125,7 +125,7 @@ func TestFirstNonEmpty(t *testing.T) {
 func TestUpdateSessionFacts(t *testing.T) {
 	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
 	event := types.EventEnvelope{
-		Effect: types.EffectAllow,
+		Effect:  types.EffectAllow,
 		Summary: "test_reason",
 		Metadata: map[string]interface{}{
 			"target_identifier": "api/test",
@@ -222,14 +222,14 @@ func TestIsSensitiveAuditKey(t *testing.T) {
 
 func TestDecisionSummary(t *testing.T) {
 	tests := map[string]string{
-		"input_secret_rewritten_to_handles":       "Input contained secret-like material",
-		"policy_allow_with_audit":                  "Policy allowed the request with audit.",
-		"secret_handle_resolve_allowed":            "SecretHandle scope matched",
-		"secret_handle_not_found":                  "SecretHandle was not found.",
-		"secret_handle_scope_mismatch":             "SecretHandle exists",
-		"missing_task_id":                          "task_id is required",
-		"runtime_high_risk_requires_approval":      "requires an attempt-scoped approval",
-		"unknown_reason_code":                      "unknown_reason_code",
+		"input_secret_rewritten_to_handles":   "Input contained secret-like material",
+		"policy_allow_with_audit":             "Policy allowed the request with audit.",
+		"secret_handle_resolve_allowed":       "SecretHandle scope matched",
+		"secret_handle_not_found":             "SecretHandle was not found.",
+		"secret_handle_scope_mismatch":        "SecretHandle exists",
+		"missing_task_id":                     "task_id is required",
+		"runtime_high_risk_requires_approval": "requires an attempt-scoped approval",
+		"unknown_reason_code":                 "unknown_reason_code",
 	}
 	for code, expectedSubstring := range tests {
 		summary := decisionSummary(code)
@@ -261,7 +261,7 @@ func TestInferSurface(t *testing.T) {
 
 func TestRedactAuditValue(t *testing.T) {
 	result, changed := redactAuditValue(map[string]interface{}{
-		"name": "test",
+		"name":   "test",
 		"secret": "sk-sensitive",
 	})
 	if !changed {

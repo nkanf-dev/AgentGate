@@ -70,6 +70,59 @@ func TestLoadDefaultPolicy(t *testing.T) {
 	}) {
 		t.Fatal("read-only action should not require runtime approval")
 	}
+	execEvaluation := bundle.Evaluate(types.PolicyRequest{
+		RequestKind: types.RequestKindToolAttempt,
+		Action:      types.ActionContext{Tool: "exec"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if execEvaluation.Effect != types.EffectApprovalRequired {
+		t.Fatalf("exec effect = %q, want approval_required", execEvaluation.Effect)
+	}
+	if execEvaluation.SelectedRule != "runtime.exec.requires_approval" {
+		t.Fatalf("exec selected rule = %q", execEvaluation.SelectedRule)
+	}
+	untrustedInputEvaluation := bundle.Evaluate(types.PolicyRequest{
+		RequestKind: types.RequestKindInput,
+		Context: types.DecisionContext{
+			Surface: types.SurfaceInput,
+			Taints:  []types.Taint{types.TaintPossibleInjection},
+		},
+	})
+	if untrustedInputEvaluation.Effect != types.EffectAllowWithAudit {
+		t.Fatalf("untrusted input effect = %q, want allow_with_audit", untrustedInputEvaluation.Effect)
+	}
+	if untrustedInputEvaluation.SelectedRule != "input.untrusted_injection.requires_audit" {
+		t.Fatalf("untrusted input selected rule = %q", untrustedInputEvaluation.SelectedRule)
+	}
+	secretRuntimeEvaluation := bundle.Evaluate(types.PolicyRequest{
+		RequestKind: types.RequestKindToolAttempt,
+		Action: types.ActionContext{
+			Tool:        "exec",
+			SideEffects: []string{"network_egress"},
+		},
+		Content: types.ContentContext{
+			DataClasses: []types.DataClass{types.DataClassSecret},
+		},
+		Context: types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if secretRuntimeEvaluation.Effect != types.EffectApprovalRequired {
+		t.Fatalf("secret runtime effect = %q, want approval_required", secretRuntimeEvaluation.Effect)
+	}
+	if secretRuntimeEvaluation.SelectedRule != "runtime.secret_egress.requires_approval" {
+		t.Fatalf("secret runtime selected rule = %q", secretRuntimeEvaluation.SelectedRule)
+	}
+	resourceEgressEvaluation := bundle.Evaluate(types.PolicyRequest{
+		RequestKind: types.RequestKindResourceEgress,
+		Action:      types.ActionContext{Operation: "send_http"},
+		Target:      types.TargetContext{Kind: "secret_handle", Identifier: "sech_test"},
+		Context:     types.DecisionContext{Surface: types.SurfaceResource},
+	})
+	if resourceEgressEvaluation.Effect != types.EffectApprovalRequired {
+		t.Fatalf("resource egress effect = %q, want approval_required", resourceEgressEvaluation.Effect)
+	}
+	if resourceEgressEvaluation.SelectedRule != "resource.secret_handle.egress.requires_approval" {
+		t.Fatalf("resource egress selected rule = %q", resourceEgressEvaluation.SelectedRule)
+	}
 }
 
 func TestPolicyPriorityAndEffectComposition(t *testing.T) {

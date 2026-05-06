@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "status": "active_minimal",
+  "status": "active_default",
   "issued_at": "2026-04-24T00:00:00Z",
   "rules": [
     {
@@ -17,6 +17,19 @@
       }
     },
     {
+      "id": "input.untrusted_injection.requires_audit",
+      "description": "Untrusted or instruction-bearing input should stay traceable before model execution.",
+      "priority": 80,
+      "surface": "input",
+      "request_kinds": ["input"],
+      "effect": "allow_with_audit",
+      "reason_code": "input_untrusted_injection_flagged",
+      "when": {
+        "language": "cel",
+        "expression": "context.taints.exists(x, x in [\"untrusted_external\", \"possible_prompt_injection\", \"embedded_instruction\"])"
+      }
+    },
+    {
       "id": "runtime.bash.requires_approval",
       "description": "Shell execution can mutate files, spawn processes, and reach the network.",
       "priority": 100,
@@ -27,6 +40,19 @@
       "when": {
         "language": "cel",
         "expression": "action.tool == \"bash\""
+      }
+    },
+    {
+      "id": "runtime.exec.requires_approval",
+      "description": "Direct process execution tools always require approval.",
+      "priority": 100,
+      "surface": "runtime",
+      "request_kinds": ["tool_attempt"],
+      "effect": "approval_required",
+      "reason_code": "runtime_high_risk_requires_approval",
+      "when": {
+        "language": "cel",
+        "expression": "action.tool in [\"exec\", \"shell\", \"terminal\"]"
       }
     },
     {
@@ -56,6 +82,45 @@
       }
     },
     {
+      "id": "runtime.secret_egress.requires_approval",
+      "description": "Secret-bearing runtime requests with outbound or mutating effects require explicit approval.",
+      "priority": 110,
+      "surface": "runtime",
+      "request_kinds": ["tool_attempt"],
+      "effect": "approval_required",
+      "reason_code": "runtime_secret_egress_requires_approval",
+      "when": {
+        "language": "cel",
+        "expression": "content.data_classes.exists(x, x == \"secret\") && action.side_effects.exists(x, x in [\"network_egress\", \"filesystem_write\", \"process_spawn\"])"
+      }
+    },
+    {
+      "id": "runtime.untrusted_write.requires_approval",
+      "description": "Prompt-injection-tainted runtime requests cannot write or spawn without approval.",
+      "priority": 105,
+      "surface": "runtime",
+      "request_kinds": ["tool_attempt"],
+      "effect": "approval_required",
+      "reason_code": "runtime_untrusted_write_requires_approval",
+      "when": {
+        "language": "cel",
+        "expression": "context.taints.exists(x, x in [\"untrusted_external\", \"possible_prompt_injection\", \"embedded_instruction\"]) && action.side_effects.exists(x, x in [\"filesystem_write\", \"network_egress\", \"process_spawn\", \"secret_resolve\"])"
+      }
+    },
+    {
+      "id": "runtime.session.escalation.requires_approval",
+      "description": "Repeated denied or high-risk sessions escalate to approval for subsequent runtime actions.",
+      "priority": 95,
+      "surface": "runtime",
+      "request_kinds": ["tool_attempt"],
+      "effect": "approval_required",
+      "reason_code": "runtime_session_escalation_requires_approval",
+      "when": {
+        "language": "cel",
+        "expression": "session_facts.deny_count > 2 || session_facts.approval_count > 3 || (session_facts.distinct_targets.size() > 2 && session_facts.side_effect_sequence.exists(x, x == \"network_egress\"))"
+      }
+    },
+    {
       "id": "resource.secret_handle.resolve",
       "description": "SecretHandle resolution is eligible only through the resource surface and same-session scope checks.",
       "priority": 100,
@@ -66,6 +131,32 @@
       "when": {
         "language": "cel",
         "expression": "action.operation == \"resolve_secret_handle\" && target.kind == \"secret_handle\""
+      }
+    },
+    {
+      "id": "resource.secret_handle.egress.requires_approval",
+      "description": "Releasing secret material toward an egress surface requires explicit approval.",
+      "priority": 120,
+      "surface": "resource",
+      "request_kinds": ["resource_egress"],
+      "effect": "approval_required",
+      "reason_code": "resource_secret_egress_requires_approval",
+      "when": {
+        "language": "cel",
+        "expression": "target.kind == \"secret_handle\" || action.operation == \"resolve_secret_handle\""
+      }
+    },
+    {
+      "id": "resource.untrusted_egress.requires_approval",
+      "description": "Untrusted or injection-tainted egress requests require approval.",
+      "priority": 110,
+      "surface": "resource",
+      "request_kinds": ["resource_egress"],
+      "effect": "approval_required",
+      "reason_code": "resource_untrusted_egress_requires_approval",
+      "when": {
+        "language": "cel",
+        "expression": "context.taints.exists(x, x in [\"untrusted_external\", \"possible_prompt_injection\", \"embedded_instruction\"]) || content.data_classes.exists(x, x in [\"secret\", \"credential\", \"financial\"])"
       }
     }
   ],

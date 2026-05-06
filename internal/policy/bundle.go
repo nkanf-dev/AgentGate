@@ -118,7 +118,7 @@ type PathPolicy struct {
 func DefaultBundle() Bundle {
 	return Bundle{
 		Version:  1,
-		Status:   "active_minimal",
+		Status:   "active_default",
 		IssuedAt: time.Date(2026, 4, 24, 0, 0, 0, 0, time.UTC),
 		Rules: []Rule{
 			{
@@ -135,6 +135,19 @@ func DefaultBundle() Bundle {
 				},
 			},
 			{
+				ID:           "input.untrusted_injection.requires_audit",
+				Description:  "Untrusted or instruction-bearing input should stay traceable before model execution.",
+				Priority:     80,
+				Surface:      types.SurfaceInput,
+				RequestKinds: []types.RequestKind{types.RequestKindInput},
+				Effect:       types.EffectAllowWithAudit,
+				ReasonCode:   "input_untrusted_injection_flagged",
+				When: Condition{
+					Language:   "cel",
+					Expression: `context.taints.exists(x, x in ["untrusted_external", "possible_prompt_injection", "embedded_instruction"])`,
+				},
+			},
+			{
 				ID:           "runtime.bash.requires_approval",
 				Description:  "Shell execution can mutate files, spawn processes, and reach the network.",
 				Priority:     100,
@@ -145,6 +158,19 @@ func DefaultBundle() Bundle {
 				When: Condition{
 					Language:   "cel",
 					Expression: `action.tool == "bash"`,
+				},
+			},
+			{
+				ID:           "runtime.exec.requires_approval",
+				Description:  "Direct process execution tools always require approval.",
+				Priority:     100,
+				Surface:      types.SurfaceRuntime,
+				RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+				Effect:       types.EffectApprovalRequired,
+				ReasonCode:   "runtime_high_risk_requires_approval",
+				When: Condition{
+					Language:   "cel",
+					Expression: `action.tool in ["exec", "shell", "terminal"]`,
 				},
 			},
 			{
@@ -174,6 +200,50 @@ func DefaultBundle() Bundle {
 				},
 			},
 			{
+				ID:           "runtime.secret_egress.requires_approval",
+				Description:  "Secret-bearing runtime requests with outbound or mutating effects require explicit approval.",
+				Priority:     110,
+				Surface:      types.SurfaceRuntime,
+				RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+				Effect:       types.EffectApprovalRequired,
+				ReasonCode:   "runtime_secret_egress_requires_approval",
+				When: Condition{
+					Language:   "cel",
+					Expression: `content.data_classes.exists(x, x == "secret") &&
+						action.side_effects.exists(x, x in ["network_egress", "filesystem_write", "process_spawn"])`,
+				},
+			},
+			{
+				ID:           "runtime.untrusted_write.requires_approval",
+				Description:  "Prompt-injection-tainted runtime requests cannot write or spawn without approval.",
+				Priority:     105,
+				Surface:      types.SurfaceRuntime,
+				RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+				Effect:       types.EffectApprovalRequired,
+				ReasonCode:   "runtime_untrusted_write_requires_approval",
+				When: Condition{
+					Language:   "cel",
+					Expression: `context.taints.exists(x, x in ["untrusted_external", "possible_prompt_injection", "embedded_instruction"]) &&
+						action.side_effects.exists(x, x in ["filesystem_write", "network_egress", "process_spawn", "secret_resolve"])`,
+				},
+			},
+			{
+				ID:           "runtime.session.escalation.requires_approval",
+				Description:  "Repeated denied or high-risk sessions escalate to approval for subsequent runtime actions.",
+				Priority:     95,
+				Surface:      types.SurfaceRuntime,
+				RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+				Effect:       types.EffectApprovalRequired,
+				ReasonCode:   "runtime_session_escalation_requires_approval",
+				When: Condition{
+					Language:   "cel",
+					Expression: `session_facts.deny_count > 2 ||
+						session_facts.approval_count > 3 ||
+						(session_facts.distinct_targets.size() > 2 &&
+							session_facts.side_effect_sequence.exists(x, x == "network_egress"))`,
+				},
+			},
+			{
 				ID:           "resource.secret_handle.resolve",
 				Description:  "SecretHandle resolution is eligible only through the resource surface and same-session scope checks.",
 				Priority:     100,
@@ -184,6 +254,33 @@ func DefaultBundle() Bundle {
 				When: Condition{
 					Language:   "cel",
 					Expression: `action.operation == "resolve_secret_handle" && target.kind == "secret_handle"`,
+				},
+			},
+			{
+				ID:           "resource.secret_handle.egress.requires_approval",
+				Description:  "Releasing secret material toward an egress surface requires explicit approval.",
+				Priority:     120,
+				Surface:      types.SurfaceResource,
+				RequestKinds: []types.RequestKind{types.RequestKindResourceEgress},
+				Effect:       types.EffectApprovalRequired,
+				ReasonCode:   "resource_secret_egress_requires_approval",
+				When: Condition{
+					Language:   "cel",
+					Expression: `target.kind == "secret_handle" || action.operation == "resolve_secret_handle"`,
+				},
+			},
+			{
+				ID:           "resource.untrusted_egress.requires_approval",
+				Description:  "Untrusted or injection-tainted egress requests require approval.",
+				Priority:     110,
+				Surface:      types.SurfaceResource,
+				RequestKinds: []types.RequestKind{types.RequestKindResourceEgress},
+				Effect:       types.EffectApprovalRequired,
+				ReasonCode:   "resource_untrusted_egress_requires_approval",
+				When: Condition{
+					Language:   "cel",
+					Expression: `context.taints.exists(x, x in ["untrusted_external", "possible_prompt_injection", "embedded_instruction"]) ||
+						content.data_classes.exists(x, x in ["secret", "credential", "financial"])`,
 				},
 			},
 		},
