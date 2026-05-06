@@ -2,8 +2,15 @@ agentgate.db
 *.db
 *.db-shm
 *.db-wal
+.agentgate-demo/
+.openclaw/
 
 node_modules/
 dist/
 
 .DS_Store
+HEARTBEAT.md
+IDENTITY.md
+SOUL.md
+TOOLS.md
+USER.md
