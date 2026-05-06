@@ -1,0 +1,1829 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "description": "Policy decision and control plane for agentic systems.",
+        "title": "AgentGate API",
+        "contact": {},
+        "version": "1.0.0"
+    },
+    "host": "localhost:8080",
+    "basePath": "/",
+    "paths": {
+        "/healthz": {
+            "get": {
+                "description": "Returns the service status and start time.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "health"
+                ],
+                "summary": "Health check",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/internal/integrations": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns all registered integration definitions.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "integrations"
+                ],
+                "summary": "List integration definitions",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/types.IntegrationDefinition"
+                            }
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Registers a new integration (adapter, resource, etc.).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "integrations"
+                ],
+                "summary": "Create an integration definition",
+                "parameters": [
+                    {
+                        "description": "Integration definition",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/types.IntegrationDefinition"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/types.IntegrationDefinition"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/internal/integrations/{integration_id}": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns a single integration definition by ID.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "integrations"
+                ],
+                "summary": "Get an integration definition",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Integration ID",
+                        "name": "integration_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/types.IntegrationDefinition"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Removes an integration definition.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "integrations"
+                ],
+                "summary": "Delete an integration definition",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Integration ID",
+                        "name": "integration_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    }
+                }
+            },
+            "patch": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Updates an existing integration definition.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "integrations"
+                ],
+                "summary": "Update an integration definition",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Integration ID",
+                        "name": "integration_id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Updated definition",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/types.IntegrationDefinition"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/types.IntegrationDefinition"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/internal/policy/bundles": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns all policy bundles, optionally including archived ones.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "policy"
+                ],
+                "summary": "List policy bundles",
+                "parameters": [
+                    {
+                        "type": "boolean",
+                        "description": "include archived bundles",
+                        "name": "include_archived",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/policy.Bundle"
+                            }
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Creates a new policy bundle.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "policy"
+                ],
+                "summary": "Create a policy bundle",
+                "parameters": [
+                    {
+                        "description": "Bundle definition",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/policy.Bundle"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/policy.Bundle"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/internal/policy/bundles/{bundle_id}": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns a single policy bundle by ID.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "policy"
+                ],
+                "summary": "Get a policy bundle",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bundle ID",
+                        "name": "bundle_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/policy.Bundle"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Archives (soft-deletes) a policy bundle.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "policy"
+                ],
+                "summary": "Delete a policy bundle",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bundle ID",
+                        "name": "bundle_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    }
+                }
+            },
+            "patch": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Updates an existing policy bundle.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "policy"
+                ],
+                "summary": "Update a policy bundle",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bundle ID",
+                        "name": "bundle_id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Updated bundle",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/policy.Bundle"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/policy.Bundle"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/internal/policy/bundles/{bundle_id}/publish": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Publishes a stored policy bundle, making it active.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "policy"
+                ],
+                "summary": "Publish a policy bundle by ID",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bundle ID",
+                        "name": "bundle_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/internal/policy/bundles/{bundle_id}/validate": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Validates a stored policy bundle.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "policy"
+                ],
+                "summary": "Validate a policy bundle by ID",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bundle ID",
+                        "name": "bundle_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/internal/policy/current": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns the currently active policy bundle with all rules.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "policy"
+                ],
+                "summary": "Get active policy",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/policy.Bundle"
+                        }
+                    }
+                }
+            }
+        },
+        "/internal/policy/publish": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Validates and publishes a new policy version, making it active.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "policy"
+                ],
+                "summary": "Publish a new policy version",
+                "parameters": [
+                    {
+                        "description": "Policy to publish",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/core.PolicyPublishRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/internal/policy/rollback": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Rolls back the active policy to a specified version.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "policy"
+                ],
+                "summary": "Rollback to a previous policy version",
+                "parameters": [
+                    {
+                        "description": "Rollback parameters",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/core.PolicyRollbackRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/internal/policy/validate": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Validates a policy bundle without publishing it.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "policy"
+                ],
+                "summary": "Validate a policy bundle",
+                "parameters": [
+                    {
+                        "description": "Policy bundle to validate",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/core.PolicyValidateRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/internal/policy/versions": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns paginated policy version history.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "policy"
+                ],
+                "summary": "List policy versions",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "max results (1-1000)",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": true
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/approvals": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns paginated list of approval records.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "approvals"
+                ],
+                "summary": "List approvals",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "max results (1-1000)",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/types.ApprovalRecord"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/approvals/{approval_id}/resolve": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Approves or denies a pending approval request.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "approvals"
+                ],
+                "summary": "Resolve an approval",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Approval ID",
+                        "name": "approval_id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Resolution (approved/denied)",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/types.ApprovalResolveRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/coverage": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns coverage information for registered adapters and their surfaces.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "adapter"
+                ],
+                "summary": "Get adapter coverage",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/decide": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Evaluates a policy request against all active rules and returns a decision.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "decision"
+                ],
+                "summary": "Make a policy decision",
+                "parameters": [
+                    {
+                        "description": "Policy decision request",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/types.PolicyRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/types.PolicyDecision"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/events": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns paginated event log.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "events"
+                ],
+                "summary": "List events",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "max results (1-1000)",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/register": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Registers an adapter with its capabilities, surfaces, and host info.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "adapter"
+                ],
+                "summary": "Register an adapter",
+                "parameters": [
+                    {
+                        "description": "Adapter registration",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/types.AdapterRegistration"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/report": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Submits a post-decision report from an adapter (e.g., side-effect observations).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "decision"
+                ],
+                "summary": "Report an adapter event",
+                "parameters": [
+                    {
+                        "description": "Adapter report",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/types.ReportRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "Accepted",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "core.PolicyPublishRequest": {
+            "type": "object",
+            "properties": {
+                "bundle": {
+                    "$ref": "#/definitions/policy.Bundle"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "operator_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "core.PolicyRollbackRequest": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string"
+                },
+                "operator_id": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "integer"
+                }
+            }
+        },
+        "core.PolicyValidateRequest": {
+            "type": "object",
+            "properties": {
+                "bundle": {
+                    "$ref": "#/definitions/policy.Bundle"
+                }
+            }
+        },
+        "policy.Bundle": {
+            "type": "object",
+            "properties": {
+                "bundle_id": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "egress_policy": {
+                    "$ref": "#/definitions/policy.EgressPolicy"
+                },
+                "input_policy": {
+                    "$ref": "#/definitions/policy.InputPolicy"
+                },
+                "issued_at": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "path_policy": {
+                    "$ref": "#/definitions/policy.PathPolicy"
+                },
+                "priority": {
+                    "type": "integer"
+                },
+                "resource_policy": {
+                    "$ref": "#/definitions/policy.ResourcePolicy"
+                },
+                "rules": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/policy.Rule"
+                    }
+                },
+                "runtime_policy": {
+                    "$ref": "#/definitions/policy.RuntimePolicy"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "integer"
+                }
+            }
+        },
+        "policy.Condition": {
+            "type": "object",
+            "properties": {
+                "expression": {
+                    "type": "string"
+                },
+                "language": {
+                    "type": "string"
+                }
+            }
+        },
+        "policy.EgressPolicy": {
+            "type": "object",
+            "properties": {
+                "block_sensitive_query_params": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "host_allowlist": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "require_purpose_declaration": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "policy.InputPolicy": {
+            "type": "object",
+            "properties": {
+                "secret_mode": {
+                    "type": "string"
+                }
+            }
+        },
+        "policy.Obligation": {
+            "type": "object",
+            "properties": {
+                "params": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "type": {
+                    "type": "string"
+                }
+            }
+        },
+        "policy.PathPolicy": {
+            "type": "object",
+            "properties": {
+                "allow_worktree_siblings": {
+                    "type": "boolean"
+                },
+                "blocked_prefixes": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "workspace_root": {
+                    "type": "string"
+                }
+            }
+        },
+        "policy.ResourcePolicy": {
+            "type": "object",
+            "properties": {
+                "secret_handle_scope": {
+                    "type": "string"
+                }
+            }
+        },
+        "policy.Rule": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string"
+                },
+                "effect": {
+                    "$ref": "#/definitions/types.Effect"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "obligations": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/policy.Obligation"
+                    }
+                },
+                "priority": {
+                    "type": "integer"
+                },
+                "reason_code": {
+                    "type": "string"
+                },
+                "request_kinds": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/types.RequestKind"
+                    }
+                },
+                "surface": {
+                    "$ref": "#/definitions/types.Surface"
+                },
+                "when": {
+                    "$ref": "#/definitions/policy.Condition"
+                }
+            }
+        },
+        "policy.RuntimePolicy": {
+            "type": "object",
+            "properties": {
+                "require_approval_open_world": {
+                    "type": "boolean"
+                },
+                "require_approval_side_effects": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "require_approval_tools": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "types.ActionContext": {
+            "type": "object",
+            "properties": {
+                "open_world": {
+                    "type": "boolean"
+                },
+                "operation": {
+                    "type": "string"
+                },
+                "side_effects": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "tool": {
+                    "type": "string"
+                }
+            }
+        },
+        "types.ActorContext": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string"
+                },
+                "host_id": {
+                    "type": "string"
+                },
+                "user_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "types.AdapterCapabilities": {
+            "type": "object",
+            "properties": {
+                "can_block": {
+                    "type": "boolean"
+                },
+                "can_pause_for_approval": {
+                    "type": "boolean"
+                },
+                "can_rewrite_input": {
+                    "type": "boolean"
+                },
+                "can_rewrite_tool_args": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "types.AdapterRegistration": {
+            "type": "object",
+            "properties": {
+                "adapter_id": {
+                    "type": "string"
+                },
+                "adapter_kind": {
+                    "type": "string"
+                },
+                "capabilities": {
+                    "$ref": "#/definitions/types.AdapterCapabilities"
+                },
+                "host": {
+                    "$ref": "#/definitions/types.HostDescriptor"
+                },
+                "integration_id": {
+                    "type": "string"
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "supporting_channels": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "surfaces": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/types.Surface"
+                    }
+                }
+            }
+        },
+        "types.ApprovalRecord": {
+            "type": "object",
+            "properties": {
+                "approval_id": {
+                    "type": "string"
+                },
+                "attempt_id": {
+                    "type": "string"
+                },
+                "channel": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "expires_at": {
+                    "type": "string"
+                },
+                "operator_id": {
+                    "type": "string"
+                },
+                "reason": {
+                    "type": "string"
+                },
+                "request_id": {
+                    "type": "string"
+                },
+                "resolved_at": {
+                    "type": "string"
+                },
+                "session_id": {
+                    "type": "string"
+                },
+                "status": {
+                    "$ref": "#/definitions/types.ApprovalStatus"
+                },
+                "task_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "types.ApprovalResolveRequest": {
+            "type": "object",
+            "properties": {
+                "channel": {
+                    "type": "string"
+                },
+                "decision": {
+                    "type": "string"
+                },
+                "operator_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "types.ApprovalStatus": {
+            "type": "string",
+            "enum": [
+                "pending",
+                "approved",
+                "denied",
+                "expired"
+            ],
+            "x-enum-varnames": [
+                "ApprovalPending",
+                "ApprovalApproved",
+                "ApprovalDenied",
+                "ApprovalExpired"
+            ]
+        },
+        "types.ContentContext": {
+            "type": "object",
+            "properties": {
+                "data_classes": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/types.DataClass"
+                    }
+                },
+                "summary": {
+                    "type": "string"
+                }
+            }
+        },
+        "types.DataClass": {
+            "type": "string",
+            "enum": [
+                "pii",
+                "secret",
+                "business",
+                "financial",
+                "credential"
+            ],
+            "x-enum-varnames": [
+                "DataClassPII",
+                "DataClassSecret",
+                "DataClassBusiness",
+                "DataClassFinancial",
+                "DataClassCredential"
+            ]
+        },
+        "types.DecisionContext": {
+            "type": "object",
+            "properties": {
+                "raw": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "surface": {
+                    "$ref": "#/definitions/types.Surface"
+                },
+                "taints": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/types.Taint"
+                    }
+                }
+            }
+        },
+        "types.DecisionExplanation": {
+            "type": "object",
+            "properties": {
+                "policy_trace": {
+                    "$ref": "#/definitions/types.PolicyTrace"
+                },
+                "summary": {
+                    "type": "string"
+                },
+                "warnings": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "types.Effect": {
+            "type": "string",
+            "enum": [
+                "allow",
+                "allow_with_audit",
+                "approval_required",
+                "deny",
+                "exclusion"
+            ],
+            "x-enum-varnames": [
+                "EffectAllow",
+                "EffectAllowWithAudit",
+                "EffectApprovalRequired",
+                "EffectDeny",
+                "EffectExclusion"
+            ]
+        },
+        "types.HostDescriptor": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "string"
+                }
+            }
+        },
+        "types.IntegrationDefinition": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "expected_surfaces": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/types.Surface"
+                    }
+                },
+                "health": {
+                    "$ref": "#/definitions/types.IntegrationHealth"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string"
+                },
+                "matched_adapters": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/types.IntegrationMatchedAdapter"
+                    }
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "types.IntegrationHealth": {
+            "type": "object",
+            "properties": {
+                "computed_at": {
+                    "type": "string"
+                },
+                "last_seen_at": {
+                    "type": "string"
+                },
+                "matched_adapter_count": {
+                    "type": "integer"
+                },
+                "matched_adapter_id": {
+                    "type": "string"
+                },
+                "status": {
+                    "$ref": "#/definitions/types.IntegrationHealthStatus"
+                }
+            }
+        },
+        "types.IntegrationHealthStatus": {
+            "type": "string",
+            "enum": [
+                "connected",
+                "stale",
+                "missing",
+                "unmanaged",
+                "disabled"
+            ],
+            "x-enum-varnames": [
+                "IntegrationHealthConnected",
+                "IntegrationHealthStale",
+                "IntegrationHealthMissing",
+                "IntegrationHealthUnmanaged",
+                "IntegrationHealthDisabled"
+            ]
+        },
+        "types.IntegrationMatchedAdapter": {
+            "type": "object",
+            "properties": {
+                "adapter_id": {
+                    "type": "string"
+                },
+                "adapter_kind": {
+                    "type": "string"
+                },
+                "host": {
+                    "$ref": "#/definitions/types.HostDescriptor"
+                },
+                "integration_id": {
+                    "type": "string"
+                },
+                "last_seen_at": {
+                    "type": "string"
+                },
+                "registered_at": {
+                    "type": "string"
+                },
+                "status": {
+                    "$ref": "#/definitions/types.IntegrationHealthStatus"
+                },
+                "supporting_channels": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "surfaces": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/types.Surface"
+                    }
+                }
+            }
+        },
+        "types.Obligation": {
+            "type": "object",
+            "properties": {
+                "params": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "type": {
+                    "type": "string"
+                }
+            }
+        },
+        "types.PolicyDecision": {
+            "type": "object",
+            "properties": {
+                "applied_rules": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "decided_at": {
+                    "type": "string"
+                },
+                "decision_id": {
+                    "type": "string"
+                },
+                "effect": {
+                    "$ref": "#/definitions/types.Effect"
+                },
+                "explanation": {
+                    "$ref": "#/definitions/types.DecisionExplanation"
+                },
+                "obligations": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/types.Obligation"
+                    }
+                },
+                "reason_code": {
+                    "type": "string"
+                },
+                "request_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "types.PolicyRequest": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "$ref": "#/definitions/types.ActionContext"
+                },
+                "actor": {
+                    "$ref": "#/definitions/types.ActorContext"
+                },
+                "content": {
+                    "$ref": "#/definitions/types.ContentContext"
+                },
+                "context": {
+                    "$ref": "#/definitions/types.DecisionContext"
+                },
+                "policy": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "request_id": {
+                    "type": "string"
+                },
+                "request_kind": {
+                    "$ref": "#/definitions/types.RequestKind"
+                },
+                "session": {
+                    "$ref": "#/definitions/types.SessionContext"
+                },
+                "target": {
+                    "$ref": "#/definitions/types.TargetContext"
+                }
+            }
+        },
+        "types.PolicyRuleTrace": {
+            "type": "object",
+            "properties": {
+                "bundle_id": {
+                    "type": "string"
+                },
+                "bundle_priority": {
+                    "type": "integer"
+                },
+                "effect": {
+                    "$ref": "#/definitions/types.Effect"
+                },
+                "priority": {
+                    "type": "integer"
+                },
+                "reason_code": {
+                    "type": "string"
+                },
+                "rule_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "types.PolicyTrace": {
+            "type": "object",
+            "properties": {
+                "bundle_priority": {
+                    "type": "integer"
+                },
+                "defaulted": {
+                    "type": "boolean"
+                },
+                "matched_rules": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/types.PolicyRuleTrace"
+                    }
+                },
+                "policy_status": {
+                    "type": "string"
+                },
+                "policy_version": {
+                    "type": "integer"
+                },
+                "selected_bundle": {
+                    "type": "string"
+                },
+                "selected_rule": {
+                    "type": "string"
+                },
+                "top_priority": {
+                    "type": "integer"
+                }
+            }
+        },
+        "types.ReportRequest": {
+            "type": "object",
+            "properties": {
+                "adapter_id": {
+                    "type": "string"
+                },
+                "decision_id": {
+                    "type": "string"
+                },
+                "error_message": {
+                    "type": "string"
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "obligations": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/types.Obligation"
+                    }
+                },
+                "outcome": {
+                    "type": "string"
+                },
+                "request_id": {
+                    "type": "string"
+                },
+                "surface": {
+                    "$ref": "#/definitions/types.Surface"
+                }
+            }
+        },
+        "types.RequestKind": {
+            "type": "string",
+            "enum": [
+                "input",
+                "tool_attempt",
+                "resource_egress",
+                "resource_access",
+                "initial_envelope",
+                "envelope_amendment"
+            ],
+            "x-enum-varnames": [
+                "RequestKindInput",
+                "RequestKindToolAttempt",
+                "RequestKindResourceEgress",
+                "RequestKindResourceAccess",
+                "RequestKindInitialEnvelope",
+                "RequestKindEnvelopeAmendment"
+            ]
+        },
+        "types.SessionContext": {
+            "type": "object",
+            "properties": {
+                "attempt_id": {
+                    "type": "string"
+                },
+                "session_id": {
+                    "type": "string"
+                },
+                "task_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "types.Surface": {
+            "type": "string",
+            "enum": [
+                "input",
+                "runtime",
+                "resource"
+            ],
+            "x-enum-varnames": [
+                "SurfaceInput",
+                "SurfaceRuntime",
+                "SurfaceResource"
+            ]
+        },
+        "types.Taint": {
+            "type": "string",
+            "enum": [
+                "untrusted_external",
+                "possible_prompt_injection",
+                "embedded_instruction",
+                "secret_bearing"
+            ],
+            "x-enum-varnames": [
+                "TaintUntrustedExternal",
+                "TaintPossibleInjection",
+                "TaintEmbeddedInstruction",
+                "TaintSecretBearing"
+            ]
+        },
+        "types.TargetContext": {
+            "type": "object",
+            "properties": {
+                "identifier": {
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string"
+                }
+            }
+        }
+    },
+    "securityDefinitions": {
+        "BearerAuth": {
+            "description": "Bearer token authentication. Roles: adapter, operator, admin.",
+            "type": "apiKey",
+            "name": "Authorization",
+            "in": "header"
+        }
+    }
+}

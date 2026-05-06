@@ -3,7 +3,7 @@
   "private": true,
   "workspaces": [
     "packages/*",
-    "apps/*"
+    "web"
   ],
   "scripts": {
     "build": "bun run --workspaces --if-present build",

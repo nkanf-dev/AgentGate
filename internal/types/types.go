@@ -135,7 +135,7 @@ const (
 	ApprovalExpired  ApprovalStatus = "expired"
 )
 
-type ApprovalRecord struct {
+type LegacyApprovalRecord struct {
 	ApprovalID string                `json:"approval_id"`
 	SessionID  string                `json:"session_id"`
 	Request    ToolInvocationRequest `json:"request"`

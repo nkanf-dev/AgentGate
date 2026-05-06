@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+
+# Source this file before running the clean-room helper scripts.
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+export AGENTGATE_DEMO_ROOT="${repo_root}/.agentgate-demo"
+export AGENTGATE_BASE_URL="${AGENTGATE_BASE_URL:-http://127.0.0.1:8080}"
+export AGENTGATE_ADDR="${AGENTGATE_ADDR:-127.0.0.1:8080}"
+export AGENTGATE_SQLITE_DSN="${AGENTGATE_SQLITE_DSN:-file:${AGENTGATE_DEMO_ROOT}/agentgate.db?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)}"
+export AGENTGATE_POLICY_PATH="${AGENTGATE_POLICY_PATH:-${repo_root}/config/default_policy.json}"
+
+export AGENTGATE_ADAPTER_TOKEN="${AGENTGATE_ADAPTER_TOKEN:-adapter-local-token}"
+export AGENTGATE_OPERATOR_TOKEN="${AGENTGATE_OPERATOR_TOKEN:-operator-local-token}"
+export AGENTGATE_ADMIN_TOKEN="${AGENTGATE_ADMIN_TOKEN:-admin-local-token}"
+
+export AGENTGATE_ADAPTER_TOKENS="${AGENTGATE_ADAPTER_TOKENS:-${AGENTGATE_ADAPTER_TOKEN}}"
+export AGENTGATE_OPERATOR_TOKENS="${AGENTGATE_OPERATOR_TOKENS:-${AGENTGATE_OPERATOR_TOKEN}}"
+export AGENTGATE_ADMIN_TOKENS="${AGENTGATE_ADMIN_TOKENS:-${AGENTGATE_ADMIN_TOKEN}}"
+
+export AGENTGATE_FEISHU_ADAPTER_ID="${AGENTGATE_FEISHU_ADAPTER_ID:-feishu-agentgate-approval}"
+export AGENTGATE_FEISHU_POLL_MS="${AGENTGATE_FEISHU_POLL_MS:-2000}"
+
+export FEISHU_DOMAIN="${FEISHU_DOMAIN:-feishu}"
+export FEISHU_RECEIVE_ID_TYPE="${FEISHU_RECEIVE_ID_TYPE:-chat_id}"
+export FEISHU_CARD_CALLBACK_PATH="${FEISHU_CARD_CALLBACK_PATH:-/feishu/card}"
+export FEISHU_CARD_CALLBACK_PORT="${FEISHU_CARD_CALLBACK_PORT:-8787}"
+
+mkdir -p "${AGENTGATE_DEMO_ROOT}"
+

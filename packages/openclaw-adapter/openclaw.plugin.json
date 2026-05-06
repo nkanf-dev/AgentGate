@@ -1,0 +1,37 @@
+{
+  "id": "agentgate-openclaw-adapter",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "agentGate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "baseUrl": {
+            "type": "string",
+            "default": "http://127.0.0.1:8080"
+          },
+          "adapterId": {
+            "type": "string",
+            "default": "openclaw-agentgate"
+          },
+          "hostVersion": {
+            "type": "string"
+          },
+          "inputHookName": {
+            "type": "string",
+            "default": "before_prompt_build"
+          },
+          "runtimeHookName": {
+            "type": "string",
+            "default": "before_tool_call"
+          },
+          "adapterToken": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

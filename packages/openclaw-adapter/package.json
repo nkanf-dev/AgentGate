@@ -5,11 +5,32 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./plugin": {
+      "types": "./dist/plugin.d.ts",
+      "default": "./dist/plugin.js"
+    }
+  },
   "files": [
-    "dist"
+    "dist",
+    "openclaw.plugin.json"
   ],
+  "openclaw": {
+    "extensions": [
+      "./dist/plugin.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.3.24-beta.2",
+      "minGatewayVersion": "2026.3.24-beta.2"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepack": "bun run build",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   }
 }
