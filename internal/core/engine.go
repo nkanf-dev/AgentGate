@@ -969,6 +969,7 @@ func normalizeIntegrationDefinition(definition types.IntegrationDefinition) (typ
 	definition.ID = strings.TrimSpace(definition.ID)
 	definition.Name = strings.TrimSpace(definition.Name)
 	definition.Kind = strings.TrimSpace(definition.Kind)
+	definition.ApprovalChannel = strings.TrimSpace(definition.ApprovalChannel)
 	definition.Health = types.IntegrationHealth{}
 	definition.MatchedAdapters = nil
 	if definition.ID == "" {
@@ -985,6 +986,9 @@ func normalizeIntegrationDefinition(definition types.IntegrationDefinition) (typ
 	}
 	if !isCompactToken(definition.Kind) {
 		return types.IntegrationDefinition{}, fmt.Errorf("kind must be a compact token")
+	}
+	if definition.ApprovalChannel != "" && !isCompactToken(definition.ApprovalChannel) {
+		return types.IntegrationDefinition{}, fmt.Errorf("approval_channel must be a compact token")
 	}
 	seenSurfaces := make(map[types.Surface]struct{}, len(definition.ExpectedSurfaces))
 	for _, surface := range definition.ExpectedSurfaces {
@@ -1254,6 +1258,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 			"request_kind":        req.RequestKind,
 			"actor_user":          req.Actor.UserID,
 			"host_id":             req.Actor.HostID,
+			"integration_id":      mapStringValue(req.Policy, "integration_id"),
 			"operation":           req.Action.Operation,
 			"tool":                req.Action.Tool,
 			"side_effects":        append([]string(nil), req.Action.SideEffects...),
@@ -1266,6 +1271,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 			"attempt_id":          req.Session.AttemptID,
 			"approval_id":         approvalIDFromObligations(obligations),
 			"approval_scope":      approvalScopeFromObligations(obligations),
+			"approval_channel":    approvalChannelFromObligations(obligations),
 			"approval_expires_at": approvalExpiresAtFromObligations(obligations),
 			"warnings":            warnings,
 			"policy_version":      traceMetadata.PolicyVersion,
@@ -1678,6 +1684,7 @@ func (e *Engine) evaluateToolAttempt(req types.PolicyRequest, now time.Time, eva
 
 	approvalID := newID("appr")
 	expiresAt := now.Add(10 * time.Minute)
+	approvalChannel := e.approvalChannelForRequest(req)
 	approval := approvalState{
 		ApprovalID: approvalID,
 		RequestID:  req.RequestID,
@@ -1686,6 +1693,7 @@ func (e *Engine) evaluateToolAttempt(req types.PolicyRequest, now time.Time, eva
 		AttemptID:  req.Session.AttemptID,
 		Status:     types.ApprovalPending,
 		Reason:     "High-risk runtime attempt paused by AgentGate policy.",
+		Channel:    approvalChannel,
 		CreatedAt:  now,
 		ExpiresAt:  expiresAt,
 	}
@@ -1714,6 +1722,7 @@ func (e *Engine) evaluateToolAttempt(req types.PolicyRequest, now time.Time, eva
 				Params: map[string]interface{}{
 					"approval_id": approvalID,
 					"scope":       "attempt",
+					"channel":     approvalChannel,
 					"session_id":  req.Session.SessionID,
 					"task_id":     req.Session.TaskID,
 					"attempt_id":  req.Session.AttemptID,
@@ -1729,6 +1738,21 @@ func (e *Engine) evaluateToolAttempt(req types.PolicyRequest, now time.Time, eva
 			},
 		},
 	}
+}
+
+func (e *Engine) approvalChannelForRequest(req types.PolicyRequest) string {
+	integrationID := strings.TrimSpace(mapStringValue(req.Policy, "integration_id"))
+	if integrationID == "" {
+		integrationID = strings.TrimSpace(mapStringValue(req.Context.Raw, "integration_id"))
+	}
+	if integrationID == "" {
+		return ""
+	}
+	definition, found, err := e.integrationDefinition(integrationID)
+	if err != nil || !found || !definition.Enabled {
+		return ""
+	}
+	return definition.ApprovalChannel
 }
 
 func (e *Engine) hasCoverage(surface types.Surface) bool {
@@ -2248,6 +2272,30 @@ func approvalExpiresAtFromObligations(obligations []types.Obligation) string {
 		}
 	}
 	return ""
+}
+
+func approvalChannelFromObligations(obligations []types.Obligation) string {
+	for _, obligation := range obligations {
+		if obligation.Type != "approval_request" {
+			continue
+		}
+		value, ok := obligation.Params["channel"].(string)
+		if ok && value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func mapStringValue(values map[string]interface{}, key string) string {
+	if values == nil {
+		return ""
+	}
+	value, ok := values[key].(string)
+	if !ok {
+		return ""
+	}
+	return value
 }
 
 func redactAuditValue(value interface{}) (interface{}, bool) {

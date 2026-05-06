@@ -391,6 +391,77 @@ func TestIntegrationHealthDisabledAndMissing(t *testing.T) {
 	}
 }
 
+func TestRuntimeApprovalUsesIntegrationApprovalChannel(t *testing.T) {
+	engine := NewEngine()
+
+	_, err := engine.SaveIntegration(types.IntegrationDefinition{
+		ID:               "openclaw-main",
+		Name:             "OpenClaw main adapter",
+		Kind:             "adapter",
+		Enabled:          true,
+		ApprovalChannel:  "approval-feishu",
+		ExpectedSurfaces: []types.Surface{types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("save integration: %v", err)
+	}
+
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_tool_approval_channel",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_approval", TaskID: "task_approval", AttemptID: "attempt_approval"},
+		Action: types.ActionContext{
+			Tool:        "exec",
+			Operation:   "execute",
+			SideEffects: []string{"process_spawn"},
+			OpenWorld:   true,
+		},
+		Target:  types.TargetContext{Kind: "process"},
+		Context: types.DecisionContext{Surface: types.SurfaceRuntime},
+		Policy: map[string]interface{}{
+			"integration_id": "openclaw-main",
+		},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectApprovalRequired {
+		t.Fatalf("effect = %q, want approval_required", decision.Effect)
+	}
+	foundApprovalChannel := false
+	for _, obligation := range decision.Obligations {
+		if obligation.Type != "approval_request" {
+			continue
+		}
+		if obligation.Params["channel"] != "approval-feishu" {
+			t.Fatalf("approval channel = %#v, want approval-feishu", obligation.Params["channel"])
+		}
+		foundApprovalChannel = true
+	}
+	if !foundApprovalChannel {
+		t.Fatalf("expected approval_request obligation, got %#v", decision.Obligations)
+	}
+
+	events, err := engine.Events(10)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	foundEvent := false
+	for _, event := range events {
+		if event.RequestID != "req_tool_approval_channel" {
+			continue
+		}
+		if event.Metadata["approval_channel"] != "approval-feishu" {
+			t.Fatalf("event approval_channel = %#v, want approval-feishu", event.Metadata["approval_channel"])
+		}
+		foundEvent = true
+	}
+	if !foundEvent {
+		t.Fatal("expected policy_decision event for approval request")
+	}
+}
+
 func TestPublishPolicyValidatesAndAffectsDecisions(t *testing.T) {
 	engine := NewEngine()
 	invalid := policy.DefaultBundle()
@@ -528,7 +599,7 @@ func TestPolicyDecisionEventIncludesPolicyTraceMetadata(t *testing.T) {
 	if decisionEvent.Metadata["selected_rule"] != decision.Explanation.PolicyTrace.SelectedRule {
 		t.Fatalf("selected_rule metadata = %#v, want %q", decisionEvent.Metadata["selected_rule"], decision.Explanation.PolicyTrace.SelectedRule)
 	}
-	if decisionEvent.Metadata["policy_status"] != "active_minimal" {
+	if decisionEvent.Metadata["policy_status"] != "active_default" {
 		t.Fatalf("policy_status metadata = %#v", decisionEvent.Metadata["policy_status"])
 	}
 	if matchedRules, ok := decisionEvent.Metadata["matched_rules"].([]string); !ok || len(matchedRules) == 0 {

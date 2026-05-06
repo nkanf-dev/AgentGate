@@ -93,6 +93,7 @@ type IntegrationDefinition struct {
 	Name             string                      `json:"name"`
 	Kind             string                      `json:"kind"`
 	Enabled          bool                        `json:"enabled"`
+	ApprovalChannel  string                      `json:"approval_channel,omitempty"`
 	ExpectedSurfaces []Surface                   `json:"expected_surfaces,omitempty"`
 	Health           IntegrationHealth           `json:"health"`
 	MatchedAdapters  []IntegrationMatchedAdapter `json:"matched_adapters,omitempty"`

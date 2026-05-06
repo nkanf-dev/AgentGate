@@ -176,6 +176,7 @@ func TestSQLiteStoreStateRoundTrip(t *testing.T) {
 		Name:             "OpenClaw main adapter",
 		Kind:             "adapter",
 		Enabled:          true,
+		ApprovalChannel:  "approval-local",
 		ExpectedSurfaces: []types.Surface{types.SurfaceInput, types.SurfaceRuntime},
 	}
 	if err := store.SaveIntegrationDefinition(definition, now); err != nil {
@@ -187,6 +188,9 @@ func TestSQLiteStoreStateRoundTrip(t *testing.T) {
 	}
 	if !found || foundDefinition.ID != definition.ID || !foundDefinition.Enabled {
 		t.Fatalf("integration definition did not round trip: found=%v definition=%#v", found, foundDefinition)
+	}
+	if foundDefinition.ApprovalChannel != "approval-local" {
+		t.Fatalf("integration definition approval channel did not round trip: %#v", foundDefinition)
 	}
 	definitions, err := store.ListIntegrationDefinitions()
 	if err != nil {
