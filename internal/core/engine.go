@@ -1,11 +1,14 @@
 package core
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -28,6 +31,7 @@ type Engine struct {
 	stateStore    StateStore
 	policyBundle  policy.Bundle
 	policyBundles []policy.Bundle
+	runtimes      map[string]*managedRuntimeState
 	secretHandles map[string]types.SecretHandle
 	secretValues  map[string]string
 	approvals     map[string]approvalState
@@ -104,6 +108,19 @@ type approvalState struct {
 	Channel    string
 }
 
+type managedRuntimeState struct {
+	IntegrationID string
+	Worker        string
+	Status        string
+	RestartCount  int
+	LastStartedAt *time.Time
+	LastExitedAt  *time.Time
+	LastHealthyAt *time.Time
+	LastError     string
+	Pid           int
+	cancel        context.CancelFunc
+}
+
 type Error struct {
 	Status  int
 	Code    string
@@ -164,6 +181,7 @@ func NewEngine(options ...Option) *Engine {
 		events:        make([]types.EventEnvelope, 0, 128),
 		policyBundle:  policy.DefaultBundle(),
 		policyBundles: []policy.Bundle{defaultPolicyBundle(policy.DefaultBundle())},
+		runtimes:      make(map[string]*managedRuntimeState),
 		secretHandles: make(map[string]types.SecretHandle),
 		secretValues:  make(map[string]string),
 		approvals:     make(map[string]approvalState),
@@ -175,6 +193,7 @@ func NewEngine(options ...Option) *Engine {
 		option(engine)
 	}
 	engine.seedPolicyHistory()
+	engine.bootstrapManagedRuntimes()
 	return engine
 }
 
@@ -219,6 +238,228 @@ func (e *Engine) PolicyStatus() map[string]interface{} {
 		"status":    bundle.StatusValue(),
 		"issued_at": bundle.IssuedAt,
 	}
+}
+
+func (e *Engine) bootstrapManagedRuntimes() {
+	if e.stateStore == nil {
+		return
+	}
+	definitions, err := e.stateStore.ListIntegrationDefinitions()
+	if err != nil {
+		return
+	}
+	for _, definition := range definitions {
+		normalized, normalizeErr := normalizeIntegrationDefinition(definition)
+		if normalizeErr != nil {
+			continue
+		}
+		if err := e.reconcileManagedRuntime(normalized); err != nil {
+			e.setRuntimeError(normalized.ID, "bootstrap_failed", err)
+		}
+	}
+}
+
+func (e *Engine) reconcileManagedRuntime(definition types.IntegrationDefinition) error {
+	if definition.Runtime == nil || !definition.Runtime.Managed || !definition.Runtime.Enabled || !definition.Enabled {
+		e.stopManagedRuntime(definition.ID)
+		return nil
+	}
+	return e.ensureManagedRuntime(definition)
+}
+
+func (e *Engine) ensureManagedRuntime(definition types.IntegrationDefinition) error {
+	e.mu.RLock()
+	current := e.runtimes[definition.ID]
+	e.mu.RUnlock()
+	if current != nil && (current.Status == "starting" || current.Status == "running") {
+		return nil
+	}
+	return e.startManagedRuntime(definition)
+}
+
+func (e *Engine) startManagedRuntime(definition types.IntegrationDefinition) error {
+	if definition.Runtime == nil {
+		return nil
+	}
+	command, env, err := managedRuntimeCommand(definition)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	cmd.Env = append(os.Environ(), env...)
+	cmd.Dir = resolveRepoRoot()
+
+	now := time.Now().UTC()
+	state := &managedRuntimeState{
+		IntegrationID: definition.ID,
+		Worker:        definition.Runtime.Worker,
+		Status:        "starting",
+		LastStartedAt: &now,
+		cancel:        cancel,
+	}
+
+	e.mu.Lock()
+	e.runtimes[definition.ID] = state
+	e.mu.Unlock()
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		e.setRuntimeError(definition.ID, "start_failed", err)
+		return err
+	}
+
+	e.mu.Lock()
+	state.Pid = cmd.Process.Pid
+	state.Status = "running"
+	started := time.Now().UTC()
+	state.LastHealthyAt = &started
+	e.mu.Unlock()
+
+	go e.watchManagedRuntime(definition, state, cmd)
+	return nil
+}
+
+func (e *Engine) watchManagedRuntime(definition types.IntegrationDefinition, state *managedRuntimeState, cmd *exec.Cmd) {
+	err := cmd.Wait()
+	exitedAt := time.Now().UTC()
+
+	e.mu.Lock()
+	current := e.runtimes[definition.ID]
+	if current == state {
+		state.LastExitedAt = &exitedAt
+		state.Pid = 0
+		if err != nil {
+			state.Status = "degraded"
+			state.LastError = err.Error()
+		} else {
+			state.Status = "stopped"
+			state.LastError = ""
+		}
+	}
+	e.mu.Unlock()
+
+	if definition.Runtime == nil || !definition.Runtime.Restart.Enabled {
+		return
+	}
+
+	e.mu.RLock()
+	current = e.runtimes[definition.ID]
+	e.mu.RUnlock()
+	if current != state {
+		return
+	}
+
+	if definition.Runtime.Restart.MaxAttempts > 0 && state.RestartCount >= definition.Runtime.Restart.MaxAttempts {
+		return
+	}
+
+	backoff := definition.Runtime.Restart.BackoffMs
+	if backoff <= 0 {
+		backoff = 2000
+	}
+
+	time.Sleep(time.Duration(backoff) * time.Millisecond)
+
+	e.mu.Lock()
+	if latest := e.runtimes[definition.ID]; latest == state {
+		state.RestartCount++
+	}
+	e.mu.Unlock()
+
+	_ = e.startManagedRuntime(definition)
+}
+
+func (e *Engine) stopManagedRuntime(integrationID string) {
+	e.mu.Lock()
+	state := e.runtimes[integrationID]
+	if state != nil {
+		delete(e.runtimes, integrationID)
+	}
+	e.mu.Unlock()
+	if state != nil && state.cancel != nil {
+		state.cancel()
+	}
+}
+
+func (e *Engine) setRuntimeError(integrationID string, status string, err error) {
+	now := time.Now().UTC()
+	e.mu.Lock()
+	state := e.runtimes[integrationID]
+	if state == nil {
+		state = &managedRuntimeState{IntegrationID: integrationID}
+		e.runtimes[integrationID] = state
+	}
+	state.Status = status
+	state.LastExitedAt = &now
+	if err != nil {
+		state.LastError = err.Error()
+	}
+	e.mu.Unlock()
+}
+
+func managedRuntimeCommand(definition types.IntegrationDefinition) ([]string, []string, error) {
+	if definition.Runtime == nil {
+		return nil, nil, nil
+	}
+	switch definition.Runtime.Worker {
+	case "feishu":
+		env, err := feishuRuntimeEnv(definition)
+		if err != nil {
+			return nil, nil, err
+		}
+		return []string{"bun", "packages/feishu-adapter/dist/cli.js"}, env, nil
+	default:
+		return nil, nil, fmt.Errorf("unsupported managed runtime worker %q", definition.Runtime.Worker)
+	}
+}
+
+func feishuRuntimeEnv(definition types.IntegrationDefinition) ([]string, error) {
+	if definition.Runtime == nil {
+		return nil, fmt.Errorf("missing runtime spec")
+	}
+	config := definition.Runtime.Config
+	required := []string{
+		"app_id",
+		"app_secret",
+		"receive_id",
+		"receive_id_type",
+	}
+	for _, key := range required {
+		if strings.TrimSpace(mapStringValue(config, key)) == "" {
+			return nil, fmt.Errorf("runtime config %q is required", key)
+		}
+	}
+	env := []string{
+		fmt.Sprintf("AGENTGATE_BASE_URL=%s", strings.TrimSpace(os.Getenv("AGENTGATE_MANAGED_BASE_URL"))),
+		fmt.Sprintf("AGENTGATE_ADAPTER_TOKEN=%s", strings.TrimSpace(os.Getenv("AGENTGATE_MANAGED_ADAPTER_TOKEN"))),
+		fmt.Sprintf("AGENTGATE_OPERATOR_TOKEN=%s", strings.TrimSpace(os.Getenv("AGENTGATE_MANAGED_OPERATOR_TOKEN"))),
+		fmt.Sprintf("AGENTGATE_FEISHU_ADAPTER_ID=%s", definition.ApprovalChannel),
+		fmt.Sprintf("AGENTGATE_FEISHU_INTEGRATION_ID=%s", definition.ID),
+		fmt.Sprintf("FEISHU_APP_ID=%s", mapStringValue(config, "app_id")),
+		fmt.Sprintf("FEISHU_APP_SECRET=%s", mapStringValue(config, "app_secret")),
+		fmt.Sprintf("FEISHU_RECEIVE_ID=%s", mapStringValue(config, "receive_id")),
+		fmt.Sprintf("FEISHU_RECEIVE_ID_TYPE=%s", mapStringValue(config, "receive_id_type")),
+		fmt.Sprintf("FEISHU_DOMAIN=%s", defaultString(mapStringValue(config, "domain"), "feishu")),
+		fmt.Sprintf("AGENTGATE_FEISHU_POLL_MS=%s", defaultString(mapStringValue(config, "poll_interval_ms"), "2000")),
+	}
+	return env, nil
+}
+
+func resolveRepoRoot() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return cwd
+}
+
+func defaultString(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func (e *Engine) CurrentPolicy() PolicyCurrentResponse {
@@ -811,6 +1052,9 @@ func (e *Engine) SaveIntegration(definition types.IntegrationDefinition) (types.
 	if err != nil {
 		return types.IntegrationDefinition{}, err
 	}
+	if err := e.reconcileManagedRuntime(normalized); err != nil {
+		return types.IntegrationDefinition{}, errStatus(http.StatusInternalServerError, "managed_runtime_reconcile_failed", err.Error())
+	}
 	return e.hydrateIntegrationHealth(normalized, adapters, now), nil
 }
 
@@ -818,6 +1062,7 @@ func (e *Engine) DeleteIntegration(integrationID string) error {
 	if integrationID == "" {
 		return errBadRequest("missing_integration_id", "integration id is required")
 	}
+	e.stopManagedRuntime(integrationID)
 	if e.stateStore != nil {
 		if err := e.stateStore.DeleteIntegrationDefinition(integrationID); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -897,6 +1142,7 @@ func (e *Engine) adapterCoverages() ([]types.AdapterCoverage, error) {
 func (e *Engine) hydrateIntegrationHealth(definition types.IntegrationDefinition, adapters []types.AdapterCoverage, now time.Time) types.IntegrationDefinition {
 	definition.Health = types.IntegrationHealth{ComputedAt: now}
 	definition.MatchedAdapters = nil
+	definition.Health.Runtime = e.runtimeView(definition.ID)
 	if !definition.Enabled {
 		definition.Health.Status = types.IntegrationHealthDisabled
 		return definition
@@ -930,15 +1176,66 @@ func (e *Engine) hydrateIntegrationHealth(definition types.IntegrationDefinition
 	definition.MatchedAdapters = matched
 	definition.Health.MatchedAdapterCount = len(matched)
 	if len(matched) == 0 {
-		definition.Health.Status = types.IntegrationHealthMissing
+		if runtimeStatus := runtimeHealthStatus(definition.Health.Runtime); runtimeStatus != "" {
+			definition.Health.Status = runtimeStatus
+		} else {
+			definition.Health.Status = types.IntegrationHealthMissing
+		}
 		return definition
 	}
 	primary := matched[0]
 	definition.Health.Status = primary.Status
+	if runtimeStatus := runtimeHealthStatus(definition.Health.Runtime); runtimeStatus == types.IntegrationHealthDegraded || runtimeStatus == types.IntegrationHealthStarting {
+		definition.Health.Status = runtimeStatus
+	}
 	definition.Health.MatchedAdapterID = primary.AdapterID
 	lastSeen := primary.LastSeenAt
 	definition.Health.LastSeenAt = &lastSeen
 	return definition
+}
+
+func (e *Engine) runtimeView(integrationID string) *types.IntegrationRuntimeView {
+	e.mu.RLock()
+	state := e.runtimes[integrationID]
+	e.mu.RUnlock()
+	if state == nil {
+		return nil
+	}
+	view := &types.IntegrationRuntimeView{
+		Managed:      true,
+		Worker:       state.Worker,
+		Status:       state.Status,
+		RestartCount: state.RestartCount,
+		LastError:    state.LastError,
+		Pid:          state.Pid,
+	}
+	if state.LastStartedAt != nil {
+		startedAt := *state.LastStartedAt
+		view.LastStartedAt = &startedAt
+	}
+	if state.LastExitedAt != nil {
+		exitedAt := *state.LastExitedAt
+		view.LastExitedAt = &exitedAt
+	}
+	if state.LastHealthyAt != nil {
+		healthyAt := *state.LastHealthyAt
+		view.LastHealthyAt = &healthyAt
+	}
+	return view
+}
+
+func runtimeHealthStatus(view *types.IntegrationRuntimeView) types.IntegrationHealthStatus {
+	if view == nil || !view.Managed {
+		return ""
+	}
+	switch view.Status {
+	case "starting":
+		return types.IntegrationHealthStarting
+	case "degraded", "error":
+		return types.IntegrationHealthDegraded
+	default:
+		return ""
+	}
 }
 
 func adapterHealthStatus(adapter types.AdapterCoverage, now time.Time) types.IntegrationHealthStatus {
@@ -952,16 +1249,20 @@ func integrationStatusRank(status types.IntegrationHealthStatus) int {
 	switch status {
 	case types.IntegrationHealthConnected:
 		return 0
-	case types.IntegrationHealthStale:
+	case types.IntegrationHealthStarting:
 		return 1
-	case types.IntegrationHealthMissing:
+	case types.IntegrationHealthDegraded:
 		return 2
-	case types.IntegrationHealthUnmanaged:
+	case types.IntegrationHealthStale:
 		return 3
-	case types.IntegrationHealthDisabled:
+	case types.IntegrationHealthMissing:
 		return 4
-	default:
+	case types.IntegrationHealthUnmanaged:
 		return 5
+	case types.IntegrationHealthDisabled:
+		return 6
+	default:
+		return 7
 	}
 }
 
@@ -990,6 +1291,11 @@ func normalizeIntegrationDefinition(definition types.IntegrationDefinition) (typ
 	if definition.ApprovalChannel != "" && !isCompactToken(definition.ApprovalChannel) {
 		return types.IntegrationDefinition{}, fmt.Errorf("approval_channel must be a compact token")
 	}
+	if definition.Runtime != nil {
+		if err := validateIntegrationRuntimeSpec(*definition.Runtime); err != nil {
+			return types.IntegrationDefinition{}, err
+		}
+	}
 	seenSurfaces := make(map[types.Surface]struct{}, len(definition.ExpectedSurfaces))
 	for _, surface := range definition.ExpectedSurfaces {
 		if !isValidSurface(surface) {
@@ -1001,6 +1307,23 @@ func normalizeIntegrationDefinition(definition types.IntegrationDefinition) (typ
 		seenSurfaces[surface] = struct{}{}
 	}
 	return definition, nil
+}
+
+func validateIntegrationRuntimeSpec(spec types.IntegrationRuntimeSpec) error {
+	spec.Worker = strings.TrimSpace(spec.Worker)
+	if spec.Worker == "" {
+		return fmt.Errorf("runtime.worker is required")
+	}
+	if !isCompactToken(spec.Worker) {
+		return fmt.Errorf("runtime.worker must be a compact token")
+	}
+	if spec.Restart.MaxAttempts < 0 {
+		return fmt.Errorf("runtime.restart.max_attempts must be >= 0")
+	}
+	if spec.Restart.BackoffMs < 0 {
+		return fmt.Errorf("runtime.restart.backoff_ms must be >= 0")
+	}
+	return nil
 }
 
 func (e *Engine) RegisterAdapter(req types.AdapterRegistration) (types.RegistrationResult, error) {
@@ -1261,6 +1584,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 			"integration_id":      mapStringValue(req.Policy, "integration_id"),
 			"operation":           req.Action.Operation,
 			"tool":                req.Action.Tool,
+			"content_summary":     req.Content.Summary,
 			"side_effects":        append([]string(nil), req.Action.SideEffects...),
 			"open_world":          req.Action.OpenWorld,
 			"target_kind":         req.Target.Kind,

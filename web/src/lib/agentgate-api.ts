@@ -53,6 +53,8 @@ export type AdapterCoverage = {
 }
 
 export type IntegrationHealthStatus =
+  | "starting"
+  | "degraded"
   | "connected"
   | "stale"
   | "missing"
@@ -64,6 +66,7 @@ export type IntegrationHealth = {
   matched_adapter_id?: string
   matched_adapter_count?: number
   last_seen_at?: string
+  runtime?: IntegrationRuntimeView
   computed_at: string
 }
 
@@ -87,7 +90,9 @@ export type IntegrationDefinition = {
   name: string
   kind: string
   enabled: boolean
+  approval_channel?: string
   expected_surfaces?: Surface[]
+  runtime?: IntegrationRuntimeSpec
   health: IntegrationHealth
   matched_adapters?: IntegrationMatchedAdapter[]
 }
@@ -97,7 +102,33 @@ export type IntegrationDefinitionInput = {
   name: string
   kind: string
   enabled: boolean
+  approval_channel?: string
   expected_surfaces?: Surface[]
+  runtime?: IntegrationRuntimeSpec
+}
+
+export type IntegrationRuntimeSpec = {
+  managed: boolean
+  worker: string
+  enabled: boolean
+  config?: Record<string, unknown>
+  restart?: {
+    enabled: boolean
+    max_attempts?: number
+    backoff_ms?: number
+  }
+}
+
+export type IntegrationRuntimeView = {
+  managed: boolean
+  worker?: string
+  status?: string
+  restart_count?: number
+  last_started_at?: string
+  last_exited_at?: string
+  last_healthy_at?: string
+  last_error?: string
+  pid?: number
 }
 
 export type IntegrationsResponse = {

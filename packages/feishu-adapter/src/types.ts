@@ -39,6 +39,13 @@ export interface ApprovalCardPayload {
   scope?: string;
   expiresAt?: string;
   occurredAt?: string;
+  tool?: string;
+  operation?: string;
+  targetKind?: string;
+  targetIdentifier?: string;
+  contentSummary?: string;
+  sideEffects?: string[];
+  selectedRule?: string;
 }
 
 export interface ApprovalResolveResponse {

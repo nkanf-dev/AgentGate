@@ -82,6 +82,8 @@ type IntegrationHealthStatus string
 
 const (
 	IntegrationHealthConnected IntegrationHealthStatus = "connected"
+	IntegrationHealthStarting  IntegrationHealthStatus = "starting"
+	IntegrationHealthDegraded  IntegrationHealthStatus = "degraded"
 	IntegrationHealthStale     IntegrationHealthStatus = "stale"
 	IntegrationHealthMissing   IntegrationHealthStatus = "missing"
 	IntegrationHealthUnmanaged IntegrationHealthStatus = "unmanaged"
@@ -95,6 +97,7 @@ type IntegrationDefinition struct {
 	Enabled          bool                        `json:"enabled"`
 	ApprovalChannel  string                      `json:"approval_channel,omitempty"`
 	ExpectedSurfaces []Surface                   `json:"expected_surfaces,omitempty"`
+	Runtime          *IntegrationRuntimeSpec     `json:"runtime,omitempty"`
 	Health           IntegrationHealth           `json:"health"`
 	MatchedAdapters  []IntegrationMatchedAdapter `json:"matched_adapters,omitempty"`
 }
@@ -104,6 +107,7 @@ type IntegrationHealth struct {
 	MatchedAdapterID    string                  `json:"matched_adapter_id,omitempty"`
 	MatchedAdapterCount int                     `json:"matched_adapter_count,omitempty"`
 	LastSeenAt          *time.Time              `json:"last_seen_at,omitempty"`
+	Runtime             *IntegrationRuntimeView `json:"runtime,omitempty"`
 	ComputedAt          time.Time               `json:"computed_at"`
 }
 
@@ -117,6 +121,32 @@ type IntegrationMatchedAdapter struct {
 	Status             IntegrationHealthStatus `json:"status"`
 	RegisteredAt       time.Time               `json:"registered_at"`
 	LastSeenAt         time.Time               `json:"last_seen_at"`
+}
+
+type IntegrationRuntimeSpec struct {
+	Managed  bool                   `json:"managed"`
+	Worker   string                 `json:"worker"`
+	Enabled  bool                   `json:"enabled"`
+	Config   map[string]interface{} `json:"config,omitempty"`
+	Restart  IntegrationRestartSpec `json:"restart,omitempty"`
+}
+
+type IntegrationRestartSpec struct {
+	Enabled      bool `json:"enabled"`
+	MaxAttempts  int  `json:"max_attempts,omitempty"`
+	BackoffMs    int  `json:"backoff_ms,omitempty"`
+}
+
+type IntegrationRuntimeView struct {
+	Managed        bool      `json:"managed"`
+	Worker         string    `json:"worker,omitempty"`
+	Status         string    `json:"status,omitempty"`
+	RestartCount   int       `json:"restart_count,omitempty"`
+	LastStartedAt  *time.Time `json:"last_started_at,omitempty"`
+	LastExitedAt   *time.Time `json:"last_exited_at,omitempty"`
+	LastHealthyAt  *time.Time `json:"last_healthy_at,omitempty"`
+	LastError      string    `json:"last_error,omitempty"`
+	Pid            int       `json:"pid,omitempty"`
 }
 
 type IntegrationsResponse struct {

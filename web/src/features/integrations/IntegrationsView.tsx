@@ -50,11 +50,14 @@ import {
 type IntegrationPage = "list" | "detail" | "edit" | "new"
 
 const integrationKindOptions = ["adapter", "transport", "resource_provider"]
+const managedWorkerOptions = ["feishu"]
 
 const healthVariant: Record<
   IntegrationHealthStatus,
   "default" | "secondary" | "destructive" | "outline"
 > = {
+  starting: "outline",
+  degraded: "destructive",
   connected: "secondary",
   stale: "outline",
   missing: "destructive",
@@ -265,6 +268,7 @@ function IntegrationList({
                 <TableHead>Name</TableHead>
                 <TableHead>Kind</TableHead>
                 <TableHead>Health</TableHead>
+                <TableHead>Runtime</TableHead>
                 <TableHead>Enabled</TableHead>
                 <TableHead className="text-right">Matched</TableHead>
               </TableRow>
@@ -286,6 +290,11 @@ function IntegrationList({
                   <TableCell>
                     <HealthBadge status={definition.health.status} />
                   </TableCell>
+                  <TableCell>
+                    {definition.health.runtime?.managed
+                      ? statusLabel(definition.health.runtime.status ?? "starting")
+                      : "External"}
+                  </TableCell>
                   <TableCell>{definition.enabled ? "Enabled" : "Disabled"}</TableCell>
                   <TableCell className="text-right font-mono">
                     {definition.health.matched_adapter_count ?? 0}
@@ -295,7 +304,7 @@ function IntegrationList({
               {!definitions.length ? (
                 <TableRow>
                   <TableCell
-                    colSpan={5}
+                    colSpan={6}
                     className="h-24 text-center text-sm text-muted-foreground"
                   >
                     {loading ? "Loading" : "No expected integrations yet."}
@@ -376,6 +385,14 @@ function IntegrationDetail({
               label="Matched"
               value={String(definition.health.matched_adapter_count ?? 0)}
             />
+            <DetailTile
+              label="Runtime"
+              value={
+                definition.health.runtime?.managed
+                  ? statusLabel(definition.health.runtime.status ?? "starting")
+                  : "External"
+              }
+            />
           </div>
           {deleteError ? (
             <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
@@ -384,6 +401,27 @@ function IntegrationDetail({
           ) : null}
         </CardContent>
       </Card>
+
+      {definition.health.runtime?.managed ? (
+        <Card className="min-w-0">
+          <CardHeader className="border-b">
+            <CardTitle>Managed Runtime</CardTitle>
+            <CardDescription>
+              AgentGate is supervising this worker and restoring it on restart.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3 md:grid-cols-4">
+            <DetailTile label="Worker" value={definition.health.runtime.worker ?? "Unknown"} />
+            <DetailTile label="Status" value={statusLabel(definition.health.runtime.status ?? "starting")} />
+            <DetailTile label="PID" value={definition.health.runtime.pid ? String(definition.health.runtime.pid) : "Not running"} />
+            <DetailTile label="Restarts" value={String(definition.health.runtime.restart_count ?? 0)} />
+            <DetailTile label="Last Started" value={definition.health.runtime.last_started_at ? formatDate(definition.health.runtime.last_started_at) : "Never"} />
+            <DetailTile label="Last Healthy" value={definition.health.runtime.last_healthy_at ? formatDate(definition.health.runtime.last_healthy_at) : "Unknown"} />
+            <DetailTile label="Last Exited" value={definition.health.runtime.last_exited_at ? formatDate(definition.health.runtime.last_exited_at) : "Not exited"} />
+            <DetailTile label="Last Error" value={definition.health.runtime.last_error || "None"} />
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card className="min-w-0">
         <CardHeader className="border-b">
@@ -559,6 +597,15 @@ function IntegrationEditor({
                 </SelectContent>
               </Select>
             </LabeledField>
+            <LabeledField label="Approval Channel">
+              <Input
+                value={definition.approval_channel ?? ""}
+                placeholder="approval-feishu"
+                onChange={(event) =>
+                  onChange({ ...definition, approval_channel: event.target.value })
+                }
+              />
+            </LabeledField>
             <LabeledField label="Enabled">
               <Select
                 value={definition.enabled ? "true" : "false"}
@@ -575,6 +622,124 @@ function IntegrationEditor({
                 </SelectContent>
               </Select>
             </LabeledField>
+          </div>
+
+          <Separator />
+
+          <div className="space-y-3">
+            <div>
+              <div className="text-sm font-medium">Managed Runtime</div>
+              <div className="text-sm text-muted-foreground">
+                Let AgentGate supervise this worker and restore it on restart.
+              </div>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <LabeledField label="Worker">
+                <Select
+                  value={definition.runtime?.worker ?? "feishu"}
+                  onValueChange={(worker) =>
+                    onChange({
+                      ...definition,
+                      runtime: {
+                        managed: true,
+                        worker,
+                        enabled: definition.runtime?.enabled ?? true,
+                        config: definition.runtime?.config ?? {},
+                        restart: definition.runtime?.restart ?? {
+                          enabled: true,
+                          max_attempts: 10,
+                          backoff_ms: 2000,
+                        },
+                      },
+                    })
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {managedWorkerOptions.map((worker) => (
+                      <SelectItem key={worker} value={worker}>
+                        {statusLabel(worker)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </LabeledField>
+              <LabeledField label="Runtime Enabled">
+                <Select
+                  value={definition.runtime?.enabled === false ? "false" : "true"}
+                  onValueChange={(value) =>
+                    onChange({
+                      ...definition,
+                      runtime: {
+                        managed: true,
+                        worker: definition.runtime?.worker ?? "feishu",
+                        enabled: value === "true",
+                        config: definition.runtime?.config ?? {},
+                        restart: definition.runtime?.restart ?? {
+                          enabled: true,
+                          max_attempts: 10,
+                          backoff_ms: 2000,
+                        },
+                      },
+                    })
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="true">Enabled</SelectItem>
+                    <SelectItem value="false">Disabled</SelectItem>
+                  </SelectContent>
+                </Select>
+              </LabeledField>
+              <LabeledField label="Feishu App ID">
+                <Input
+                  value={stringConfig(definition, "app_id")}
+                  placeholder="cli_xxx"
+                  onChange={(event) =>
+                    updateRuntimeConfig(definition, onChange, "app_id", event.target.value)
+                  }
+                />
+              </LabeledField>
+              <LabeledField label="Feishu App Secret">
+                <Input
+                  value={stringConfig(definition, "app_secret")}
+                  placeholder="app secret"
+                  onChange={(event) =>
+                    updateRuntimeConfig(definition, onChange, "app_secret", event.target.value)
+                  }
+                />
+              </LabeledField>
+              <LabeledField label="Receive ID">
+                <Input
+                  value={stringConfig(definition, "receive_id")}
+                  placeholder="oc_xxx"
+                  onChange={(event) =>
+                    updateRuntimeConfig(definition, onChange, "receive_id", event.target.value)
+                  }
+                />
+              </LabeledField>
+              <LabeledField label="Receive ID Type">
+                <Select
+                  value={stringConfig(definition, "receive_id_type") || "chat_id"}
+                  onValueChange={(value) =>
+                    updateRuntimeConfig(definition, onChange, "receive_id_type", value)
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="chat_id">chat_id</SelectItem>
+                    <SelectItem value="open_id">open_id</SelectItem>
+                    <SelectItem value="user_id">user_id</SelectItem>
+                  </SelectContent>
+                </Select>
+              </LabeledField>
+            </div>
           </div>
 
           <Separator />
@@ -796,7 +961,21 @@ function blankDefinition(): IntegrationDefinitionInput {
     name: "",
     kind: "adapter",
     enabled: true,
+    approval_channel: "",
     expected_surfaces: ["input", "runtime"],
+    runtime: {
+      managed: true,
+      worker: "feishu",
+      enabled: true,
+      config: {
+        receive_id_type: "chat_id",
+      },
+      restart: {
+        enabled: true,
+        max_attempts: 10,
+        backoff_ms: 2000,
+      },
+    },
   }
 }
 
@@ -808,8 +987,40 @@ function toDefinitionInput(
     name: definition.name,
     kind: definition.kind,
     enabled: definition.enabled,
+    approval_channel: definition.approval_channel,
     expected_surfaces: definition.expected_surfaces ?? [],
+    runtime: definition.runtime,
   }
+}
+
+function stringConfig(definition: IntegrationDefinitionInput, key: string) {
+  const value = definition.runtime?.config?.[key]
+  return typeof value === "string" ? value : ""
+}
+
+function updateRuntimeConfig(
+  definition: IntegrationDefinitionInput,
+  onChange: (definition: IntegrationDefinitionInput) => void,
+  key: string,
+  value: string
+) {
+  onChange({
+    ...definition,
+    runtime: {
+      managed: true,
+      worker: definition.runtime?.worker ?? "feishu",
+      enabled: definition.runtime?.enabled ?? true,
+      config: {
+        ...(definition.runtime?.config ?? {}),
+        [key]: value,
+      },
+      restart: definition.runtime?.restart ?? {
+        enabled: true,
+        max_attempts: 10,
+        backoff_ms: 2000,
+      },
+    },
+  })
 }
 
 function uniqueSurfaces(surfaces: Surface[]) {

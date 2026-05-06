@@ -44,6 +44,8 @@ export const taintLabels: Record<string, string> = {
 }
 
 export const statusLabels: Record<string, string> = {
+  starting: "Starting",
+  degraded: "Degraded",
   active: "Active",
   inactive: "Inactive",
   archived: "Archived",
@@ -67,6 +69,8 @@ export const statusLabels: Record<string, string> = {
 }
 
 export const integrationHealthLabels: Record<IntegrationHealthStatus, string> = {
+  starting: "Starting",
+  degraded: "Degraded",
   connected: "Connected",
   stale: "Stale",
   missing: "Missing",

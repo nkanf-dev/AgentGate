@@ -78,11 +78,13 @@ export class FeishuApprovalAdapter {
 
   async pollOnce(): Promise<void> {
     const approvals = await this.agentGate.approvals();
+    const approvalEvents = await this.agentGate.events(200);
     for (const approval of approvals) {
       if (approval.channel && approval.channel !== this.config.adapterId) {
         continue;
       }
-      const payload = approvalPayloadFromApproval(approval);
+      const approvalEvent = findApprovalEvent(approval, approvalEvents);
+      const payload = approvalPayloadFromApproval(approval, approvalEvent);
       if (payload === undefined || this.sentApprovals.has(payload.approvalId)) {
         continue;
       }
@@ -267,7 +269,10 @@ export class FeishuApprovalAdapter {
   }
 }
 
-export function approvalPayloadFromApproval(approval: ApprovalRecord): ApprovalCardPayload | undefined {
+export function approvalPayloadFromApproval(
+  approval: ApprovalRecord,
+  event?: EventEnvelope,
+): ApprovalCardPayload | undefined {
   if (approval.status !== "pending") {
     return undefined;
   }
@@ -278,10 +283,17 @@ export function approvalPayloadFromApproval(approval: ApprovalRecord): ApprovalC
     taskId: approval.task_id,
     attemptId: approval.attempt_id,
     reason: approval.reason,
-    surface: "runtime",
-    scope: "attempt",
+    surface: event?.surface ?? "runtime",
+    scope: stringValue(event?.metadata?.approval_scope) ?? "attempt",
     expiresAt: approval.expires_at,
     occurredAt: approval.created_at,
+    tool: stringValue(event?.metadata?.tool),
+    operation: stringValue(event?.metadata?.operation),
+    targetKind: stringValue(event?.metadata?.target_kind),
+    targetIdentifier: stringValue(event?.metadata?.target_identifier),
+    contentSummary: stringValue(event?.metadata?.content_summary),
+    sideEffects: stringArrayValue(event?.metadata?.side_effects),
+    selectedRule: stringValue(event?.metadata?.selected_rule),
   };
 }
 
@@ -317,4 +329,23 @@ function objectValue(value: unknown): Record<string, unknown> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function stringArrayValue(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const result = value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
+  return result.length > 0 ? result : undefined;
+}
+
+function findApprovalEvent(approval: ApprovalRecord, events: EventEnvelope[]): EventEnvelope | undefined {
+  return events.find(
+    (event) =>
+      event.event_type === "policy_decision" &&
+      event.effect === "approval_required" &&
+      event.request_id === approval.request_id &&
+      event.session_id === approval.session_id &&
+      stringValue(event.metadata?.approval_id) === approval.approval_id,
+  );
 }
