@@ -339,7 +339,9 @@ function IntegrationDetail({
   onDelete: () => void
 }) {
   const actualSurfaces = uniqueSurfaces(
-    (definition.matched_adapters ?? []).flatMap((adapter) => adapter.surfaces)
+    (definition.matched_adapters ?? []).flatMap(
+      (adapter) => adapter.surfaces ?? []
+    )
   )
 
   return (
@@ -481,7 +483,7 @@ function IntegrationDetail({
                     {adapter.host.version ? ` / ${adapter.host.version}` : ""}
                   </TableCell>
                   <TableCell>
-                    <SurfaceBadges surfaces={adapter.surfaces} />
+                    <SurfaceBadges surfaces={adapter.surfaces ?? []} />
                   </TableCell>
                   <TableCell className="font-mono text-xs">
                     {formatDate(adapter.last_seen_at)}
@@ -841,7 +843,7 @@ function LiveAdaptersCard({ coverage }: { coverage?: CoverageResponse }) {
                   {adapter.host.version ? ` / ${adapter.host.version}` : ""}
                 </TableCell>
                 <TableCell>
-                  <SurfaceBadges surfaces={adapter.surfaces} />
+                  <SurfaceBadges surfaces={adapter.surfaces ?? []} />
                 </TableCell>
                 <TableCell className="font-mono text-xs">
                   {formatDate(adapter.last_seen_at)}

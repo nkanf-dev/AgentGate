@@ -312,6 +312,9 @@ For multi-instance deployments, the best healthy instance wins. An adapter that 
 **Requirements** - Go 1.22+, Node.js 20+, Bun.
 
 ```bash
+# Install everything and build the local demo stack
+./scripts/install-agentgate.sh
+
 # Run tests
 go test ./...
 
@@ -321,12 +324,17 @@ bun run typecheck
 # Build all TypeScript workspaces
 bun run build
 
-# Start Core (development)
+# Start Core + hosted console
 go run ./cmd/agentgate
 
-# Start console (development)
+# Optional: start console in Vite dev mode
 cd web && bun run dev
 ```
+
+For the local-first demo/deploy path, see:
+
+- [docs/install-and-deploy.md](/Users/nkanf/projs/AgentGate/docs/install-and-deploy.md)
+- [docs/release-playbook.md](/Users/nkanf/projs/AgentGate/docs/release-playbook.md)
 
 **Token roles**
 
@@ -343,5 +351,7 @@ export AGENTGATE_ADAPTER_TOKENS=adapter-local-token
 export AGENTGATE_OPERATOR_TOKENS=operator-local-token
 export AGENTGATE_ADMIN_TOKENS=admin-local-token
 ```
+
+If these variables are omitted, AgentGate now falls back to the same local defaults so `go run ./cmd/agentgate` works out of the box for local evaluation.
 
 See `config/default_policy.json` for the default policy bundle.

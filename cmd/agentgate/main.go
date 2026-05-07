@@ -72,9 +72,9 @@ func run() error {
 	srv := &http.Server{
 		Addr: addr,
 		Handler: httpapi.NewServer(core.NewEngine(core.WithEventStore(db), core.WithStateStore(db), core.WithPolicyBundle(policyBundle), core.WithPolicyBundles(bundles)), authz.New(authz.Config{
-			AdapterTokens:  splitCSV(os.Getenv("AGENTGATE_ADAPTER_TOKENS")),
-			OperatorTokens: splitCSV(os.Getenv("AGENTGATE_OPERATOR_TOKENS")),
-			AdminTokens:    splitCSV(os.Getenv("AGENTGATE_ADMIN_TOKENS")),
+			AdapterTokens:  splitCSV(getenv("AGENTGATE_ADAPTER_TOKENS", "adapter-local-token")),
+			OperatorTokens: splitCSV(getenv("AGENTGATE_OPERATOR_TOKENS", "operator-local-token")),
+			AdminTokens:    splitCSV(getenv("AGENTGATE_ADMIN_TOKENS", "admin-local-token")),
 		})).Router(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}

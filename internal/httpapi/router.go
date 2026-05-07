@@ -18,7 +18,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/agentgate/agentgate/internal/authz"
 	"github.com/agentgate/agentgate/internal/core"
@@ -82,7 +85,40 @@ func (s *Server) Router() http.Handler {
 		r.Delete("/integrations/{integration_id}", s.deleteIntegrationDefinition)
 	})
 
+	if spa := staticConsoleHandler(); spa != nil {
+		r.NotFound(spa.ServeHTTP)
+	}
+
 	return r
+}
+
+func staticConsoleHandler() http.Handler {
+	distDir := filepath.Clean("web/dist")
+	indexPath := filepath.Join(distDir, "index.html")
+	if _, err := os.Stat(indexPath); err != nil {
+		return nil
+	}
+
+	fileServer := http.FileServer(http.Dir(distDir))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.NotFound(w, r)
+			return
+		}
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			http.ServeFile(w, r, indexPath)
+			return
+		}
+
+		candidate := filepath.Join(distDir, filepath.Clean(path))
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+
+		http.ServeFile(w, r, indexPath)
+	})
 }
 
 func corsMiddleware(next http.Handler) http.Handler {

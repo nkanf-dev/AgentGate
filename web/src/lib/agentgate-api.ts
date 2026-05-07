@@ -281,9 +281,13 @@ export type PolicyBundlesResponse = {
 }
 
 export const defaultConfig: ConsoleConfig = {
-  baseUrl: import.meta.env.VITE_AGENTGATE_BASE_URL ?? "http://localhost:8080",
-  operatorToken: import.meta.env.VITE_AGENTGATE_OPERATOR_TOKEN ?? "",
-  adminToken: import.meta.env.VITE_AGENTGATE_ADMIN_TOKEN ?? "",
+  baseUrl:
+    import.meta.env.VITE_AGENTGATE_BASE_URL ??
+    (typeof window !== "undefined" ? window.location.origin : "http://localhost:8080"),
+  operatorToken:
+    import.meta.env.VITE_AGENTGATE_OPERATOR_TOKEN ?? "operator-local-token",
+  adminToken:
+    import.meta.env.VITE_AGENTGATE_ADMIN_TOKEN ?? "admin-local-token",
 }
 
 const configStorageKey = "agentgate.console.config.v1"
@@ -311,8 +315,8 @@ export function saveConfig(config: ConsoleConfig) {
 function normalizeConsoleConfig(config: ConsoleConfig): ConsoleConfig {
   return {
     baseUrl: config.baseUrl.trim() || defaultConfig.baseUrl,
-    operatorToken: config.operatorToken.trim(),
-    adminToken: config.adminToken.trim(),
+    operatorToken: config.operatorToken.trim() || defaultConfig.operatorToken,
+    adminToken: config.adminToken.trim() || defaultConfig.adminToken,
   }
 }
 
@@ -537,13 +541,14 @@ export async function integrationDefinitions(
   adminToken: string,
   signal?: AbortSignal
 ) {
-  return fetchAgentGate<IntegrationsResponse>(
+  const response = await fetchAgentGate<IntegrationsResponse>(
     baseUrl,
     "/internal/integrations",
     signal,
     undefined,
     adminToken
   )
+  return normalizeIntegrationsResponse(response)
 }
 
 export async function createIntegrationDefinition(
@@ -687,9 +692,64 @@ function normalizeEvent(event: EventEnvelope): SecurityEvent {
 function normalizeCoverage(coverage: CoverageResponse): CoverageResponse {
   return {
     generated_at: coverage.generated_at || new Date().toISOString(),
-    adapters: Array.isArray(coverage.adapters) ? coverage.adapters : [],
+    adapters: Array.isArray(coverage.adapters)
+      ? coverage.adapters.map((adapter) => ({
+          ...adapter,
+          host: adapter.host ?? { kind: "unknown" },
+          surfaces: Array.isArray(adapter.surfaces) ? adapter.surfaces : [],
+          supporting_channels: Array.isArray(adapter.supporting_channels)
+            ? adapter.supporting_channels
+            : [],
+        }))
+      : [],
     surfaces: coverage.surfaces ?? {},
     warnings: Array.isArray(coverage.warnings) ? coverage.warnings : [],
+  }
+}
+
+function normalizeIntegrationsResponse(
+  response: IntegrationsResponse
+): IntegrationsResponse {
+  return {
+    integrations: Array.isArray(response.integrations)
+      ? response.integrations.map((definition) => ({
+          ...definition,
+          expected_surfaces: Array.isArray(definition.expected_surfaces)
+            ? definition.expected_surfaces
+            : [],
+          health: {
+            status: definition.health?.status ?? "missing",
+            matched_adapter_id: definition.health?.matched_adapter_id,
+            matched_adapter_count: definition.health?.matched_adapter_count ?? 0,
+            last_seen_at: definition.health?.last_seen_at,
+            runtime: definition.health?.runtime
+              ? {
+                  managed: Boolean(definition.health.runtime.managed),
+                  worker: definition.health.runtime.worker,
+                  status: definition.health.runtime.status,
+                  restart_count: definition.health.runtime.restart_count,
+                  last_started_at: definition.health.runtime.last_started_at,
+                  last_exited_at: definition.health.runtime.last_exited_at,
+                  last_healthy_at: definition.health.runtime.last_healthy_at,
+                  last_error: definition.health.runtime.last_error,
+                  pid: definition.health.runtime.pid,
+                }
+              : undefined,
+            computed_at:
+              definition.health?.computed_at ?? new Date().toISOString(),
+          },
+          matched_adapters: Array.isArray(definition.matched_adapters)
+            ? definition.matched_adapters.map((adapter) => ({
+                ...adapter,
+                host: adapter.host ?? { kind: "unknown" },
+                surfaces: Array.isArray(adapter.surfaces) ? adapter.surfaces : [],
+                supporting_channels: Array.isArray(adapter.supporting_channels)
+                  ? adapter.supporting_channels
+                  : [],
+              }))
+            : [],
+        }))
+      : [],
   }
 }
 
