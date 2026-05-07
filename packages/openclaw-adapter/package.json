@@ -1,7 +1,9 @@
 {
   "name": "@agentgate/openclaw-adapter",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "private": false,
+  "description": "OpenClaw plugin that forwards input and runtime guard decisions to AgentGate.",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -17,7 +19,15 @@
   },
   "files": [
     "dist",
-    "openclaw.plugin.json"
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "keywords": [
+    "agentgate",
+    "openclaw",
+    "security",
+    "approval",
+    "plugin"
   ],
   "openclaw": {
     "extensions": [

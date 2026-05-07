@@ -1,7 +1,9 @@
 {
   "name": "@agentgate/feishu-adapter",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "private": false,
+  "description": "Feishu long-connection approval transport for AgentGate.",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -15,7 +17,14 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "agentgate",
+    "feishu",
+    "approval",
+    "security"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

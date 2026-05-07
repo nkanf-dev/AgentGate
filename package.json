@@ -7,7 +7,11 @@
   ],
   "scripts": {
     "build": "bun run --workspaces --if-present build",
-    "typecheck": "bun run --workspaces --if-present typecheck"
+    "typecheck": "bun run --workspaces --if-present typecheck",
+    "build:web": "bun run --filter @agentgate/web build",
+    "build:adapters": "bun run --filter @agentgate/openclaw-adapter build && bun run --filter @agentgate/feishu-adapter build && bun run --filter @agentgate/resource-adapter build",
+    "pack:openclaw-adapter": "npm pack ./packages/openclaw-adapter",
+    "pack:feishu-adapter": "npm pack ./packages/feishu-adapter"
   },
   "devDependencies": {
     "typescript": "^5.9.3"
