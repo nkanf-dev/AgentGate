@@ -3,6 +3,7 @@ package scanner
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"log"
 	"regexp"
 	"sort"
 	"strings"
@@ -15,13 +16,18 @@ type SecretFinding struct {
 	Value string
 }
 
-type detector struct {
+// Detector is the common interface for secret detection backends.
+type Detector interface {
+	DetectSecrets(text string) ([]SecretFinding, error)
+}
+
+type regexPattern struct {
 	kind       string
 	pattern    *regexp.Regexp
 	valueGroup int
 }
 
-var secretDetectors = []detector{
+var secretDetectors = []regexPattern{
 	{
 		kind:       "openai_api_key",
 		pattern:    regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{16,}\b`),
@@ -34,18 +40,49 @@ var secretDetectors = []detector{
 	},
 }
 
+// RegexDetector implements Detector using regex patterns.
+type RegexDetector struct{}
+
+func (RegexDetector) DetectSecrets(text string) ([]SecretFinding, error) {
+	return DetectSecrets(text), nil
+}
+
+// CompositeDetector tries an ML detector first and falls back to regex on
+// any error.  Findings from both are merged and deduplicated.
+type CompositeDetector struct {
+	ML    Detector
+	Regex Detector
+}
+
+func (c *CompositeDetector) DetectSecrets(text string) ([]SecretFinding, error) {
+	mlFindings, mlErr := c.ML.DetectSecrets(text)
+	if mlErr != nil {
+		log.Printf("ml scanner error, falling back to regex: %v", mlErr)
+		return c.Regex.DetectSecrets(text)
+	}
+
+	regexFindings, regexErr := c.Regex.DetectSecrets(text)
+	if regexErr != nil {
+		return mlFindings, nil
+	}
+
+	merged := append(mlFindings, regexFindings...)
+	return dedupeOverlaps(merged), nil
+}
+
+// DetectSecrets is the package-level regex scanner (backward compatible).
 func DetectSecrets(text string) []SecretFinding {
 	findings := make([]SecretFinding, 0)
-	for _, detector := range secretDetectors {
-		matches := detector.pattern.FindAllStringSubmatchIndex(text, -1)
+	for _, det := range secretDetectors {
+		matches := det.pattern.FindAllStringSubmatchIndex(text, -1)
 		for _, match := range matches {
-			groupStart := detector.valueGroup * 2
+			groupStart := det.valueGroup * 2
 			groupEnd := groupStart + 1
 			if groupEnd >= len(match) || match[groupStart] < 0 || match[groupEnd] < 0 {
 				continue
 			}
 			findings = append(findings, SecretFinding{
-				Kind:  detector.kind,
+				Kind:  det.kind,
 				Start: match[groupStart],
 				End:   match[groupEnd],
 				Value: text[match[groupStart]:match[groupEnd]],

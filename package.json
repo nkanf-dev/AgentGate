@@ -13,6 +13,9 @@
     "pack:openclaw-adapter": "npm pack ./packages/openclaw-adapter",
     "pack:feishu-adapter": "npm pack ./packages/feishu-adapter"
   },
+  "dependencies": {
+    "@huggingface/transformers": "^3.5.0"
+  },
   "devDependencies": {
     "typescript": "^5.9.3"
   },

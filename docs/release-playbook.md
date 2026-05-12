@@ -77,9 +77,9 @@ gh release create v0.1.0 \
   --notes-file docs/install-and-deploy.md
 ```
 
-## 6. 现场分发建议
+## 6. 分发建议
 
-对于评委电脑不一定有 Docker 的场景，建议优先提供：
+建议优先提供：
 
 1. 仓库源码
 2. `docs/install-and-deploy.md`

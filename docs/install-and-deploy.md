@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-这份指南对应本地优先的演示和评委试用场景：
+这份指南对应本地优先的快速部署场景：
 
 - `go run ./cmd/agentgate` 后即可打开控制台
 - 默认本地令牌已内置，不需要先手填 token
@@ -122,7 +122,7 @@ node packages/feishu-adapter/dist/cli.js
 - 不需要公网 IP 或回调地址
 - `FEISHU_RECEIVE_ID` 建议填群 `chat_id`
 
-## 7. 评委现场演示建议
+## 7. 快速体验
 
 推荐启动顺序：
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -38,6 +39,7 @@ type Engine struct {
 	attemptGrants map[string]types.AttemptGrant
 	policyHistory map[int]policy.Bundle
 	policyRecords []policy.VersionRecord
+	detector      scanner.Detector
 }
 
 type EventStore interface {
@@ -188,6 +190,7 @@ func NewEngine(options ...Option) *Engine {
 		attemptGrants: make(map[string]types.AttemptGrant),
 		policyHistory: make(map[int]policy.Bundle),
 		policyRecords: make([]policy.VersionRecord, 0, 1),
+		detector:      scanner.RegexDetector{},
 	}
 	for _, option := range options {
 		option(engine)
@@ -222,6 +225,12 @@ func WithPolicyBundles(bundles []policy.Bundle) Option {
 		if len(bundles) > 0 {
 			engine.policyBundle = aggregateBundles(bundles)
 		}
+	}
+}
+
+func WithDetector(d scanner.Detector) Option {
+	return func(engine *Engine) {
+		engine.detector = d
 	}
 }
 
@@ -1513,7 +1522,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 		appliedRules = patch.appliedRules
 		obligations = append([]types.Obligation(nil), patch.obligations...)
 	} else {
-		inputFacts := enrichPolicyFacts(&req)
+		inputFacts := e.enrichPolicyFacts(&req)
 		sessionFacts := e.sessionFactsForDecision(req.Session.SessionID)
 		policyEvaluation = policy.EvaluateBundles(activeBundles, req, sessionFacts)
 		effect = policyEvaluation.Effect
@@ -1619,7 +1628,7 @@ func (e *Engine) Report(req types.ReportRequest) (types.ReportResponse, error) {
 	}
 
 	now := time.Now().UTC()
-	redactedMetadata, redacted := redactAuditValue(req.Metadata)
+	redactedMetadata, redacted := redactAuditValue(req.Metadata, e.detector)
 	if err := e.appendEvent(types.EventEnvelope{
 		EventID:    newID("evt_report"),
 		EventType:  "adapter_report",
@@ -1629,7 +1638,7 @@ func (e *Engine) Report(req types.ReportRequest) (types.ReportResponse, error) {
 		Surface:    req.Surface,
 		Summary:    req.Outcome,
 		Metadata: map[string]interface{}{
-			"error_message": redactAuditString(req.ErrorMessage),
+			"error_message": redactAuditString(req.ErrorMessage, e.detector),
 			"metadata":      redactedMetadata,
 			"obligations":   obligationTypes(req.Obligations),
 			"redacted":      redacted,
@@ -2412,7 +2421,7 @@ func requestValidationEvaluation(patch *decisionPatch) policy.Evaluation {
 	}
 }
 
-func enrichPolicyFacts(req *types.PolicyRequest) inputSecretFacts {
+func (e *Engine) enrichPolicyFacts(req *types.PolicyRequest) inputSecretFacts {
 	if req.RequestKind != types.RequestKindInput || req.Context.Surface != types.SurfaceInput {
 		return inputSecretFacts{}
 	}
@@ -2423,7 +2432,11 @@ func enrichPolicyFacts(req *types.PolicyRequest) inputSecretFacts {
 	if !ok {
 		return inputSecretFacts{}
 	}
-	findings := scanner.DetectSecrets(text)
+	findings, err := e.detector.DetectSecrets(text)
+	if err != nil {
+		log.Printf("secret detection error: %v", err)
+		return inputSecretFacts{text: text}
+	}
 	if len(findings) == 0 {
 		return inputSecretFacts{text: text}
 	}
@@ -2622,7 +2635,7 @@ func mapStringValue(values map[string]interface{}, key string) string {
 	return value
 }
 
-func redactAuditValue(value interface{}) (interface{}, bool) {
+func redactAuditValue(value interface{}, det scanner.Detector) (interface{}, bool) {
 	switch typed := value.(type) {
 	case map[string]interface{}:
 		result := make(map[string]interface{}, len(typed))
@@ -2633,7 +2646,7 @@ func redactAuditValue(value interface{}) (interface{}, bool) {
 				redacted = true
 				continue
 			}
-			next, changed := redactAuditValue(item)
+			next, changed := redactAuditValue(item, det)
 			result[key] = next
 			redacted = redacted || changed
 		}
@@ -2642,24 +2655,28 @@ func redactAuditValue(value interface{}) (interface{}, bool) {
 		result := make([]interface{}, 0, len(typed))
 		redacted := false
 		for _, item := range typed {
-			next, changed := redactAuditValue(item)
+			next, changed := redactAuditValue(item, det)
 			result = append(result, next)
 			redacted = redacted || changed
 		}
 		return result, redacted
 	case string:
-		next := redactAuditString(typed)
+		next := redactAuditString(typed, det)
 		return next, next != typed
 	default:
 		return value, false
 	}
 }
 
-func redactAuditString(value string) string {
+func redactAuditString(value string, det scanner.Detector) string {
 	if value == "" {
 		return value
 	}
-	findings := scanner.DetectSecrets(value)
+	findings, err := det.DetectSecrets(value)
+	if err != nil {
+		log.Printf("secret detection error in redact: %v", err)
+		return value
+	}
 	if len(findings) == 0 {
 		return value
 	}

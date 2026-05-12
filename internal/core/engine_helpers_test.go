@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agentgate/agentgate/internal/scanner"
 	"github.com/agentgate/agentgate/internal/types"
 )
 
@@ -194,13 +195,14 @@ func TestUpdateSessionFactsApproval(t *testing.T) {
 }
 
 func TestRedactAuditString(t *testing.T) {
-	if result := redactAuditString(""); result != "" {
+	det := scanner.RegexDetector{}
+	if result := redactAuditString("", det); result != "" {
 		t.Fatalf("empty string should stay empty, got %q", result)
 	}
-	if result := redactAuditString("hello world"); result != "hello world" {
+	if result := redactAuditString("hello world", det); result != "hello world" {
 		t.Fatalf("clean string should not be redacted, got %q", result)
 	}
-	if result := redactAuditString("sk-1234567890abcdef1234567890abcdef1234567890abcdef"); result == "sk-1234567890abcdef1234567890abcdef1234567890abcdef" {
+	if result := redactAuditString("sk-1234567890abcdef1234567890abcdef1234567890abcdef", det); result == "sk-1234567890abcdef1234567890abcdef1234567890abcdef" {
 		t.Fatal("expected secret-like string to be redacted")
 	}
 }
@@ -260,10 +262,11 @@ func TestInferSurface(t *testing.T) {
 }
 
 func TestRedactAuditValue(t *testing.T) {
+	det := scanner.RegexDetector{}
 	result, changed := redactAuditValue(map[string]interface{}{
 		"name":   "test",
 		"secret": "sk-sensitive",
-	})
+	}, det)
 	if !changed {
 		t.Fatal("expected redaction")
 	}
@@ -280,10 +283,11 @@ func TestRedactAuditValue(t *testing.T) {
 }
 
 func TestRedactAuditValueNoChange(t *testing.T) {
+	det := scanner.RegexDetector{}
 	_, changed := redactAuditValue(map[string]interface{}{
 		"name": "test",
 		"id":   "123",
-	})
+	}, det)
 	if changed {
 		t.Fatal("expected no redaction")
 	}

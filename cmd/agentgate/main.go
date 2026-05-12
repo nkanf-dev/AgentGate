@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/agentgate/agentgate/internal/core"
 	"github.com/agentgate/agentgate/internal/httpapi"
 	"github.com/agentgate/agentgate/internal/policy"
+	"github.com/agentgate/agentgate/internal/scanner"
 	"github.com/agentgate/agentgate/internal/store"
 )
 
@@ -69,9 +71,13 @@ func run() error {
 	}
 
 	addr := getenv("AGENTGATE_ADDR", ":8080")
+
+	// Secret detector: ML (openai/privacy-filter) if enabled, else regex.
+	detector := buildDetector()
+
 	srv := &http.Server{
 		Addr: addr,
-		Handler: httpapi.NewServer(core.NewEngine(core.WithEventStore(db), core.WithStateStore(db), core.WithPolicyBundle(policyBundle), core.WithPolicyBundles(bundles)), authz.New(authz.Config{
+		Handler: httpapi.NewServer(core.NewEngine(core.WithEventStore(db), core.WithStateStore(db), core.WithPolicyBundle(policyBundle), core.WithPolicyBundles(bundles), core.WithDetector(detector)), authz.New(authz.Config{
 			AdapterTokens:  splitCSV(getenv("AGENTGATE_ADAPTER_TOKENS", "adapter-local-token")),
 			OperatorTokens: splitCSV(getenv("AGENTGATE_OPERATOR_TOKENS", "operator-local-token")),
 			AdminTokens:    splitCSV(getenv("AGENTGATE_ADMIN_TOKENS", "admin-local-token")),
@@ -119,4 +125,29 @@ func splitCSV(value string) []string {
 		}
 	}
 	return result
+}
+
+func buildDetector() scanner.Detector {
+	mlPath := os.Getenv("AGENTGATE_ML_SCANNER")
+	if mlPath == "" {
+		return scanner.RegexDetector{}
+	}
+
+	absPath, err := filepath.Abs(mlPath)
+	if err != nil {
+		log.Printf("ml scanner: invalid path %q, falling back to regex: %v", mlPath, err)
+		return scanner.RegexDetector{}
+	}
+
+	timeout := 30 * time.Second
+	if t := os.Getenv("AGENTGATE_ML_SCANNER_TIMEOUT"); t != "" {
+		if d, err := time.ParseDuration(t); err == nil {
+			timeout = d
+		}
+	}
+
+	ml := scanner.NewMLScanner(absPath, timeout)
+	regex := scanner.RegexDetector{}
+	log.Printf("ml scanner: enabled (script=%s, timeout=%s)", absPath, timeout)
+	return &scanner.CompositeDetector{ML: ml, Regex: regex}
 }
