@@ -318,6 +318,22 @@ type AttemptGrant struct {
 	ExpiresAt  time.Time `json:"expires_at"`
 }
 
+// SecretHandleHydration carries a secret handle and its plaintext value for
+// hydrating the engine cache on startup.
+type SecretHandleHydration struct {
+	Handle SecretHandle
+	Value  string
+}
+
+// AttemptGrantHydration carries an attempt grant and its composite key for
+// hydrating the engine cache on startup.
+type AttemptGrantHydration struct {
+	SessionID string
+	TaskID    string
+	AttemptID string
+	Grant     AttemptGrant
+}
+
 type ApprovalsResponse struct {
 	Approvals []ApprovalRecord `json:"approvals"`
 }

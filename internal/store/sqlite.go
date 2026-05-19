@@ -1312,3 +1312,82 @@ func scanPolicyBundle(scanner policyVersionScanner) (policy.Bundle, error) {
 	}
 	return bundle, nil
 }
+
+func (s *SQLiteStore) ListSecretHandles() ([]types.SecretHandleHydration, error) {
+	rows, err := s.db.QueryContext(context.Background(), `
+SELECT
+	handle_id,
+	session_id,
+	COALESCE(task_id, ''),
+	kind,
+	placeholder,
+	secret_hash,
+	secret_value,
+	created_at
+FROM secret_handles
+`)
+	if err != nil {
+		return nil, fmt.Errorf("list secret handles: %w", err)
+	}
+	defer rows.Close()
+
+	var results []types.SecretHandleHydration
+	for rows.Next() {
+		var h types.SecretHandleHydration
+		var value []byte
+		var createdAt string
+		if err := rows.Scan(
+			&h.Handle.HandleID,
+			&h.Handle.SessionID,
+			&h.Handle.TaskID,
+			&h.Handle.Kind,
+			&h.Handle.Placeholder,
+			&h.Handle.SecretHash,
+			&value,
+			&createdAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan secret handle: %w", err)
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse secret handle created_at: %w", err)
+		}
+		h.Handle.CreatedAt = parsed
+		h.Value = string(value)
+		results = append(results, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate secret handles: %w", err)
+	}
+	return results, nil
+}
+
+func (s *SQLiteStore) ListAttemptGrants() ([]types.AttemptGrantHydration, error) {
+	rows, err := s.db.QueryContext(context.Background(), `
+SELECT session_id, task_id, attempt_id, approval_id, expires_at
+FROM attempt_grants
+`)
+	if err != nil {
+		return nil, fmt.Errorf("list attempt grants: %w", err)
+	}
+	defer rows.Close()
+
+	var results []types.AttemptGrantHydration
+	for rows.Next() {
+		var h types.AttemptGrantHydration
+		var expiresAt string
+		if err := rows.Scan(&h.SessionID, &h.TaskID, &h.AttemptID, &h.Grant.ApprovalID, &expiresAt); err != nil {
+			return nil, fmt.Errorf("scan attempt grant: %w", err)
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, expiresAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse attempt grant expires_at: %w", err)
+		}
+		h.Grant.ExpiresAt = parsed
+		results = append(results, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate attempt grants: %w", err)
+	}
+	return results, nil
+}

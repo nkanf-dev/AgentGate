@@ -1171,3 +1171,343 @@ func coreTestBundle(rules []policy.Rule) policy.Bundle {
 		},
 	}
 }
+
+// failingStateStore wraps a real store and fails on specific write operations
+// to test write-order guarantees.
+type failingStateStore struct {
+	*store.SQLiteStore
+	failSaveSecretHandle bool
+	failSaveApproval     bool
+	failSaveGrant        bool
+}
+
+func (f *failingStateStore) SaveSecretHandle(handle types.SecretHandle, value string) error {
+	if f.failSaveSecretHandle {
+		return errors.New("injected save secret handle failure")
+	}
+	return f.SQLiteStore.SaveSecretHandle(handle, value)
+}
+
+func (f *failingStateStore) SaveApproval(approval types.ApprovalRecord) error {
+	if f.failSaveApproval {
+		return errors.New("injected save approval failure")
+	}
+	return f.SQLiteStore.SaveApproval(approval)
+}
+
+func (f *failingStateStore) SaveAttemptGrant(sessionID string, taskID string, attemptID string, approvalID string, expiresAt time.Time) error {
+	if f.failSaveGrant {
+		return errors.New("injected save grant failure")
+	}
+	return f.SQLiteStore.SaveAttemptGrant(sessionID, taskID, attemptID, approvalID, expiresAt)
+}
+
+// --- Hydration tests ---
+
+func TestHydrateSecretHandlesFromStore(t *testing.T) {
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "input.secret.rewrite_to_handle",
+			Priority:     100,
+			Surface:      types.SurfaceInput,
+			RequestKinds: []types.RequestKind{types.RequestKindInput},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "input_secret_rewritten_to_handles",
+			When:         policy.Condition{Language: "cel", Expression: `content.data_classes.exists(x, x == "secret")`},
+		},
+		{
+			ID:           "resource.secret_handle.resolve",
+			Priority:     100,
+			Surface:      types.SurfaceResource,
+			RequestKinds: []types.RequestKind{types.RequestKindResourceAccess},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "secret_handle_resolve_allowed",
+			When:         policy.Condition{Language: "cel", Expression: `action.operation == "resolve_secret_handle" && target.kind == "secret_handle"`},
+		},
+	})
+
+	// First engine: create a secret handle.
+	firstEngine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(bundle))
+	decision, err := firstEngine.Decide(types.PolicyRequest{
+		RequestID:   "req_hydrate_input",
+		RequestKind: types.RequestKindInput,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_hydrate", TaskID: "task_hydrate"},
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context: types.DecisionContext{
+			Surface: types.SurfaceInput,
+			Raw:     map[string]interface{}{"text": "api_key: sk-test-hydrate-1234567890abcdef deploy"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("input decide: %v", err)
+	}
+	handleID := handleIDFromDecision(t, decision)
+
+	// Verify handle exists in SQLite.
+	_, _, found, err := stateStore.GetSecretHandle(handleID)
+	if err != nil {
+		t.Fatalf("get handle from store: %v", err)
+	}
+	if !found {
+		t.Fatal("handle should be in SQLite")
+	}
+
+	// Second engine: simulate restart with same store.
+	restartedEngine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(bundle))
+
+	// Access the handle — should come from memory, not SQLite fallback.
+	restartedEngine.mu.RLock()
+	_, inMemory := restartedEngine.secretHandles[handleID]
+	restartedEngine.mu.RUnlock()
+	if !inMemory {
+		t.Fatal("secret handle should be hydrated into memory after restart")
+	}
+
+	// Verify the handle works end-to-end through Decide.
+	resourceDecision, err := restartedEngine.Decide(types.PolicyRequest{
+		RequestID:   "req_hydrate_resource",
+		RequestKind: types.RequestKindResourceAccess,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "resource"},
+		Session:     types.SessionContext{SessionID: "sess_hydrate", TaskID: "task_hydrate"},
+		Action:      types.ActionContext{Operation: "resolve_secret_handle"},
+		Target:      types.TargetContext{Kind: "secret_handle", Identifier: handleID},
+		Context:     types.DecisionContext{Surface: types.SurfaceResource},
+	})
+	if err != nil {
+		t.Fatalf("resource decide: %v", err)
+	}
+	if resourceDecision.Effect != types.EffectAllowWithAudit {
+		t.Fatalf("resource effect = %q, want allow_with_audit", resourceDecision.Effect)
+	}
+}
+
+func TestHydrateApprovalsFromStore(t *testing.T) {
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+
+	// Save a pending approval directly to the store.
+	now := time.Now().UTC()
+	approval := types.ApprovalRecord{
+		ApprovalID: "appr_hydrate",
+		RequestID:  "req_1",
+		SessionID:  "sess_hydrate",
+		TaskID:     "task_1",
+		AttemptID:  "attempt_1",
+		Status:     types.ApprovalPending,
+		Reason:     "test",
+		CreatedAt:  now,
+		ExpiresAt:  now.Add(10 * time.Minute),
+	}
+	if err := stateStore.SaveApproval(approval); err != nil {
+		t.Fatalf("save approval: %v", err)
+	}
+
+	// Create engine — hydration should load the approval into memory.
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
+	engine.mu.RLock()
+	_, inMemory := engine.approvals["appr_hydrate"]
+	engine.mu.RUnlock()
+	if !inMemory {
+		t.Fatal("approval should be hydrated into memory")
+	}
+
+	// Verify it can be resolved (which reads from memory).
+	resp, err := engine.ResolveApproval("appr_hydrate", types.ApprovalResolveRequest{
+		Decision:   "approve",
+		OperatorID: "op_1",
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if resp.Status != types.ApprovalApproved {
+		t.Fatalf("status = %q, want approved", resp.Status)
+	}
+}
+
+func TestHydrateAttemptGrantsFromStore(t *testing.T) {
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+
+	// Save a grant directly to the store.
+	now := time.Now().UTC()
+	if err := stateStore.SaveAttemptGrant("sess_g", "task_g", "attempt_g", "appr_g", now.Add(10*time.Minute)); err != nil {
+		t.Fatalf("save grant: %v", err)
+	}
+
+	// Create engine — hydration should load the grant.
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
+	key := "sess_g\x00task_g\x00attempt_g"
+	engine.mu.RLock()
+	grant, inMemory := engine.attemptGrants[key]
+	engine.mu.RUnlock()
+	if !inMemory {
+		t.Fatal("attempt grant should be hydrated into memory")
+	}
+	if grant.ApprovalID != "appr_g" {
+		t.Fatalf("grant approval_id = %q, want appr_g", grant.ApprovalID)
+	}
+}
+
+// --- Write-order tests ---
+
+func TestSecretHandleWriteOrderSQLiteFirst(t *testing.T) {
+	inner, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer inner.Close()
+
+	failing := &failingStateStore{SQLiteStore: inner, failSaveSecretHandle: true}
+
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "input.secret.rewrite_to_handle",
+			Priority:     100,
+			Surface:      types.SurfaceInput,
+			RequestKinds: []types.RequestKind{types.RequestKindInput},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "input_secret_rewritten_to_handles",
+			When:         policy.Condition{Language: "cel", Expression: `content.data_classes.exists(x, x == "secret")`},
+		},
+	})
+
+	engine := NewEngine(WithPolicyBundle(bundle), WithStateStore(failing))
+
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_fail",
+		RequestKind: types.RequestKindInput,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_fail", TaskID: "task_fail"},
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context: types.DecisionContext{
+			Surface: types.SurfaceInput,
+			Raw:     map[string]interface{}{"text": "sk-1234567890abcdef1234567890abcdef"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	// When SQLite write fails, the engine should deny and NOT create ghost
+	// handles in memory.
+	if decision.Effect != types.EffectDeny {
+		t.Fatalf("effect = %q, want deny when store fails", decision.Effect)
+	}
+	if decision.ReasonCode != "secret_handle_store_failed" {
+		t.Fatalf("reason = %q, want secret_handle_store_failed", decision.ReasonCode)
+	}
+
+	// Memory must not contain any ghost handles.
+	engine.mu.RLock()
+	handleCount := len(engine.secretHandles)
+	valueCount := len(engine.secretValues)
+	engine.mu.RUnlock()
+	if handleCount != 0 || valueCount != 0 {
+		t.Fatalf("memory should have no ghost handles: handles=%d values=%d", handleCount, valueCount)
+	}
+}
+
+func TestApprovalWriteOrderSQLiteFirst(t *testing.T) {
+	inner, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer inner.Close()
+
+	failing := &failingStateStore{SQLiteStore: inner, failSaveApproval: true}
+	engine := NewEngine(WithEventStore(failing), WithStateStore(failing))
+
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_approval_fail",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_fail", TaskID: "task_fail", AttemptID: "attempt_1"},
+		Action:      types.ActionContext{Tool: "bash", Operation: "execute", OpenWorld: true},
+		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectDeny {
+		t.Fatalf("effect = %q, want deny when store fails", decision.Effect)
+	}
+	if decision.ReasonCode != "approval_store_failed" {
+		t.Fatalf("reason = %q, want approval_store_failed", decision.ReasonCode)
+	}
+
+	// Memory must not contain any ghost approvals.
+	engine.mu.RLock()
+	approvalCount := len(engine.approvals)
+	engine.mu.RUnlock()
+	if approvalCount != 0 {
+		t.Fatalf("memory should have no ghost approvals: count=%d", approvalCount)
+	}
+}
+
+func TestResolveApprovalWriteOrderSQLiteFirst(t *testing.T) {
+	inner, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer inner.Close()
+
+	// First create a real approval.
+	now := time.Now().UTC()
+	approval := types.ApprovalRecord{
+		ApprovalID: "appr_order",
+		RequestID:  "req_1",
+		SessionID:  "sess_order",
+		TaskID:     "task_order",
+		AttemptID:  "attempt_order",
+		Status:     types.ApprovalPending,
+		Reason:     "test",
+		CreatedAt:  now,
+		ExpiresAt:  now.Add(10 * time.Minute),
+	}
+	if err := inner.SaveApproval(approval); err != nil {
+		t.Fatalf("save approval: %v", err)
+	}
+
+	// Now make the store fail on SaveApproval for the resolve.
+	failing := &failingStateStore{SQLiteStore: inner, failSaveApproval: true}
+	engine := NewEngine(WithEventStore(failing), WithStateStore(failing))
+
+	_, err = engine.ResolveApproval("appr_order", types.ApprovalResolveRequest{
+		Decision:   "approve",
+		OperatorID: "op_1",
+	})
+	if err == nil {
+		t.Fatal("expected error from resolve when store fails")
+	}
+
+	// The in-memory approval should still be Pending (not ghost-approved).
+	engine.mu.RLock()
+	stored := engine.approvals["appr_order"]
+	engine.mu.RUnlock()
+	if stored.Status != types.ApprovalPending {
+		t.Fatalf("memory approval status = %q, want pending (no ghost state)", stored.Status)
+	}
+
+	// No ghost grant should exist.
+	engine.mu.RLock()
+	grantCount := len(engine.attemptGrants)
+	engine.mu.RUnlock()
+	if grantCount != 0 {
+		t.Fatalf("memory should have no ghost grants: count=%d", grantCount)
+	}
+}

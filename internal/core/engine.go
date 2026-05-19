@@ -73,6 +73,8 @@ type StateStore interface {
 	GetSessionFacts(sessionID string) (types.SessionFactsRecord, bool, error)
 	UpsertSessionFacts(record types.SessionFactsRecord) error
 	UpdateSessionFacts(sessionID string, update func(types.SessionFactsRecord, bool) (types.SessionFactsRecord, error)) error
+	ListSecretHandles() ([]types.SecretHandleHydration, error)
+	ListAttemptGrants() ([]types.AttemptGrantHydration, error)
 }
 
 type Option func(*Engine)
@@ -197,7 +199,58 @@ func NewEngine(options ...Option) *Engine {
 	}
 	engine.seedPolicyHistory()
 	engine.bootstrapManagedRuntimes()
+	engine.hydrateFromStore()
 	return engine
+}
+
+// hydrateFromStore loads approvals, secret handles, and attempt grants from
+// SQLite into memory.  No-op when stateStore is nil.
+func (e *Engine) hydrateFromStore() {
+	if e.stateStore == nil {
+		return
+	}
+
+	var approvalCount, handleCount, grantCount int
+
+	// Only pending approvals — expired ones are handled lazily with events.
+	const hydrationLimit = 1_000_000
+	records, err := e.stateStore.ListApprovals(hydrationLimit)
+	if err != nil {
+		log.Printf("hydrate: list approvals: %v", err)
+	} else {
+		for _, rec := range records {
+			if rec.Status != types.ApprovalPending {
+				continue
+			}
+			e.approvals[rec.ApprovalID] = approvalRecordToState(rec)
+			approvalCount++
+		}
+	}
+
+	handles, err := e.stateStore.ListSecretHandles()
+	if err != nil {
+		log.Printf("hydrate: list secret handles: %v", err)
+	} else {
+		for _, h := range handles {
+			e.secretHandles[h.Handle.HandleID] = h.Handle
+			e.secretValues[h.Handle.HandleID] = h.Value
+			handleCount++
+		}
+	}
+
+	grants, err := e.stateStore.ListAttemptGrants()
+	if err != nil {
+		log.Printf("hydrate: list attempt grants: %v", err)
+	} else {
+		for _, g := range grants {
+			key := attemptKey(g.SessionID, g.TaskID, g.AttemptID)
+			e.attemptGrants[key] = g.Grant
+			grantCount++
+		}
+	}
+
+	log.Printf("hydrate: loaded %d pending approvals, %d secret handles, %d attempt grants",
+		approvalCount, handleCount, grantCount)
 }
 
 func WithEventStore(store EventStore) Option {
@@ -1681,23 +1734,32 @@ func (e *Engine) ResolveApproval(approvalID string, req types.ApprovalResolveReq
 		e.mu.Unlock()
 		return types.ApprovalResolveResponse{}, errStatus(http.StatusConflict, "approval_already_resolved", "approval is already resolved")
 	}
+
 	if !approval.ExpiresAt.After(now) {
 		approval.Status = types.ApprovalExpired
 		approval.ResolvedAt = &now
 		approval.OperatorID = req.OperatorID
 		approval.Channel = req.Channel
-		e.approvals[approvalID] = approval
 		e.mu.Unlock()
+
 		if e.stateStore != nil {
 			if err := e.stateStore.SaveApproval(approvalStateToRecord(approval)); err != nil {
 				return types.ApprovalResolveResponse{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
 			}
 		}
+		e.mu.Lock()
+		e.approvals[approvalID] = approval
+		e.mu.Unlock()
+
 		if err := e.appendApprovalEvent(approval, "approval_expired", now); err != nil {
 			return types.ApprovalResolveResponse{}, errStatus(http.StatusInternalServerError, "event_store_write_failed", err.Error())
 		}
 		return types.ApprovalResolveResponse{}, errStatus(http.StatusConflict, "approval_expired", "approval has expired")
 	}
+
+	var grantKey string
+	var grant types.AttemptGrant
+	needsGrant := false
 
 	switch decision {
 	case "approve", "approved", "allow", "allow_once":
@@ -1705,33 +1767,40 @@ func (e *Engine) ResolveApproval(approvalID string, req types.ApprovalResolveReq
 		approval.ResolvedAt = &now
 		approval.OperatorID = req.OperatorID
 		approval.Channel = req.Channel
-		e.approvals[approvalID] = approval
-		e.attemptGrants[attemptKey(approval.SessionID, approval.TaskID, approval.AttemptID)] = types.AttemptGrant{
-			ApprovalID: approvalID,
-			ExpiresAt:  approval.ExpiresAt,
-		}
+		grantKey = attemptKey(approval.SessionID, approval.TaskID, approval.AttemptID)
+		grant = types.AttemptGrant{ApprovalID: approvalID, ExpiresAt: approval.ExpiresAt}
+		needsGrant = true
 	case "deny", "denied", "reject", "rejected":
 		approval.Status = types.ApprovalDenied
 		approval.ResolvedAt = &now
 		approval.OperatorID = req.OperatorID
 		approval.Channel = req.Channel
-		e.approvals[approvalID] = approval
 	default:
 		e.mu.Unlock()
 		return types.ApprovalResolveResponse{}, errBadRequest("invalid_approval_decision", "decision must be approve/allow_once or deny")
 	}
 	e.mu.Unlock()
 
+	// SQLite before memory.  Safe without lock: approvalID is unique and the
+	// Pending→Resolved transition is one-way — a concurrent resolver sees
+	// Status != Pending and gets Conflict.
 	if e.stateStore != nil {
 		if err := e.stateStore.SaveApproval(approvalStateToRecord(approval)); err != nil {
 			return types.ApprovalResolveResponse{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
 		}
-		if approval.Status == types.ApprovalApproved {
+		if needsGrant {
 			if err := e.stateStore.SaveAttemptGrant(approval.SessionID, approval.TaskID, approval.AttemptID, approvalID, approval.ExpiresAt); err != nil {
 				return types.ApprovalResolveResponse{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
 			}
 		}
 	}
+
+	e.mu.Lock()
+	e.approvals[approvalID] = approval
+	if needsGrant {
+		e.attemptGrants[grantKey] = grant
+	}
+	e.mu.Unlock()
 
 	eventType := "approval_denied"
 	if approval.Status == types.ApprovalApproved {
@@ -1839,14 +1908,6 @@ func (e *Engine) evaluateInputSecrets(req types.PolicyRequest, now time.Time, ev
 		return placeholder
 	})
 
-	e.mu.Lock()
-	for _, handle := range handles {
-		e.secretHandles[handle.HandleID] = handle
-	}
-	for index, handle := range handles {
-		e.secretValues[handle.HandleID] = facts.findings[index].Value
-	}
-	e.mu.Unlock()
 	if e.stateStore != nil {
 		for index, handle := range handles {
 			if err := e.stateStore.SaveSecretHandle(handle, facts.findings[index].Value); err != nil {
@@ -1859,6 +1920,14 @@ func (e *Engine) evaluateInputSecrets(req types.PolicyRequest, now time.Time, ev
 			}
 		}
 	}
+	e.mu.Lock()
+	for _, handle := range handles {
+		e.secretHandles[handle.HandleID] = handle
+	}
+	for index, handle := range handles {
+		e.secretValues[handle.HandleID] = facts.findings[index].Value
+	}
+	e.mu.Unlock()
 
 	return &decisionPatch{
 		effect:       types.EffectAllowWithAudit,
@@ -2031,9 +2100,6 @@ func (e *Engine) evaluateToolAttempt(req types.PolicyRequest, now time.Time, eva
 		ExpiresAt:  expiresAt,
 	}
 
-	e.mu.Lock()
-	e.approvals[approvalID] = approval
-	e.mu.Unlock()
 	if e.stateStore != nil {
 		if err := e.stateStore.SaveApproval(approvalStateToRecord(approval)); err != nil {
 			return &decisionPatch{
@@ -2044,6 +2110,9 @@ func (e *Engine) evaluateToolAttempt(req types.PolicyRequest, now time.Time, eva
 			}
 		}
 	}
+	e.mu.Lock()
+	e.approvals[approvalID] = approval
+	e.mu.Unlock()
 
 	return &decisionPatch{
 		effect:       types.EffectApprovalRequired,
