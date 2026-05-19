@@ -427,6 +427,19 @@ func (b Bundle) Evaluate(request types.PolicyRequest, sessionFacts ...types.Sess
 	}, request, sessionFacts...)
 }
 
+func bundleConfigMap(bundle Bundle) map[string]interface{} {
+	raw, _ := json.Marshal(map[string]interface{}{
+		"input_policy":    bundle.InputPolicy,
+		"runtime_policy":  bundle.RuntimePolicy,
+		"resource_policy": bundle.ResourcePolicy,
+		"egress_policy":   bundle.EgressPolicy,
+		"path_policy":     bundle.PathPolicy,
+	})
+	var m map[string]interface{}
+	json.Unmarshal(raw, &m)
+	return m
+}
+
 func EvaluateBundles(bundles []Bundle, request types.PolicyRequest, sessionFacts ...types.SessionFacts) Evaluation {
 	if !validRequestKind(request.RequestKind) || !validSurface(request.Context.Surface) {
 		return Evaluation{
@@ -455,8 +468,14 @@ func EvaluateBundles(bundles []Bundle, request types.PolicyRequest, sessionFacts
 			continue
 		}
 		activeBundleSeen = true
+		merged := bundleConfigMap(bundle)
+		for k, v := range request.Policy {
+			merged[k] = v
+		}
+		reqCopy := request
+		reqCopy.Policy = merged
 		for _, rule := range bundle.Rules {
-			matches, err := ruleMatches(rule, request, firstSessionFacts(sessionFacts))
+			matches, err := ruleMatches(rule, reqCopy, firstSessionFacts(sessionFacts))
 			if err != nil {
 				return Evaluation{
 					Effect:       types.EffectDeny,

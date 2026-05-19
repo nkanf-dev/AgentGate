@@ -746,6 +746,102 @@ func minimalBundle(rules []Rule) Bundle {
 	}
 }
 
+func TestBundleConfigAvailableInCELContext(t *testing.T) {
+	bundle := Bundle{
+		Version:  1,
+		Status:   BundleStatusActive,
+		IssuedAt: time.Now().UTC(),
+		EgressPolicy: EgressPolicy{
+			HostAllowlist:             []string{"api.example.com"},
+			BlockSensitiveQueryParams: []string{"token", "key"},
+			RequirePurposeDeclaration: true,
+		},
+		PathPolicy: PathPolicy{
+			BlockedPrefixes: []string{"~/.ssh", "~/.aws"},
+		},
+		Rules: []Rule{{
+			ID:           "test.egress.check",
+			Priority:     1,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectDeny,
+			ReasonCode:   "egress_host_blocked",
+			When: Condition{
+				Language:   "cel",
+				Expression: `policy.egress_policy.host_allowlist.size() == 1 && policy.egress_policy.host_allowlist[0] == "api.example.com" && policy.path_policy.blocked_prefixes.exists(x, x == "~/.ssh")`,
+			},
+		}},
+	}
+
+	eval := bundle.Evaluate(types.PolicyRequest{
+		RequestKind: types.RequestKindToolAttempt,
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if eval.Effect != types.EffectDeny || eval.ReasonCode != "egress_host_blocked" {
+		t.Fatalf("expected deny due to bundle config, got effect=%q reason=%q", eval.Effect, eval.ReasonCode)
+	}
+}
+
+func TestBundleConfigOverriddenByRequestPolicy(t *testing.T) {
+	bundle := Bundle{
+		Version:  1,
+		Status:   BundleStatusActive,
+		IssuedAt: time.Now().UTC(),
+		EgressPolicy: EgressPolicy{
+			HostAllowlist: []string{"api.example.com"},
+		},
+		Rules: []Rule{{
+			ID:           "test.egress.override",
+			Priority:     1,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectAllow,
+			ReasonCode:   "egress_allowed",
+			When: Condition{
+				Language:   "cel",
+				Expression: `policy.integration_id == "custom" && policy.egress_policy.host_allowlist.size() == 1`,
+			},
+		}},
+	}
+
+	eval := bundle.Evaluate(types.PolicyRequest{
+		RequestKind: types.RequestKindToolAttempt,
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+		Policy:      map[string]interface{}{"integration_id": "custom"},
+	})
+	if eval.Effect != types.EffectAllow || eval.ReasonCode != "egress_allowed" {
+		t.Fatalf("expected allow with adapter override, got effect=%q reason=%q", eval.Effect, eval.ReasonCode)
+	}
+}
+
+func TestBundleConfigEmptyDoesNotPanic(t *testing.T) {
+	bundle := Bundle{
+		Version:  1,
+		Status:   BundleStatusActive,
+		IssuedAt: time.Now().UTC(),
+		Rules: []Rule{{
+			ID:           "test.nil.safe",
+			Priority:     1,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectAllow,
+			ReasonCode:   "ok",
+			When: Condition{
+				Language:   "cel",
+				Expression: `true`,
+			},
+		}},
+	}
+
+	eval := bundle.Evaluate(types.PolicyRequest{
+		RequestKind: types.RequestKindToolAttempt,
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if eval.Effect != types.EffectAllow {
+		t.Fatalf("expected allow, got %q", eval.Effect)
+	}
+}
+
 func celCond(expression string) Condition {
 	return Condition{
 		Language:   "cel",
