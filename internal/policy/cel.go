@@ -94,9 +94,10 @@ func celActivation(request types.PolicyRequest, sessionFacts types.SessionFacts)
 			"data_classes": dataClassStrings(request.Content.DataClasses),
 		},
 		"context": map[string]interface{}{
-			"surface": string(request.Context.Surface),
-			"taints":  taintStrings(request.Context.Taints),
-			"raw":     request.Context.Raw,
+			"surface":             string(request.Context.Surface),
+			"taints":              taintStrings(request.Context.Taints),
+			"has_secret_findings": rawBool(request.Context.Raw, "has_secret_findings"),
+			"raw":                 request.Context.Raw,
 		},
 		"policy": request.Policy,
 		"session_facts": map[string]interface{}{
@@ -137,4 +138,16 @@ func taintStrings(values []types.Taint) []string {
 		result = append(result, string(value))
 	}
 	return result
+}
+
+func rawBool(raw map[string]interface{}, key string) bool {
+	if raw == nil {
+		return false
+	}
+	v, ok := raw[key]
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
 }

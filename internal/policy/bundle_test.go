@@ -359,14 +359,6 @@ func TestPolicyValidationRejectsMalformedRules(t *testing.T) {
 			want: "sensitive",
 		},
 		{
-			name: "core owned obligation",
-			mutate: func(bundle Bundle) Bundle {
-				bundle.Rules[0].Obligations = []Obligation{{Type: "rewrite_input"}}
-				return bundle
-			},
-			want: "core-owned",
-		},
-		{
 			name: "allow cannot abort",
 			mutate: func(bundle Bundle) Bundle {
 				bundle.Rules[0].Obligations = []Obligation{{
@@ -476,7 +468,7 @@ func TestWildcardDoesNotMatchMissingField(t *testing.T) {
 		RequestKind: types.RequestKindToolAttempt,
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	})
-	if evaluation.Effect != types.EffectAllowWithAudit {
+	if evaluation.Effect != types.EffectDeny {
 		t.Fatalf("wildcard matched missing tool: %#v", evaluation)
 	}
 }
@@ -503,7 +495,7 @@ func TestCELConditionsExpressAndSemantics(t *testing.T) {
 		Action:      types.ActionContext{Tool: "bash", SideEffects: []string{"filesystem_write"}},
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	})
-	if miss.Effect != types.EffectAllowWithAudit {
+	if miss.Effect != types.EffectDeny {
 		t.Fatalf("cel conjunction should not match partial set: %#v", miss)
 	}
 	hit := bundle.Evaluate(types.PolicyRequest{
@@ -545,7 +537,7 @@ func TestCELConditionMatchesPolicyFacts(t *testing.T) {
 		Content: types.ContentContext{DataClasses: []types.DataClass{types.DataClassSecret}},
 		Context: types.DecisionContext{Surface: types.SurfaceRuntime},
 	})
-	if miss.Effect != types.EffectAllowWithAudit {
+	if miss.Effect != types.EffectDeny {
 		t.Fatalf("cel should not match read-only side effect: %#v", miss)
 	}
 	hit := bundle.Evaluate(types.PolicyRequest{
@@ -588,7 +580,7 @@ func TestCELConditionMatchesSessionFacts(t *testing.T) {
 		DistinctTargets:    []string{"a", "b", "c"},
 		SideEffectSequence: []string{"network_egress"},
 	})
-	if miss.Effect != types.EffectAllowWithAudit {
+	if miss.Effect != types.EffectDeny {
 		t.Fatalf("session facts below threshold should not match: %#v", miss)
 	}
 	hit := bundle.Evaluate(types.PolicyRequest{
@@ -856,4 +848,119 @@ func mustTime(t *testing.T, value string) time.Time {
 		t.Fatalf("parse time: %v", err)
 	}
 	return parsed
+}
+
+func TestDefaultBundleHasObligationDeclarations(t *testing.T) {
+	bundle := DefaultBundle()
+
+	// Build a map of rule ID → obligation types.
+	ruleObligations := make(map[string][]string)
+	for _, rule := range bundle.Rules {
+		types := make([]string, 0, len(rule.Obligations))
+		for _, ob := range rule.Obligations {
+			types = append(types, ob.Type)
+		}
+		ruleObligations[rule.ID] = types
+	}
+
+	// Input secret rule must declare rewrite_input.
+	inputObs := ruleObligations["input.secret.rewrite_to_handle"]
+	if !containsString(inputObs, "rewrite_input") {
+		t.Fatalf("input.secret.rewrite_to_handle missing rewrite_input obligation: %v", inputObs)
+	}
+
+	// Resource resolve rule must declare resolve_secret_handle.
+	resourceObs := ruleObligations["resource.secret_handle.resolve"]
+	if !containsString(resourceObs, "resolve_secret_handle") {
+		t.Fatalf("resource.secret_handle.resolve missing resolve_secret_handle obligation: %v", resourceObs)
+	}
+
+	// All approval-required runtime rules must declare approval_request.
+	approvalRules := []string{
+		"runtime.bash.requires_approval",
+		"runtime.exec.requires_approval",
+		"runtime.open_world.requires_approval",
+		"runtime.side_effect.requires_approval",
+		"runtime.secret_egress.requires_approval",
+		"runtime.untrusted_write.requires_approval",
+	}
+	for _, ruleID := range approvalRules {
+		obs := ruleObligations[ruleID]
+		if !containsString(obs, "approval_request") {
+			t.Fatalf("%s missing approval_request obligation: %v", ruleID, obs)
+		}
+	}
+
+	// Egress approval rules must declare approval_request.
+	egressRules := []string{
+		"resource.secret_handle.egress.requires_approval",
+		"resource.untrusted_egress.requires_approval",
+	}
+	for _, ruleID := range egressRules {
+		obs := ruleObligations[ruleID]
+		if !containsString(obs, "approval_request") {
+			t.Fatalf("%s missing approval_request obligation: %v", ruleID, obs)
+		}
+	}
+}
+
+func containsString(slice []string, target string) bool {
+	for _, s := range slice {
+		if s == target {
+			return true
+		}
+	}
+	return false
+}
+
+func TestCorePolicyBundlePassesValidation(t *testing.T) {
+	bundle := CorePolicyBundle()
+	if err := bundle.Validate(); err != nil {
+		t.Fatalf("CorePolicyBundle should pass validation: %v", err)
+	}
+}
+
+func TestSamePriorityDenyBeatsAllowWithAudit(t *testing.T) {
+	// When Deny and AllowWithAudit rules match at the same priority,
+	// Deny wins (higher effectRank). AllowWithAudit's obligations must NOT
+	// be merged into the Deny decision — compatibleObligations(Deny, Allow) = false.
+	bundle := minimalBundle([]Rule{
+		{
+			ID:           "runtime.deny",
+			Priority:     100,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectDeny,
+			ReasonCode:   "runtime_denied",
+			When:         Condition{Language: "cel", Expression: `action.tool == "bash"`},
+		},
+		{
+			ID:           "runtime.allow_audit",
+			Priority:     100,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "runtime_allowed",
+			Obligations:  []Obligation{{Type: "rewrite_input"}},
+			When:         Condition{Language: "cel", Expression: `action.tool == "bash"`},
+		},
+	})
+
+	eval := bundle.Evaluate(types.PolicyRequest{
+		RequestKind: types.RequestKindToolAttempt,
+		Action:      types.ActionContext{Tool: "bash"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if eval.Effect != types.EffectDeny {
+		t.Fatalf("effect = %q, want deny", eval.Effect)
+	}
+	if eval.SelectedRule != "runtime.deny" {
+		t.Fatalf("selected = %q, want runtime.deny", eval.SelectedRule)
+	}
+	// AllowWithAudit's rewrite_input obligation must NOT appear.
+	for _, ob := range eval.Obligations {
+		if ob.Type == "rewrite_input" {
+			t.Fatalf("deny decision must not include allow obligations: %#v", eval.Obligations)
+		}
+	}
 }

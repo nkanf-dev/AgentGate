@@ -129,6 +129,9 @@ func DefaultBundle() Bundle {
 				RequestKinds: []types.RequestKind{types.RequestKindInput},
 				Effect:       types.EffectAllowWithAudit,
 				ReasonCode:   "input_secret_rewritten_to_handles",
+				Obligations: []Obligation{
+					{Type: "rewrite_input"},
+				},
 				When: Condition{
 					Language:   "cel",
 					Expression: `content.data_classes.exists(x, x == "secret")`,
@@ -155,6 +158,9 @@ func DefaultBundle() Bundle {
 				RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "runtime_high_risk_requires_approval",
+				Obligations: []Obligation{
+					{Type: "approval_request"},
+				},
 				When: Condition{
 					Language:   "cel",
 					Expression: `action.tool == "bash"`,
@@ -168,6 +174,9 @@ func DefaultBundle() Bundle {
 				RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "runtime_high_risk_requires_approval",
+				Obligations: []Obligation{
+					{Type: "approval_request"},
+				},
 				When: Condition{
 					Language:   "cel",
 					Expression: `action.tool in ["exec", "shell", "terminal"]`,
@@ -181,6 +190,9 @@ func DefaultBundle() Bundle {
 				RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "runtime_high_risk_requires_approval",
+				Obligations: []Obligation{
+					{Type: "approval_request"},
+				},
 				When: Condition{
 					Language:   "cel",
 					Expression: `action.open_world == true`,
@@ -194,6 +206,9 @@ func DefaultBundle() Bundle {
 				RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "runtime_high_risk_requires_approval",
+				Obligations: []Obligation{
+					{Type: "approval_request"},
+				},
 				When: Condition{
 					Language:   "cel",
 					Expression: `action.side_effects.exists(x, x in ["filesystem_write", "network_egress", "process_spawn", "secret_resolve"])`,
@@ -207,6 +222,9 @@ func DefaultBundle() Bundle {
 				RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "runtime_secret_egress_requires_approval",
+				Obligations: []Obligation{
+					{Type: "approval_request"},
+				},
 				When: Condition{
 					Language:   "cel",
 					Expression: `content.data_classes.exists(x, x == "secret") &&
@@ -221,6 +239,9 @@ func DefaultBundle() Bundle {
 				RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "runtime_untrusted_write_requires_approval",
+				Obligations: []Obligation{
+					{Type: "approval_request"},
+				},
 				When: Condition{
 					Language:   "cel",
 					Expression: `context.taints.exists(x, x in ["untrusted_external", "possible_prompt_injection", "embedded_instruction"]) &&
@@ -251,6 +272,9 @@ func DefaultBundle() Bundle {
 				RequestKinds: []types.RequestKind{types.RequestKindResourceAccess},
 				Effect:       types.EffectAllowWithAudit,
 				ReasonCode:   "secret_handle_resolve_allowed",
+				Obligations: []Obligation{
+					{Type: "resolve_secret_handle"},
+				},
 				When: Condition{
 					Language:   "cel",
 					Expression: `action.operation == "resolve_secret_handle" && target.kind == "secret_handle"`,
@@ -264,6 +288,9 @@ func DefaultBundle() Bundle {
 				RequestKinds: []types.RequestKind{types.RequestKindResourceEgress},
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "resource_secret_egress_requires_approval",
+				Obligations: []Obligation{
+					{Type: "approval_request"},
+				},
 				When: Condition{
 					Language:   "cel",
 					Expression: `target.kind == "secret_handle" || action.operation == "resolve_secret_handle"`,
@@ -277,6 +304,9 @@ func DefaultBundle() Bundle {
 				RequestKinds: []types.RequestKind{types.RequestKindResourceEgress},
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "resource_untrusted_egress_requires_approval",
+				Obligations: []Obligation{
+					{Type: "approval_request"},
+				},
 				When: Condition{
 					Language:   "cel",
 					Expression: `context.taints.exists(x, x in ["untrusted_external", "possible_prompt_injection", "embedded_instruction"]) ||
@@ -524,13 +554,17 @@ func EvaluateBundles(bundles []Bundle, request types.PolicyRequest, sessionFacts
 			Defaulted:      true,
 		}
 	}
+
+	// Defense-in-depth: CorePolicy's core.default_deny (CEL "true") always matches,
+	// so this block is unreachable under normal operation. Kept as a safety net
+	// in case CorePolicy is missing or its deny-all rule is removed.
 	if len(matched) == 0 {
 		return Evaluation{
-			Effect:         types.EffectAllowWithAudit,
-			ReasonCode:     "policy_allow_with_audit",
-			AppliedRules:   []string{"policy.default.allow_with_audit"},
+			Effect:         types.EffectDeny,
+			ReasonCode:     "policy_no_matching_rule",
+			AppliedRules:   []string{"policy.default.deny"},
 			Obligations:    []types.Obligation{auditObligation("info", request.Context.Surface)},
-			SelectedRule:   "policy.default.allow_with_audit",
+			SelectedRule:   "policy.default.deny",
 			SelectedBundle: "policy.default",
 			Defaulted:      true,
 		}
@@ -587,7 +621,7 @@ func (b Bundle) RequiresRuntimeApproval(request types.PolicyRequest) bool {
 }
 
 func ruleMatches(rule Rule, request types.PolicyRequest, sessionFacts types.SessionFacts) (bool, error) {
-	if rule.Surface != request.Context.Surface {
+	if rule.Surface != types.Surface("*") && rule.Surface != request.Context.Surface {
 		return false, nil
 	}
 	if len(rule.RequestKinds) > 0 && !containsRequestKind(rule.RequestKinds, request.RequestKind) {
@@ -602,7 +636,10 @@ func ruleMatches(rule Rule, request types.PolicyRequest, sessionFacts types.Sess
 }
 
 func compatibleObligations(selected types.Effect, candidate types.Effect) bool {
-	return selected == candidate || candidate == types.EffectAllowWithAudit || candidate == types.EffectAllow
+	// Only merge obligations from rules with the same effect rank.
+	// This prevents Allow obligations from leaking into a Deny decision
+	// when both rules match at the same priority.
+	return selected == candidate
 }
 
 func convertObligations(obligations []Obligation) []types.Obligation {
@@ -667,7 +704,7 @@ func effectRank(effect types.Effect) int {
 
 func containsRequestKind(values []types.RequestKind, candidate types.RequestKind) bool {
 	for _, value := range values {
-		if value == candidate {
+		if value == types.RequestKind("*") || value == candidate {
 			return true
 		}
 	}
@@ -699,7 +736,7 @@ func normalizeSessionFacts(facts types.SessionFacts) types.SessionFacts {
 
 func validSurface(surface types.Surface) bool {
 	switch surface {
-	case types.SurfaceInput, types.SurfaceRuntime, types.SurfaceResource:
+	case types.Surface("*"), types.SurfaceInput, types.SurfaceRuntime, types.SurfaceResource:
 		return true
 	default:
 		return false
@@ -708,7 +745,8 @@ func validSurface(surface types.Surface) bool {
 
 func validRequestKind(kind types.RequestKind) bool {
 	switch kind {
-	case types.RequestKindInput,
+	case types.RequestKind("*"),
+		types.RequestKindInput,
 		types.RequestKindToolAttempt,
 		types.RequestKindResourceEgress,
 		types.RequestKindResourceAccess,
@@ -748,8 +786,6 @@ func validateCondition(ruleID string, condition Condition) error {
 
 func validateObligationCompatibility(rule Rule, obligation Obligation) error {
 	switch obligation.Type {
-	case "rewrite_input", "resolve_secret_handle", "approval_request":
-		return fmt.Errorf("rule %q uses core-owned obligation type %q", rule.ID, obligation.Type)
 	case "task_control":
 		action, ok := obligation.Params["action"].(string)
 		if !ok || action == "" {

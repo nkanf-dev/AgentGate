@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -890,8 +891,8 @@ func TestInputSecretFailsClosedWithoutPolicyRule(t *testing.T) {
 	if decision.Effect != types.EffectDeny {
 		t.Fatalf("effect = %q, want deny", decision.Effect)
 	}
-	if decision.ReasonCode != "input_secret_policy_missing" {
-		t.Fatalf("reason = %q, want input_secret_policy_missing", decision.ReasonCode)
+	if decision.ReasonCode != "policy_no_matching_rule" {
+		t.Fatalf("reason = %q, want policy_no_matching_rule", decision.ReasonCode)
 	}
 	if hasObligation(decision.Obligations, "rewrite_input") {
 		t.Fatalf("secret should not be rewritten without an explicit policy rule: %#v", decision.Obligations)
@@ -907,6 +908,7 @@ func TestResourceSecretFailsClosedWithoutPolicyRule(t *testing.T) {
 			RequestKinds: []types.RequestKind{types.RequestKindInput},
 			Effect:       types.EffectAllowWithAudit,
 			ReasonCode:   "input_secret_rewritten_to_handles",
+			Obligations:  []policy.Obligation{{Type: "rewrite_input"}},
 			When:         policy.Condition{Language: "cel", Expression: `content.data_classes.exists(x, x == "secret")`},
 		},
 	})
@@ -946,8 +948,8 @@ func TestResourceSecretFailsClosedWithoutPolicyRule(t *testing.T) {
 	if resourceDecision.Effect != types.EffectDeny {
 		t.Fatalf("effect = %q, want deny", resourceDecision.Effect)
 	}
-	if resourceDecision.ReasonCode != "resource_secret_policy_missing" {
-		t.Fatalf("reason = %q, want resource_secret_policy_missing", resourceDecision.ReasonCode)
+	if resourceDecision.ReasonCode != "policy_no_matching_rule" {
+		t.Fatalf("reason = %q, want policy_no_matching_rule", resourceDecision.ReasonCode)
 	}
 	if hasObligation(resourceDecision.Obligations, "resolve_secret_handle") {
 		t.Fatalf("secret should not be resolved without an explicit policy rule: %#v", resourceDecision.Obligations)
@@ -1255,7 +1257,7 @@ func eventEffect(events []types.EventEnvelope, eventType string) types.Effect {
 func coreTestBundle(rules []policy.Rule) policy.Bundle {
 	return policy.Bundle{
 		Version:  1,
-		Status:   "test",
+		Status:   "active",
 		IssuedAt: time.Date(2026, 4, 24, 0, 0, 0, 0, time.UTC),
 		Rules:    rules,
 		InputPolicy: policy.InputPolicy{
@@ -1314,6 +1316,7 @@ func TestHydrateSecretHandlesFromStore(t *testing.T) {
 			RequestKinds: []types.RequestKind{types.RequestKindInput},
 			Effect:       types.EffectAllowWithAudit,
 			ReasonCode:   "input_secret_rewritten_to_handles",
+			Obligations:  []policy.Obligation{{Type: "rewrite_input"}},
 			When:         policy.Condition{Language: "cel", Expression: `content.data_classes.exists(x, x == "secret")`},
 		},
 		{
@@ -1323,6 +1326,7 @@ func TestHydrateSecretHandlesFromStore(t *testing.T) {
 			RequestKinds: []types.RequestKind{types.RequestKindResourceAccess},
 			Effect:       types.EffectAllowWithAudit,
 			ReasonCode:   "secret_handle_resolve_allowed",
+			Obligations:  []policy.Obligation{{Type: "resolve_secret_handle"}},
 			When:         policy.Condition{Language: "cel", Expression: `action.operation == "resolve_secret_handle" && target.kind == "secret_handle"`},
 		},
 	})
@@ -1476,6 +1480,7 @@ func TestSecretHandleWriteOrderSQLiteFirst(t *testing.T) {
 			RequestKinds: []types.RequestKind{types.RequestKindInput},
 			Effect:       types.EffectAllowWithAudit,
 			ReasonCode:   "input_secret_rewritten_to_handles",
+			Obligations:  []policy.Obligation{{Type: "rewrite_input"}},
 			When:         policy.Condition{Language: "cel", Expression: `content.data_classes.exists(x, x == "secret")`},
 		},
 	})
@@ -1672,5 +1677,638 @@ func TestEventCleanupRunsInBackground(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].EventID != "evt_cleanup_recent" {
 		t.Fatalf("expected only recent event after prune, got %#v", events)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue #12 edge case tests: CorePolicy, grant pre-check, obligation executor,
+// execution order, Decide() paths, migration behavior
+// ---------------------------------------------------------------------------
+
+func TestCorePolicyDenyAllMatchesWhenNoRulesMatch(t *testing.T) {
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "runtime.only",
+			Priority:     1,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "runtime_only",
+			When:         policy.Condition{Language: "cel", Expression: `action.tool == "read"`},
+		},
+	})
+	engine := NewEngine(WithPolicyBundle(bundle))
+
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_deny_all",
+		RequestKind: types.RequestKindInput,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context:     types.DecisionContext{Surface: types.SurfaceInput},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectDeny {
+		t.Fatalf("effect = %q, want deny", decision.Effect)
+	}
+	if decision.ReasonCode != "policy_no_matching_rule" {
+		t.Fatalf("reason = %q, want policy_no_matching_rule", decision.ReasonCode)
+	}
+}
+
+func TestCorePolicyDenyAllHasLowestPriority(t *testing.T) {
+	// User bundle with priority 10 should override CorePolicy's priority 0 deny-all.
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "input.allow_all",
+			Priority:     10,
+			Surface:      types.SurfaceInput,
+			RequestKinds: []types.RequestKind{types.RequestKindInput},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "input_allowed",
+			When:         policy.Condition{Language: "cel", Expression: "true"},
+		},
+	})
+	engine := NewEngine(WithPolicyBundle(bundle))
+
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_override",
+		RequestKind: types.RequestKindInput,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context:     types.DecisionContext{Surface: types.SurfaceInput},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectAllowWithAudit {
+		t.Fatalf("effect = %q, want allow_with_audit", decision.Effect)
+	}
+	if decision.ReasonCode != "input_allowed" {
+		t.Fatalf("reason = %q, want input_allowed", decision.ReasonCode)
+	}
+}
+
+func TestCorePolicyResourceUnsupportedTarget(t *testing.T) {
+	// CorePolicy denies resource access to non-secret_handle targets.
+	engine := NewEngine()
+
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_unsupported_target",
+		RequestKind: types.RequestKindResourceAccess,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "read_file"},
+		Target:      types.TargetContext{Kind: "file", Identifier: "/etc/passwd"},
+		Context:     types.DecisionContext{Surface: types.SurfaceResource},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectDeny {
+		t.Fatalf("effect = %q, want deny", decision.Effect)
+	}
+	if decision.ReasonCode != "resource_access_unsupported_target" {
+		t.Fatalf("reason = %q, want resource_access_unsupported_target", decision.ReasonCode)
+	}
+}
+
+func TestGrantPreCheckBypassesPolicy(t *testing.T) {
+	engine := NewEngine()
+	session := types.SessionContext{SessionID: "sess_grant", TaskID: "task_1", AttemptID: "attempt_1"}
+
+	// First: create an approval.
+	approvalDecision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_approval",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     session,
+		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
+		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("decide approval: %v", err)
+	}
+	if approvalDecision.Effect != types.EffectApprovalRequired {
+		t.Fatalf("effect = %q, want approval_required", approvalDecision.Effect)
+	}
+	approvalID := approvalIDFromObligations(approvalDecision.Obligations)
+	if approvalID == "" {
+		t.Fatal("missing approval_id")
+	}
+
+	// Approve it.
+	_, err = engine.ResolveApproval(approvalID, types.ApprovalResolveRequest{
+		Decision:   "allow_once",
+		OperatorID: "op_1",
+		Channel:    "test",
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	// Second: same attempt should be allowed by grant pre-check.
+	grantDecision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_grant",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     session,
+		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
+		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("decide grant: %v", err)
+	}
+	if grantDecision.Effect != types.EffectAllowWithAudit {
+		t.Fatalf("effect = %q, want allow_with_audit", grantDecision.Effect)
+	}
+	if grantDecision.ReasonCode != "user_allow_once_valid" {
+		t.Fatalf("reason = %q, want user_allow_once_valid", grantDecision.ReasonCode)
+	}
+}
+
+func TestGrantPreCheckOnlyForRuntimeSurface(t *testing.T) {
+	engine := NewEngine()
+	session := types.SessionContext{SessionID: "sess_grant_surface", TaskID: "task_1", AttemptID: "attempt_1"}
+
+	// Create and approve a runtime approval.
+	approvalDecision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_approval_surface",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     session,
+		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
+		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	approvalID := approvalIDFromObligations(approvalDecision.Obligations)
+	_, err = engine.ResolveApproval(approvalID, types.ApprovalResolveRequest{
+		Decision: "allow_once", OperatorID: "op_1", Channel: "test",
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	// Input request with same session should NOT be affected by the grant.
+	inputDecision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_input_no_grant",
+		RequestKind: types.RequestKindInput,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     session,
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context:     types.DecisionContext{Surface: types.SurfaceInput},
+	})
+	if err != nil {
+		t.Fatalf("decide input: %v", err)
+	}
+	if inputDecision.ReasonCode == "user_allow_once_valid" {
+		t.Fatalf("grant should not apply to input surface: %q", inputDecision.ReasonCode)
+	}
+}
+
+func TestObligationExecutorRewriteInputWithFindings(t *testing.T) {
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "input.secret.rewrite",
+			Priority:     100,
+			Surface:      types.SurfaceInput,
+			RequestKinds: []types.RequestKind{types.RequestKindInput},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "input_secret_rewritten",
+			Obligations:  []policy.Obligation{{Type: "rewrite_input"}},
+			When:         policy.Condition{Language: "cel", Expression: `content.data_classes.exists(x, x == "secret")`},
+		},
+	})
+	engine := NewEngine(WithPolicyBundle(bundle))
+
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_rewrite",
+		RequestKind: types.RequestKindInput,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_rewrite", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context: types.DecisionContext{
+			Surface: types.SurfaceInput,
+			Raw:     map[string]interface{}{"text": "api_key: sk-test-1234567890abcdef"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectAllowWithAudit {
+		t.Fatalf("effect = %q, want allow_with_audit", decision.Effect)
+	}
+
+	// Verify rewrite_input obligation has text and handles.
+	var hasRewrite bool
+	for _, ob := range decision.Obligations {
+		if ob.Type == "rewrite_input" {
+			hasRewrite = true
+			if ob.Params["text"] == nil || ob.Params["text"] == "" {
+				t.Fatal("rewrite_input missing text")
+			}
+			if ob.Params["secret_handles"] == nil {
+				t.Fatal("rewrite_input missing secret_handles")
+			}
+		}
+	}
+	if !hasRewrite {
+		t.Fatalf("missing rewrite_input obligation: %#v", decision.Obligations)
+	}
+}
+
+func TestObligationExecutorResolveSecretHandle(t *testing.T) {
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "input.secret.rewrite",
+			Priority:     100,
+			Surface:      types.SurfaceInput,
+			RequestKinds: []types.RequestKind{types.RequestKindInput},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "input_secret_rewritten",
+			Obligations:  []policy.Obligation{{Type: "rewrite_input"}},
+			When:         policy.Condition{Language: "cel", Expression: `content.data_classes.exists(x, x == "secret")`},
+		},
+		{
+			ID:           "resource.resolve",
+			Priority:     100,
+			Surface:      types.SurfaceResource,
+			RequestKinds: []types.RequestKind{types.RequestKindResourceAccess},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "secret_handle_resolve_allowed",
+			Obligations:  []policy.Obligation{{Type: "resolve_secret_handle"}},
+			When:         policy.Condition{Language: "cel", Expression: `action.operation == "resolve_secret_handle" && target.kind == "secret_handle"`},
+		},
+	})
+	engine := NewEngine(WithPolicyBundle(bundle))
+
+	// Create a handle via input.
+	inputDec, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_resolve_input",
+		RequestKind: types.RequestKindInput,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_resolve", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context: types.DecisionContext{
+			Surface: types.SurfaceInput,
+			Raw:     map[string]interface{}{"text": "secret: my-api-key-12345"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("input decide: %v", err)
+	}
+	handleID := handleIDFromDecision(t, inputDec)
+
+	// Resolve the handle.
+	resolveDec, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_resolve",
+		RequestKind: types.RequestKindResourceAccess,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_resolve", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "resolve_secret_handle"},
+		Target:      types.TargetContext{Kind: "secret_handle", Identifier: handleID},
+		Context:     types.DecisionContext{Surface: types.SurfaceResource},
+	})
+	if err != nil {
+		t.Fatalf("resolve decide: %v", err)
+	}
+	if resolveDec.Effect != types.EffectAllowWithAudit {
+		t.Fatalf("effect = %q, want allow_with_audit", resolveDec.Effect)
+	}
+
+	// Verify resolve_secret_handle obligation has the value.
+	var hasResolve bool
+	for _, ob := range resolveDec.Obligations {
+		if ob.Type == "resolve_secret_handle" {
+			hasResolve = true
+			if ob.Params["secret_value"] == nil || ob.Params["secret_value"] == "" {
+				t.Fatal("resolve_secret_handle missing secret_value")
+			}
+		}
+	}
+	if !hasResolve {
+		t.Fatalf("missing resolve_secret_handle obligation: %#v", resolveDec.Obligations)
+	}
+}
+
+func TestObligationExecutorResolveSecretHandleNotFound(t *testing.T) {
+	engine := NewEngine()
+
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_not_found",
+		RequestKind: types.RequestKindResourceAccess,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "resolve_secret_handle"},
+		Target:      types.TargetContext{Kind: "secret_handle", Identifier: "sech_nonexistent"},
+		Context:     types.DecisionContext{Surface: types.SurfaceResource},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectDeny {
+		t.Fatalf("effect = %q, want deny", decision.Effect)
+	}
+}
+
+func TestObligationExecutorApprovalRequest(t *testing.T) {
+	engine := NewEngine()
+
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_approval_ob",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_ob", TaskID: "task_1", AttemptID: "att_1"},
+		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
+		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectApprovalRequired {
+		t.Fatalf("effect = %q, want approval_required", decision.Effect)
+	}
+
+	// Verify approval_request obligation exists with approval_id.
+	var hasApproval bool
+	for _, ob := range decision.Obligations {
+		if ob.Type == "approval_request" {
+			hasApproval = true
+			if ob.Params["approval_id"] == nil || ob.Params["approval_id"] == "" {
+				t.Fatal("approval_request missing approval_id")
+			}
+		}
+	}
+	if !hasApproval {
+		t.Fatalf("missing approval_request obligation: %#v", decision.Obligations)
+	}
+}
+
+func TestObligationDeduplicationMultipleRulesSameType(t *testing.T) {
+	// Two rules at same priority both declare approval_request.
+	// Only one approval should be created.
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "runtime.bash.approval",
+			Priority:     100,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectApprovalRequired,
+			ReasonCode:   "bash_requires_approval",
+			Obligations:  []policy.Obligation{{Type: "approval_request"}},
+			When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
+		},
+		{
+			ID:           "runtime.open_world.approval",
+			Priority:     100,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectApprovalRequired,
+			ReasonCode:   "open_world_requires_approval",
+			Obligations:  []policy.Obligation{{Type: "approval_request"}},
+			When:         policy.Condition{Language: "cel", Expression: `action.open_world == true`},
+		},
+	})
+	engine := NewEngine(WithPolicyBundle(bundle))
+
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_dedup",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_dedup", TaskID: "task_1", AttemptID: "att_1"},
+		Action:      types.ActionContext{Tool: "bash", Operation: "execute", OpenWorld: true},
+		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+
+	// Count approval_request obligations — should be exactly 1.
+	approvalCount := 0
+	for _, ob := range decision.Obligations {
+		if ob.Type == "approval_request" {
+			approvalCount++
+		}
+	}
+	if approvalCount != 1 {
+		t.Fatalf("expected 1 approval_request obligation, got %d: %#v", approvalCount, decision.Obligations)
+	}
+
+	// Only one approval should exist in the engine.
+	engine.mu.RLock()
+	approvalCount = len(engine.approvals)
+	engine.mu.RUnlock()
+	if approvalCount != 1 {
+		t.Fatalf("expected 1 approval in engine, got %d", approvalCount)
+	}
+}
+
+func TestExecutionOrderValidationSkipsPolicy(t *testing.T) {
+	engine := NewEngine()
+
+	// Missing session → validation deny, policy never evaluated.
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_no_session",
+		RequestKind: types.RequestKindInput,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{},
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context:     types.DecisionContext{Surface: types.SurfaceInput},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectDeny {
+		t.Fatalf("effect = %q, want deny", decision.Effect)
+	}
+	// Should be a validation error, not a policy error.
+	if decision.ReasonCode == "policy_no_matching_rule" {
+		t.Fatalf("should be validation error, not policy fallback: %q", decision.ReasonCode)
+	}
+}
+
+func TestDecideInputPathWithSecrets(t *testing.T) {
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "input.secret.rewrite",
+			Priority:     100,
+			Surface:      types.SurfaceInput,
+			RequestKinds: []types.RequestKind{types.RequestKindInput},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "input_secret_rewritten",
+			Obligations:  []policy.Obligation{{Type: "rewrite_input"}},
+			When:         policy.Condition{Language: "cel", Expression: `content.data_classes.exists(x, x == "secret")`},
+		},
+	})
+	engine := NewEngine(WithPolicyBundle(bundle))
+
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_input_path",
+		RequestKind: types.RequestKindInput,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_input", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context: types.DecisionContext{
+			Surface: types.SurfaceInput,
+			Raw:     map[string]interface{}{"text": "api_key: sk-test-1234567890abcdef1234567890abcdef"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectAllowWithAudit {
+		t.Fatalf("effect = %q, want allow_with_audit", decision.Effect)
+	}
+
+	// Verify handles were created.
+	engine.mu.RLock()
+	handleCount := len(engine.secretHandles)
+	engine.mu.RUnlock()
+	if handleCount == 0 {
+		t.Fatal("expected secret handles to be created")
+	}
+}
+
+func TestDecideInputPathWithoutSecrets(t *testing.T) {
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "input.allow",
+			Priority:     100,
+			Surface:      types.SurfaceInput,
+			RequestKinds: []types.RequestKind{types.RequestKindInput},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "input_allowed",
+			When:         policy.Condition{Language: "cel", Expression: "true"},
+		},
+	})
+	engine := NewEngine(WithPolicyBundle(bundle))
+
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_no_secrets",
+		RequestKind: types.RequestKindInput,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_clean", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context: types.DecisionContext{
+			Surface: types.SurfaceInput,
+			Raw:     map[string]interface{}{"text": "hello world"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectAllowWithAudit {
+		t.Fatalf("effect = %q, want allow_with_audit", decision.Effect)
+	}
+
+	// No rewrite_input obligation should be present (no secrets detected).
+	for _, ob := range decision.Obligations {
+		if ob.Type == "rewrite_input" {
+			t.Fatal("rewrite_input should not be present when no secrets detected")
+		}
+	}
+}
+
+func TestMigrationBundleWithoutObligationsGetsDenyFallback(t *testing.T) {
+	// Old bundle without obligations declared — no evaluator to override,
+	// so policy result stands. If the rule matches, its effect is used.
+	// If no rules match, deny fallback kicks in.
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "runtime.bash.approval",
+			Priority:     100,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectApprovalRequired,
+			ReasonCode:   "runtime_high_risk",
+			// No Obligations declared — old-style bundle.
+			When: policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
+		},
+	})
+	engine := NewEngine(WithPolicyBundle(bundle))
+
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_migration",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_mig", TaskID: "task_1", AttemptID: "att_1"},
+		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
+		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	// Rule matches, effect is approval_required. But no approval_request
+	// obligation is declared, so no approval is created.
+	if decision.Effect != types.EffectApprovalRequired {
+		t.Fatalf("effect = %q, want approval_required", decision.Effect)
+	}
+	for _, ob := range decision.Obligations {
+		if ob.Type == "approval_request" {
+			t.Fatal("old bundle should not create approval without obligation declaration")
+		}
+	}
+}
+
+func TestConcurrentDecideDoesNotCorruptState(t *testing.T) {
+	engine := NewEngine()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 20)
+
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			decision, err := engine.Decide(types.PolicyRequest{
+				RequestID:   fmt.Sprintf("req_concurrent_%d", idx),
+				RequestKind: types.RequestKindToolAttempt,
+				Actor:       types.ActorContext{UserID: fmt.Sprintf("u%d", idx), HostID: "openclaw"},
+				Session:     types.SessionContext{SessionID: fmt.Sprintf("sess_%d", idx), TaskID: fmt.Sprintf("task_%d", idx), AttemptID: fmt.Sprintf("att_%d", idx)},
+				Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
+				Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+				Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+			})
+			if err != nil {
+				errCh <- fmt.Errorf("goroutine %d: %v", idx, err)
+				return
+			}
+			if decision.Effect != types.EffectApprovalRequired {
+				errCh <- fmt.Errorf("goroutine %d: effect = %q, want approval_required", idx, decision.Effect)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
+	}
+
+	// Verify no corrupted state.
+	engine.mu.RLock()
+	approvalCount := len(engine.approvals)
+	engine.mu.RUnlock()
+	if approvalCount != 20 {
+		t.Fatalf("expected 20 approvals, got %d", approvalCount)
 	}
 }

@@ -189,7 +189,7 @@ func NewEngine(options ...Option) *Engine {
 		integrations:       make(map[string]types.IntegrationDefinition),
 		events:             make([]types.EventEnvelope, 0, 128),
 		policyBundle:       policy.DefaultBundle(),
-		policyBundles:      []policy.Bundle{defaultPolicyBundle(policy.DefaultBundle())},
+		policyBundles:      []policy.Bundle{policy.CorePolicyBundle(), defaultPolicyBundle(policy.DefaultBundle())},
 		runtimes:           make(map[string]*managedRuntimeState),
 		secretHandles:      make(map[string]types.SecretHandle),
 		secretValues:       make(map[string]string),
@@ -275,16 +275,17 @@ func WithStateStore(store StateStore) Option {
 
 func WithPolicyBundle(bundle policy.Bundle) Option {
 	return func(engine *Engine) {
-		engine.policyBundle = bundle
-		engine.policyBundles = []policy.Bundle{defaultPolicyBundle(bundle)}
+		bundles := ensureCorePolicy([]policy.Bundle{bundle})
+		engine.policyBundles = bundles
+		engine.policyBundle = aggregateBundles(bundles)
 	}
 }
 
 func WithPolicyBundles(bundles []policy.Bundle) Option {
 	return func(engine *Engine) {
-		engine.policyBundles = clonePolicyBundles(bundles)
-		if len(bundles) > 0 {
-			engine.policyBundle = aggregateBundles(bundles)
+		engine.policyBundles = ensureCorePolicy(clonePolicyBundles(bundles))
+		if len(engine.policyBundles) > 0 {
+			engine.policyBundle = aggregateBundles(engine.policyBundles)
 		}
 	}
 }
@@ -805,7 +806,8 @@ func (e *Engine) PublishPolicy(req PolicyPublishRequest) (PolicyCurrentResponse,
 		}
 		e.activatePolicyLocked(bundle, record)
 	}
-	e.policyBundles = []policy.Bundle{defaultPolicyBundle(bundle)}
+	e.policyBundles = ensureCorePolicy([]policy.Bundle{defaultPolicyBundle(bundle)})
+	e.policyBundle = aggregateBundles(e.policyBundles)
 	record := e.activePolicyRecordLocked()
 	e.mu.Unlock()
 
@@ -861,8 +863,9 @@ func (e *Engine) RollbackPolicy(req PolicyRollbackRequest) (PolicyCurrentRespons
 		}
 		e.activatePolicyLocked(bundle, record)
 	}
+	e.policyBundles = ensureCorePolicy([]policy.Bundle{defaultPolicyBundle(bundle)})
+	e.policyBundle = aggregateBundles(e.policyBundles)
 	record := e.activePolicyRecordLocked()
-	e.policyBundles = []policy.Bundle{defaultPolicyBundle(bundle)}
 	e.mu.Unlock()
 
 	if err := e.appendPolicyLifecycleEvent("policy_rolled_back", bundle, record, req.OperatorID, message, req.Version, now); err != nil {
@@ -921,7 +924,6 @@ func (e *Engine) activatePolicyLocked(bundle policy.Bundle, record policy.Versio
 		e.policyRecords[index].Status = "superseded"
 	}
 	record.Active = true
-	e.policyBundle = clonePolicyBundle(bundle)
 	e.policyHistory[bundle.Version] = clonePolicyBundle(bundle)
 	replaced := false
 	for index := range e.policyRecords {
@@ -1104,20 +1106,56 @@ func clonePolicyBundles(bundles []policy.Bundle) []policy.Bundle {
 	return result
 }
 
+func ensureCorePolicy(bundles []policy.Bundle) []policy.Bundle {
+	hasCore := false
+	for i := range bundles {
+		if bundles[i].BundleID == "core" {
+			// CorePolicy must have at least default_deny and resource_unsupported_target.
+			// Replace with canonical CorePolicyBundle if rules are missing.
+			if len(bundles[i].Rules) < 2 {
+				bundles[i] = policy.CorePolicyBundle()
+			}
+			hasCore = true
+		}
+		if bundles[i].Status == "active_default" {
+			bundles[i].Status = policy.BundleStatusActive
+		}
+	}
+	if hasCore {
+		return bundles
+	}
+	return append([]policy.Bundle{policy.CorePolicyBundle()}, bundles...)
+}
+
 func aggregateBundles(bundles []policy.Bundle) policy.Bundle {
 	bundle := policy.DefaultBundle()
-	bundle.Version = 0
 	bundle.Status = "bundles_active"
 	bundle.IssuedAt = time.Now().UTC()
 	bundle.Rules = nil
+
+	corePolicy := policy.CorePolicyBundle()
+	bundle.Rules = append(bundle.Rules, corePolicy.Rules...)
+
+	maxVersion := 0
 	for _, managedBundle := range bundles {
+		if managedBundle.BundleID == "core" {
+			continue
+		}
 		if managedBundle.Status != policy.BundleStatusActive {
 			continue
 		}
+		if managedBundle.Version > maxVersion {
+			maxVersion = managedBundle.Version
+		}
 		bundle.Rules = append(bundle.Rules, managedBundle.Rules...)
 	}
-	if len(bundle.Rules) == 0 {
-		bundle.Rules = policy.DefaultBundle().Rules
+	bundle.Version = maxVersion
+	// When no user-managed rules exist (only CorePolicy), fall back to
+	// DefaultBundle rules as a sensible baseline. An empty bundle intentionally
+	// targeting deny-all should include at least one explicit deny rule so this
+	// fallback does not activate.
+	if len(bundle.Rules) == len(corePolicy.Rules) {
+		bundle.Rules = append(bundle.Rules, policy.DefaultBundle().Rules...)
 	}
 	return bundle
 }
@@ -1639,47 +1677,58 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 	activePolicy := e.policyBundle
 	activeBundles := clonePolicyBundles(e.policyBundles)
 	e.mu.RUnlock()
+	decisionReady := false
 	if patch := validateDecisionRequest(req, surface); patch != nil {
 		policyEvaluation = requestValidationEvaluation(patch)
 		effect = patch.effect
 		reason = patch.reason
 		appliedRules = patch.appliedRules
 		obligations = append([]types.Obligation(nil), patch.obligations...)
-	} else {
+		decisionReady = true
+	}
+
+	var inputFacts inputSecretFacts
+	var sessionFacts types.SessionFacts
+	if !decisionReady {
 		taintsBefore := len(req.Context.Taints)
-		inputFacts := e.enrichPolicyFacts(&req)
+		inputFacts = e.enrichPolicyFacts(&req)
 		newTaints = append([]types.Taint(nil), req.Context.Taints[taintsBefore:]...)
-		sessionFacts := e.sessionFactsForDecision(req.Session.SessionID)
+		sessionFacts = e.sessionFactsForDecision(req.Session.SessionID)
 		req.Context.Taints = mergeTaints(req.Context.Taints, sessionFacts.Taints)
+		if len(inputFacts.findings) > 0 {
+			if req.Context.Raw == nil {
+				req.Context.Raw = make(map[string]interface{})
+			}
+			req.Context.Raw["has_secret_findings"] = true
+		}
+
+		if req.RequestKind == types.RequestKindToolAttempt && surface == types.SurfaceRuntime {
+			if grant, ok := e.hasValidGrant(req.Session, now); ok {
+				effect = types.EffectAllowWithAudit
+				reason = "user_allow_once_valid"
+				appliedRules = []string{"runtime.high_risk.allow_once_grant"}
+				obligations = []types.Obligation{auditObligation("info", map[string]interface{}{"approval_id": grant.ApprovalID})}
+				policyEvaluation = policy.Evaluation{Effect: effect, ReasonCode: reason, AppliedRules: appliedRules}
+				decisionReady = true
+			}
+		}
+	}
+
+	if !decisionReady {
 		policyEvaluation = policy.EvaluateBundles(activeBundles, req, sessionFacts)
 		effect = policyEvaluation.Effect
 		reason = policyEvaluation.ReasonCode
 		appliedRules = append([]string(nil), policyEvaluation.AppliedRules...)
 		obligations = append([]types.Obligation(nil), policyEvaluation.Obligations...)
-		if req.RequestKind == types.RequestKindInput && surface == types.SurfaceInput {
-			if patch := e.evaluateInputSecrets(req, now, policyEvaluation, inputFacts); patch != nil {
-				effect = patch.effect
-				reason = patch.reason
-				appliedRules = patch.appliedRules
-				obligations = append(obligations, patch.obligations...)
-			}
-		}
-		if req.RequestKind == types.RequestKindResourceAccess && surface == types.SurfaceResource {
-			if patch := e.evaluateSecretHandleAccess(req, policyEvaluation); patch != nil {
-				effect = patch.effect
-				reason = patch.reason
-				appliedRules = patch.appliedRules
-				obligations = append(obligations, patch.obligations...)
-			}
-		}
-		if req.RequestKind == types.RequestKindToolAttempt && surface == types.SurfaceRuntime {
-			if patch := e.evaluateToolAttempt(req, now, policyEvaluation); patch != nil {
-				effect = patch.effect
-				reason = patch.reason
-				appliedRules = patch.appliedRules
-				obligations = append(obligations, patch.obligations...)
-			}
-		}
+	}
+
+	if enriched, patch := e.executeObligations(obligations, req, inputFacts, now); patch != nil {
+		effect = patch.effect
+		reason = patch.reason
+		appliedRules = patch.appliedRules
+		obligations = patch.obligations
+	} else {
+		obligations = enriched
 	}
 
 	if !isValidSurface(surface) {
@@ -1940,23 +1989,64 @@ func (e *Engine) Events(limit int) ([]types.EventEnvelope, error) {
 	return events, nil
 }
 
-func (e *Engine) evaluateInputSecrets(req types.PolicyRequest, now time.Time, evaluation policy.Evaluation, facts inputSecretFacts) *decisionPatch {
-	if len(facts.findings) == 0 {
-		return nil
-	}
-	if evaluation.Defaulted {
-		return &decisionPatch{
-			effect:       types.EffectDeny,
-			reason:       "input_secret_policy_missing",
-			appliedRules: appendPolicyRules(evaluation.AppliedRules, "input.secret.policy_missing"),
-			obligations: []types.Obligation{
-				auditObligation("critical", map[string]interface{}{"finding_count": len(facts.findings)}),
-				abortTaskObligation(),
-			},
+// executeObligations processes each obligation type exactly once per decision.
+// Multiple rules at the same priority can contribute the same obligation type
+// (e.g., both bash and open_world rules declare approval_request). Deduplication
+// ensures one approval per decision — the policy declares intent, the executor
+// materializes it once.
+func (e *Engine) executeObligations(obligations []types.Obligation, req types.PolicyRequest, facts inputSecretFacts, now time.Time) ([]types.Obligation, *decisionPatch) {
+	enriched := make([]types.Obligation, 0, len(obligations))
+	executed := make(map[string]bool)
+	for _, ob := range obligations {
+		switch ob.Type {
+		case "rewrite_input":
+			if executed[ob.Type] {
+				continue
+			}
+			executed[ob.Type] = true
+			result, patch := e.executeRewriteInput(req, facts, now)
+			if patch != nil {
+				return nil, patch
+			}
+			enriched = append(enriched, result)
+			enriched = append(enriched, types.Obligation{
+				Type: "audit_event",
+				Params: map[string]interface{}{
+					"severity":        "warning",
+					"finding_count":   len(facts.findings),
+					"secret_findings": result.Params["secret_findings"],
+				},
+			})
+		case "resolve_secret_handle":
+			if executed[ob.Type] {
+				continue
+			}
+			executed[ob.Type] = true
+			result, patch := e.executeResolveSecretHandle(req)
+			if patch != nil {
+				return nil, patch
+			}
+			enriched = append(enriched, result)
+		case "approval_request":
+			if executed[ob.Type] {
+				continue
+			}
+			executed[ob.Type] = true
+			result, patch := e.executeApprovalRequest(req, now)
+			if patch != nil {
+				return nil, patch
+			}
+			enriched = append(enriched, result)
+		default:
+			enriched = append(enriched, ob)
 		}
 	}
-	if evaluation.Effect != types.EffectAllow && evaluation.Effect != types.EffectAllowWithAudit {
-		return nil
+	return enriched, nil
+}
+
+func (e *Engine) executeRewriteInput(req types.PolicyRequest, facts inputSecretFacts, now time.Time) (types.Obligation, *decisionPatch) {
+	if len(facts.findings) == 0 {
+		return types.Obligation{Type: "rewrite_input"}, nil
 	}
 
 	handles := make([]types.SecretHandle, 0, len(facts.findings))
@@ -1988,7 +2078,7 @@ func (e *Engine) evaluateInputSecrets(req types.PolicyRequest, now time.Time, ev
 	if e.stateStore != nil {
 		for index, handle := range handles {
 			if err := e.stateStore.SaveSecretHandle(handle, facts.findings[index].Value); err != nil {
-				return &decisionPatch{
+				return types.Obligation{}, &decisionPatch{
 					effect:       types.EffectDeny,
 					reason:       "secret_handle_store_failed",
 					appliedRules: []string{"secret.handle.persist.fail_closed"},
@@ -2006,57 +2096,19 @@ func (e *Engine) evaluateInputSecrets(req types.PolicyRequest, now time.Time, ev
 	}
 	e.mu.Unlock()
 
-	return &decisionPatch{
-		effect:       types.EffectAllowWithAudit,
-		reason:       evaluation.ReasonCode,
-		appliedRules: appendPolicyRules(evaluation.AppliedRules, "input.secret.detect", "secret.handle.create", "input.rewrite.secret_placeholders"),
-		obligations: []types.Obligation{
-			{
-				Type: "rewrite_input",
-				Params: map[string]interface{}{
-					"text":             rewritten,
-					"bodyForAgent":     rewritten,
-					"secret_findings":  summaries,
-					"secret_handles":   handles,
-					"redaction_policy": "placeholder_only",
-				},
-			},
-			{
-				Type: "audit_event",
-				Params: map[string]interface{}{
-					"severity":        "warning",
-					"finding_count":   len(facts.findings),
-					"secret_findings": summaries,
-				},
-			},
+	return types.Obligation{
+		Type: "rewrite_input",
+		Params: map[string]interface{}{
+			"text":             rewritten,
+			"bodyForAgent":     rewritten,
+			"secret_findings":  summaries,
+			"secret_handles":   handles,
+			"redaction_policy": "placeholder_only",
 		},
-	}
+	}, nil
 }
 
-func (e *Engine) evaluateSecretHandleAccess(req types.PolicyRequest, evaluation policy.Evaluation) *decisionPatch {
-	if req.Target.Kind != "secret_handle" || req.Target.Identifier == "" {
-		return &decisionPatch{
-			effect:       types.EffectDeny,
-			reason:       "resource_access_unsupported_target",
-			appliedRules: []string{"resource.secret_handle.required"},
-			obligations:  []types.Obligation{abortTaskObligation()},
-		}
-	}
-	if evaluation.Defaulted {
-		return &decisionPatch{
-			effect:       types.EffectDeny,
-			reason:       "resource_secret_policy_missing",
-			appliedRules: appendPolicyRules(evaluation.AppliedRules, "resource.secret_handle.policy_missing"),
-			obligations: []types.Obligation{
-				auditObligation("critical", map[string]interface{}{"handle_id": req.Target.Identifier}),
-				abortTaskObligation(),
-			},
-		}
-	}
-	if evaluation.Effect != types.EffectAllow && evaluation.Effect != types.EffectAllowWithAudit {
-		return nil
-	}
-
+func (e *Engine) executeResolveSecretHandle(req types.PolicyRequest) (types.Obligation, *decisionPatch) {
 	e.mu.RLock()
 	handle, ok := e.secretHandles[req.Target.Identifier]
 	value := e.secretValues[req.Target.Identifier]
@@ -2064,7 +2116,7 @@ func (e *Engine) evaluateSecretHandleAccess(req types.PolicyRequest, evaluation 
 	if !ok && e.stateStore != nil {
 		storedHandle, storedValue, found, err := e.stateStore.GetSecretHandle(req.Target.Identifier)
 		if err != nil {
-			return &decisionPatch{
+			return types.Obligation{}, &decisionPatch{
 				effect:       types.EffectDeny,
 				reason:       "secret_handle_store_unavailable",
 				appliedRules: []string{"resource.secret_handle.lookup.fail_closed"},
@@ -2081,9 +2133,8 @@ func (e *Engine) evaluateSecretHandleAccess(req types.PolicyRequest, evaluation 
 			e.mu.Unlock()
 		}
 	}
-
 	if !ok {
-		return &decisionPatch{
+		return types.Obligation{}, &decisionPatch{
 			effect:       types.EffectDeny,
 			reason:       "secret_handle_not_found",
 			appliedRules: []string{"resource.secret_handle.lookup"},
@@ -2093,9 +2144,8 @@ func (e *Engine) evaluateSecretHandleAccess(req types.PolicyRequest, evaluation 
 			},
 		}
 	}
-
 	if handle.SessionID != req.Session.SessionID || (handle.TaskID != "" && handle.TaskID != req.Session.TaskID) {
-		return &decisionPatch{
+		return types.Obligation{}, &decisionPatch{
 			effect:       types.EffectDeny,
 			reason:       "secret_handle_scope_mismatch",
 			appliedRules: []string{"resource.secret_handle.scope"},
@@ -2105,62 +2155,18 @@ func (e *Engine) evaluateSecretHandleAccess(req types.PolicyRequest, evaluation 
 			},
 		}
 	}
-
-	return &decisionPatch{
-		effect:       types.EffectAllowWithAudit,
-		reason:       evaluation.ReasonCode,
-		appliedRules: appendPolicyRules(evaluation.AppliedRules, "resource.secret_handle.lookup", "resource.secret_handle.scope"),
-		obligations: []types.Obligation{
-			{
-				Type: "resolve_secret_handle",
-				Params: map[string]interface{}{
-					"handle_id":    handle.HandleID,
-					"placeholder":  handle.Placeholder,
-					"kind":         handle.Kind,
-					"secret_value": value,
-				},
-			},
-			auditObligation("warning", map[string]interface{}{"handle_id": handle.HandleID, "secret_hash": handle.SecretHash}),
+	return types.Obligation{
+		Type: "resolve_secret_handle",
+		Params: map[string]interface{}{
+			"handle_id":    handle.HandleID,
+			"placeholder":  handle.Placeholder,
+			"kind":         handle.Kind,
+			"secret_value": value,
 		},
-	}
+	}, nil
 }
 
-func (e *Engine) evaluateToolAttempt(req types.PolicyRequest, now time.Time, evaluation policy.Evaluation) *decisionPatch {
-	if evaluation.Effect != types.EffectApprovalRequired {
-		return nil
-	}
-
-	key := attemptKey(req.Session.SessionID, req.Session.TaskID, req.Session.AttemptID)
-	e.mu.RLock()
-	grant, granted := e.attemptGrants[key]
-	e.mu.RUnlock()
-	if !granted && e.stateStore != nil {
-		storedGrant, found, err := e.stateStore.GetAttemptGrant(req.Session.SessionID, req.Session.TaskID, req.Session.AttemptID)
-		if err != nil {
-			return &decisionPatch{
-				effect:       types.EffectDeny,
-				reason:       "attempt_grant_store_unavailable",
-				appliedRules: []string{"runtime.grant.lookup.fail_closed"},
-				obligations:  []types.Obligation{abortTaskObligation()},
-			}
-		}
-		if found {
-			grant = storedGrant
-			granted = true
-			e.mu.Lock()
-			e.attemptGrants[key] = storedGrant
-			e.mu.Unlock()
-		}
-	}
-	if granted && grant.ExpiresAt.After(now) {
-		return &decisionPatch{
-			effect:       types.EffectAllowWithAudit,
-			reason:       "user_allow_once_valid",
-			appliedRules: []string{"runtime.high_risk.allow_once_grant"},
-			obligations:  []types.Obligation{auditObligation("info", map[string]interface{}{"approval_id": grant.ApprovalID})},
-		}
-	}
-
+func (e *Engine) executeApprovalRequest(req types.PolicyRequest, now time.Time) (types.Obligation, *decisionPatch) {
 	approvalID := newID("appr")
 	expiresAt := now.Add(10 * time.Minute)
 	approvalChannel := e.approvalChannelForRequest(req)
@@ -2176,10 +2182,9 @@ func (e *Engine) evaluateToolAttempt(req types.PolicyRequest, now time.Time, eva
 		CreatedAt:  now,
 		ExpiresAt:  expiresAt,
 	}
-
 	if e.stateStore != nil {
 		if err := e.stateStore.SaveApproval(approvalStateToRecord(approval)); err != nil {
-			return &decisionPatch{
+			return types.Obligation{}, &decisionPatch{
 				effect:       types.EffectDeny,
 				reason:       "approval_store_failed",
 				appliedRules: []string{"runtime.approval.persist.fail_closed"},
@@ -2190,34 +2195,47 @@ func (e *Engine) evaluateToolAttempt(req types.PolicyRequest, now time.Time, eva
 	e.mu.Lock()
 	e.approvals[approvalID] = approval
 	e.mu.Unlock()
-
-	return &decisionPatch{
-		effect:       types.EffectApprovalRequired,
-		reason:       evaluation.ReasonCode,
-		appliedRules: evaluation.AppliedRules,
-		obligations: []types.Obligation{
-			{
-				Type: "approval_request",
-				Params: map[string]interface{}{
-					"approval_id": approvalID,
-					"scope":       "attempt",
-					"channel":     approvalChannel,
-					"session_id":  req.Session.SessionID,
-					"task_id":     req.Session.TaskID,
-					"attempt_id":  req.Session.AttemptID,
-					"reason":      approval.Reason,
-					"expires_at":  expiresAt,
-				},
-			},
-			{
-				Type: "task_control",
-				Params: map[string]interface{}{
-					"action": "pause_for_approval",
-				},
-			},
+	return types.Obligation{
+		Type: "approval_request",
+		Params: map[string]interface{}{
+			"approval_id": approvalID,
+			"scope":       "attempt",
+			"channel":     approvalChannel,
+			"session_id":  req.Session.SessionID,
+			"task_id":     req.Session.TaskID,
+			"attempt_id":  req.Session.AttemptID,
+			"reason":      approval.Reason,
+			"expires_at":  expiresAt,
 		},
-	}
+	}, nil
 }
+
+
+
+func (e *Engine) hasValidGrant(session types.SessionContext, now time.Time) (types.AttemptGrant, bool) {
+	key := attemptKey(session.SessionID, session.TaskID, session.AttemptID)
+	e.mu.RLock()
+	grant, granted := e.attemptGrants[key]
+	e.mu.RUnlock()
+	if !granted && e.stateStore != nil {
+		storedGrant, found, err := e.stateStore.GetAttemptGrant(session.SessionID, session.TaskID, session.AttemptID)
+		if err != nil {
+			return types.AttemptGrant{}, false
+		}
+		if found {
+			grant = storedGrant
+			granted = true
+			e.mu.Lock()
+			e.attemptGrants[key] = storedGrant
+			e.mu.Unlock()
+		}
+	}
+	if granted && grant.ExpiresAt.After(now) {
+		return grant, true
+	}
+	return types.AttemptGrant{}, false
+}
+
 
 func (e *Engine) approvalChannelForRequest(req types.PolicyRequest) string {
 	integrationID := strings.TrimSpace(mapStringValue(req.Policy, "integration_id"))
@@ -2675,12 +2693,6 @@ func abortTaskObligation() types.Obligation {
 	}
 }
 
-func appendPolicyRules(base []string, extra ...string) []string {
-	result := make([]string, 0, len(base)+len(extra))
-	result = append(result, base...)
-	result = append(result, extra...)
-	return result
-}
 
 func obligationTypes(obligations []types.Obligation) []string {
 	result := make([]string, 0, len(obligations))
