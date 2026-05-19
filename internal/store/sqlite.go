@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/agentgate/agentgate/internal/policy"
@@ -143,7 +144,8 @@ CREATE TABLE IF NOT EXISTS secret_handles (
 	placeholder TEXT NOT NULL,
 	secret_hash TEXT NOT NULL,
 	secret_value BLOB NOT NULL,
-	created_at TEXT NOT NULL
+	created_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS session_facts (
@@ -178,6 +180,18 @@ CREATE TABLE IF NOT EXISTS policy_bundles (
 
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate sqlite: %w", err)
+	}
+
+	// Incremental migrations for existing databases.
+	// ALTER TABLE ... ADD COLUMN fails if the column already exists; ignore that error.
+	for _, stmt := range []string{
+		`ALTER TABLE secret_handles ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column") {
+				return fmt.Errorf("migrate sqlite: %w", err)
+			}
+		}
 	}
 	return nil
 }
@@ -887,8 +901,9 @@ INSERT INTO secret_handles (
 	placeholder,
 	secret_hash,
 	secret_value,
-	created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	created_at,
+	expires_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(handle_id) DO UPDATE SET
 	session_id = excluded.session_id,
 	task_id = excluded.task_id,
@@ -896,7 +911,8 @@ ON CONFLICT(handle_id) DO UPDATE SET
 	placeholder = excluded.placeholder,
 	secret_hash = excluded.secret_hash,
 	secret_value = excluded.secret_value,
-	created_at = excluded.created_at
+	created_at = excluded.created_at,
+	expires_at = excluded.expires_at
 `,
 		handle.HandleID,
 		handle.SessionID,
@@ -906,6 +922,7 @@ ON CONFLICT(handle_id) DO UPDATE SET
 		handle.SecretHash,
 		[]byte(value),
 		handle.CreatedAt.Format(time.RFC3339Nano),
+		nullableTime(handle.ExpiresAt),
 	)
 	if err != nil {
 		return fmt.Errorf("save secret handle: %w", err)
@@ -923,7 +940,8 @@ SELECT
 	placeholder,
 	secret_hash,
 	secret_value,
-	created_at
+	created_at,
+	COALESCE(expires_at, '')
 FROM secret_handles
 WHERE handle_id = ?
 `, handleID)
@@ -931,6 +949,7 @@ WHERE handle_id = ?
 	var handle types.SecretHandle
 	var value []byte
 	var createdAt string
+	var expiresAt string
 	if err := row.Scan(
 		&handle.HandleID,
 		&handle.SessionID,
@@ -940,6 +959,7 @@ WHERE handle_id = ?
 		&handle.SecretHash,
 		&value,
 		&createdAt,
+		&expiresAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return types.SecretHandle{}, "", false, nil
@@ -951,6 +971,11 @@ WHERE handle_id = ?
 		return types.SecretHandle{}, "", false, fmt.Errorf("parse secret handle created_at: %w", err)
 	}
 	handle.CreatedAt = parsed
+	if expiresAt != "" {
+		if parsedExp, err := time.Parse(time.RFC3339Nano, expiresAt); err == nil {
+			handle.ExpiresAt = parsedExp
+		}
+	}
 	return handle, string(value), true, nil
 }
 
@@ -1198,6 +1223,13 @@ func nullableInt(value int) interface{} {
 	return value
 }
 
+func nullableTime(value time.Time) interface{} {
+	if value.IsZero() {
+		return nil
+	}
+	return value.Format(time.RFC3339Nano)
+}
+
 type approvalScanner interface {
 	Scan(dest ...interface{}) error
 }
@@ -1371,7 +1403,8 @@ SELECT
 	placeholder,
 	secret_hash,
 	secret_value,
-	created_at
+	created_at,
+	COALESCE(expires_at, '')
 FROM secret_handles
 `)
 	if err != nil {
@@ -1384,6 +1417,7 @@ FROM secret_handles
 		var h types.SecretHandleHydration
 		var value []byte
 		var createdAt string
+		var expiresAt string
 		if err := rows.Scan(
 			&h.Handle.HandleID,
 			&h.Handle.SessionID,
@@ -1393,6 +1427,7 @@ FROM secret_handles
 			&h.Handle.SecretHash,
 			&value,
 			&createdAt,
+			&expiresAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan secret handle: %w", err)
 		}
@@ -1401,6 +1436,11 @@ FROM secret_handles
 			return nil, fmt.Errorf("parse secret handle created_at: %w", err)
 		}
 		h.Handle.CreatedAt = parsed
+		if expiresAt != "" {
+			if parsedExp, err := time.Parse(time.RFC3339Nano, expiresAt); err == nil {
+				h.Handle.ExpiresAt = parsedExp
+			}
+		}
 		h.Value = string(value)
 		results = append(results, h)
 	}

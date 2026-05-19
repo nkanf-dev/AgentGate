@@ -236,6 +236,7 @@ type SecretHandle struct {
 	Placeholder string    `json:"placeholder"`
 	SecretHash  string    `json:"secret_hash"`
 	CreatedAt   time.Time `json:"created_at"`
+	ExpiresAt   time.Time `json:"expires_at"`
 }
 
 type SecretFindingSummary struct {

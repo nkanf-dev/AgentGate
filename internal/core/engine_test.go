@@ -1696,6 +1696,320 @@ func TestSecretHandleWriteOrderSQLiteFirst(t *testing.T) {
 	}
 }
 
+func TestSecretHandleExpiresAt(t *testing.T) {
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "input.secret.rewrite_to_handle",
+			Priority:     100,
+			Surface:      types.SurfaceInput,
+			RequestKinds: []types.RequestKind{types.RequestKindInput},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "input_secret_rewritten",
+			Obligations:  []policy.Obligation{{Type: "rewrite_input"}},
+			When:         policy.Condition{Language: "cel", Expression: `content.data_classes.exists(x, x == "secret")`},
+		},
+		{
+			ID:           "resource.secret_handle.resolve",
+			Priority:     100,
+			Surface:      types.SurfaceResource,
+			RequestKinds: []types.RequestKind{types.RequestKindResourceAccess},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "secret_handle_resolve_allowed",
+			Obligations:  []policy.Obligation{{Type: "resolve_secret_handle"}},
+			When:         policy.Condition{Language: "cel", Expression: `action.operation == "resolve_secret_handle" && target.kind == "secret_handle"`},
+		},
+	})
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(bundle))
+
+	// Create a secret handle.
+	inputDec, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_expire_input",
+		RequestKind: types.RequestKindInput,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_expire", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context: types.DecisionContext{
+			Surface: types.SurfaceInput,
+			Raw:     map[string]interface{}{"text": "sk-1234567890abcdef1234567890abcdef"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("input decide: %v", err)
+	}
+	if inputDec.Effect != types.EffectAllowWithAudit {
+		t.Fatalf("input effect = %q, want allow_with_audit", inputDec.Effect)
+	}
+	handleID := handleIDFromDecision(t, inputDec)
+
+	// Verify ExpiresAt is set on the handle.
+	engine.mu.RLock()
+	handle, ok := engine.secretHandles[handleID]
+	engine.mu.RUnlock()
+	if !ok {
+		t.Fatalf("handle %s not found", handleID)
+	}
+	if handle.ExpiresAt.IsZero() {
+		t.Fatal("handle ExpiresAt should be set")
+	}
+	if !handle.ExpiresAt.After(handle.CreatedAt) {
+		t.Fatalf("ExpiresAt %v should be after CreatedAt %v", handle.ExpiresAt, handle.CreatedAt)
+	}
+
+	// Manually expire the handle by setting ExpiresAt to the past.
+	engine.mu.Lock()
+	expired := handle
+	expired.ExpiresAt = time.Now().Add(-1 * time.Minute)
+	engine.secretHandles[handleID] = expired
+	engine.mu.Unlock()
+
+	// Resolve should now be denied.
+	resolveDec, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_expire_resolve",
+		RequestKind: types.RequestKindResourceAccess,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_expire", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "resolve_secret_handle"},
+		Target:      types.TargetContext{Kind: "secret_handle", Identifier: handleID},
+		Context:     types.DecisionContext{Surface: types.SurfaceResource},
+	})
+	if err != nil {
+		t.Fatalf("resolve decide: %v", err)
+	}
+	if resolveDec.Effect != types.EffectDeny {
+		t.Fatalf("resolve effect = %q, want deny for expired handle", resolveDec.Effect)
+	}
+	if resolveDec.ReasonCode != "secret_handle_expired" {
+		t.Fatalf("resolve reason = %q, want secret_handle_expired", resolveDec.ReasonCode)
+	}
+}
+
+func TestSecretHandleExpiresAtSQLiteRoundTrip(t *testing.T) {
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "input.secret.rewrite_to_handle",
+			Priority:     100,
+			Surface:      types.SurfaceInput,
+			RequestKinds: []types.RequestKind{types.RequestKindInput},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "input_secret_rewritten",
+			Obligations:  []policy.Obligation{{Type: "rewrite_input"}},
+			When:         policy.Condition{Language: "cel", Expression: `content.data_classes.exists(x, x == "secret")`},
+		},
+		{
+			ID:           "resource.secret_handle.resolve",
+			Priority:     100,
+			Surface:      types.SurfaceResource,
+			RequestKinds: []types.RequestKind{types.RequestKindResourceAccess},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "secret_handle_resolve_allowed",
+			Obligations:  []policy.Obligation{{Type: "resolve_secret_handle"}},
+			When:         policy.Condition{Language: "cel", Expression: `action.operation == "resolve_secret_handle" && target.kind == "secret_handle"`},
+		},
+	})
+
+	// First engine: create a handle.
+	engine1 := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(bundle))
+	inputDec, err := engine1.Decide(types.PolicyRequest{
+		RequestID:   "req_rt_input",
+		RequestKind: types.RequestKindInput,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_rt", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context: types.DecisionContext{
+			Surface: types.SurfaceInput,
+			Raw:     map[string]interface{}{"text": "sk-1234567890abcdef1234567890abcdef"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("input decide: %v", err)
+	}
+	handleID := handleIDFromDecision(t, inputDec)
+
+	// Verify ExpiresAt is persisted to SQLite.
+	storedHandle, _, found, err := stateStore.GetSecretHandle(handleID)
+	if err != nil {
+		t.Fatalf("get handle from store: %v", err)
+	}
+	if !found {
+		t.Fatalf("handle %s not found in store", handleID)
+	}
+	if storedHandle.ExpiresAt.IsZero() {
+		t.Fatal("ExpiresAt should be persisted to SQLite")
+	}
+
+	// Second engine: hydrate from the same SQLite store.
+	engine2 := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(bundle))
+	engine2.mu.RLock()
+	hydratedHandle, ok := engine2.secretHandles[handleID]
+	engine2.mu.RUnlock()
+	if !ok {
+		t.Fatalf("handle %s not hydrated from store", handleID)
+	}
+	if hydratedHandle.ExpiresAt.IsZero() {
+		t.Fatal("ExpiresAt should survive hydration from SQLite")
+	}
+	if !hydratedHandle.ExpiresAt.Equal(storedHandle.ExpiresAt) {
+		t.Fatalf("hydrated ExpiresAt %v != stored %v", hydratedHandle.ExpiresAt, storedHandle.ExpiresAt)
+	}
+
+	// Expire the hydrated handle and verify resolve is denied.
+	engine2.mu.Lock()
+	expired := hydratedHandle
+	expired.ExpiresAt = time.Now().Add(-1 * time.Minute)
+	engine2.secretHandles[handleID] = expired
+	engine2.mu.Unlock()
+
+	resolveDec, err := engine2.Decide(types.PolicyRequest{
+		RequestID:   "req_rt_resolve",
+		RequestKind: types.RequestKindResourceAccess,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_rt", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "resolve_secret_handle"},
+		Target:      types.TargetContext{Kind: "secret_handle", Identifier: handleID},
+		Context:     types.DecisionContext{Surface: types.SurfaceResource},
+	})
+	if err != nil {
+		t.Fatalf("resolve decide: %v", err)
+	}
+	if resolveDec.Effect != types.EffectDeny {
+		t.Fatalf("resolve effect = %q, want deny for expired hydrated handle", resolveDec.Effect)
+	}
+	if resolveDec.ReasonCode != "secret_handle_expired" {
+		t.Fatalf("resolve reason = %q, want secret_handle_expired", resolveDec.ReasonCode)
+	}
+}
+
+func TestSecretHandleScopeRequiresTaskID(t *testing.T) {
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "input.secret.rewrite_to_handle",
+			Priority:     100,
+			Surface:      types.SurfaceInput,
+			RequestKinds: []types.RequestKind{types.RequestKindInput},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "input_secret_rewritten",
+			Obligations:  []policy.Obligation{{Type: "rewrite_input"}},
+			When:         policy.Condition{Language: "cel", Expression: `content.data_classes.exists(x, x == "secret")`},
+		},
+		{
+			ID:           "resource.secret_handle.resolve",
+			Priority:     100,
+			Surface:      types.SurfaceResource,
+			RequestKinds: []types.RequestKind{types.RequestKindResourceAccess},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "secret_handle_resolve_allowed",
+			Obligations:  []policy.Obligation{{Type: "resolve_secret_handle"}},
+			When:         policy.Condition{Language: "cel", Expression: `action.operation == "resolve_secret_handle" && target.kind == "secret_handle"`},
+		},
+	})
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(bundle))
+
+	// Create a handle with task_id = "task_1".
+	inputDec, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_scope_input",
+		RequestKind: types.RequestKindInput,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_scope", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context: types.DecisionContext{
+			Surface: types.SurfaceInput,
+			Raw:     map[string]interface{}{"text": "sk-1234567890abcdef1234567890abcdef"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("input decide: %v", err)
+	}
+	handleID := handleIDFromDecision(t, inputDec)
+
+	// Resolve from a different task should be denied.
+	resolveDec, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_scope_resolve",
+		RequestKind: types.RequestKindResourceAccess,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_scope", TaskID: "task_2"},
+		Action:      types.ActionContext{Operation: "resolve_secret_handle"},
+		Target:      types.TargetContext{Kind: "secret_handle", Identifier: handleID},
+		Context:     types.DecisionContext{Surface: types.SurfaceResource},
+	})
+	if err != nil {
+		t.Fatalf("resolve decide: %v", err)
+	}
+	if resolveDec.Effect != types.EffectDeny {
+		t.Fatalf("cross-task resolve effect = %q, want deny", resolveDec.Effect)
+	}
+	if resolveDec.ReasonCode != "secret_handle_scope_mismatch" {
+		t.Fatalf("cross-task resolve reason = %q, want secret_handle_scope_mismatch", resolveDec.ReasonCode)
+	}
+}
+
+func TestSecretHandleEmptyTaskIDScopeMismatch(t *testing.T) {
+	// Old handles created before task_id was required have empty TaskID.
+	// Under the tightened scope check, resolving them from a request that
+	// has a task_id should deny with scope_mismatch.
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
+
+	handle := types.SecretHandle{
+		HandleID:    "sech_legacy",
+		SessionID:   "sess_legacy",
+		TaskID:      "", // empty — legacy handle
+		Kind:        "openai_api_key",
+		Placeholder: "[SECRET_HANDLE:1]",
+		SecretHash:  "abc123",
+		CreatedAt:   time.Now(),
+		ExpiresAt:   time.Now().Add(1 * time.Hour),
+	}
+	engine.mu.Lock()
+	engine.secretHandles[handle.HandleID] = handle
+	engine.secretValues[handle.HandleID] = "sk-test-value"
+	engine.mu.Unlock()
+
+	dec, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_legacy_resolve",
+		RequestKind: types.RequestKindResourceAccess,
+		Actor:       types.ActorContext{UserID: "u1"},
+		Session:     types.SessionContext{SessionID: "sess_legacy", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "resolve_secret_handle"},
+		Target:      types.TargetContext{Kind: "secret_handle", Identifier: "sech_legacy"},
+		Context:     types.DecisionContext{Surface: types.SurfaceResource},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if dec.Effect != types.EffectDeny {
+		t.Fatalf("effect = %q, want deny for legacy handle with empty task_id", dec.Effect)
+	}
+	if dec.ReasonCode != "secret_handle_scope_mismatch" {
+		t.Fatalf("reason = %q, want secret_handle_scope_mismatch", dec.ReasonCode)
+	}
+}
+
 func TestApprovalWriteOrderSQLiteFirst(t *testing.T) {
 	inner, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
 	if err != nil {

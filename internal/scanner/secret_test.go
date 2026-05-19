@@ -34,3 +34,63 @@ func TestHashSecretDoesNotReturnRawValue(t *testing.T) {
 		t.Fatal("hash must not equal raw secret")
 	}
 }
+
+func TestDetectAWSAccessKey(t *testing.T) {
+	input := "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE"
+	findings := DetectSecrets(input)
+	var found bool
+	for _, f := range findings {
+		if f.Kind == "aws_access_key" {
+			found = true
+			if f.Value != "AKIAIOSFODNN7EXAMPLE" {
+				t.Fatalf("unexpected value %q", f.Value)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected aws_access_key finding, got %#v", findings)
+	}
+}
+
+func TestDetectGitHubToken(t *testing.T) {
+	input := "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+	findings := DetectSecrets(input)
+	var found bool
+	for _, f := range findings {
+		if f.Kind == "github_token" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected github_token finding, got %#v", findings)
+	}
+}
+
+func TestDetectSlackToken(t *testing.T) {
+	input := "key=xoxb-123456789012-1234567890123-abcdefghij"
+	findings := DetectSecrets(input)
+	var found bool
+	for _, f := range findings {
+		if f.Kind == "slack_token" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected slack_token finding, got %#v", findings)
+	}
+}
+
+func TestDetectJWT(t *testing.T) {
+	// Minimal 3-part base64 token structure.
+	input := "auth=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+	findings := DetectSecrets(input)
+	var found bool
+	for _, f := range findings {
+		if f.Kind == "jwt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected jwt finding, got %#v", findings)
+	}
+}

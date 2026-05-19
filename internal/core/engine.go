@@ -179,6 +179,7 @@ type PolicyBundlesResponse struct {
 }
 
 const integrationStaleAfter = 5 * time.Minute
+const secretHandleTTL = 1 * time.Hour
 
 var idCounter atomic.Uint64
 
@@ -2029,7 +2030,7 @@ func (e *Engine) executeObligations(obligations []types.Obligation, req types.Po
 				continue
 			}
 			executed[ob.Type] = true
-			result, patch := e.executeResolveSecretHandle(req)
+			result, patch := e.executeResolveSecretHandle(req, now)
 			if patch != nil {
 				return nil, patch
 			}
@@ -2069,6 +2070,7 @@ func (e *Engine) executeRewriteInput(req types.PolicyRequest, facts inputSecretF
 			Placeholder: placeholder,
 			SecretHash:  hash,
 			CreatedAt:   now,
+			ExpiresAt:   now.Add(secretHandleTTL),
 		}
 		handles = append(handles, handle)
 		summaries = append(summaries, types.SecretFindingSummary{
@@ -2115,7 +2117,7 @@ func (e *Engine) executeRewriteInput(req types.PolicyRequest, facts inputSecretF
 	}, nil
 }
 
-func (e *Engine) executeResolveSecretHandle(req types.PolicyRequest) (types.Obligation, *decisionPatch) {
+func (e *Engine) executeResolveSecretHandle(req types.PolicyRequest, now time.Time) (types.Obligation, *decisionPatch) {
 	e.mu.RLock()
 	handle, ok := e.secretHandles[req.Target.Identifier]
 	value := e.secretValues[req.Target.Identifier]
@@ -2151,7 +2153,18 @@ func (e *Engine) executeResolveSecretHandle(req types.PolicyRequest) (types.Obli
 			},
 		}
 	}
-	if handle.SessionID != req.Session.SessionID || (handle.TaskID != "" && handle.TaskID != req.Session.TaskID) {
+	if !handle.ExpiresAt.IsZero() && now.After(handle.ExpiresAt) {
+		return types.Obligation{}, &decisionPatch{
+			effect:       types.EffectDeny,
+			reason:       "secret_handle_expired",
+			appliedRules: []string{"resource.secret_handle.expiry"},
+			obligations: []types.Obligation{
+				auditObligation("warning", map[string]interface{}{"handle_id": handle.HandleID, "expired_at": handle.ExpiresAt}),
+				abortTaskObligation(),
+			},
+		}
+	}
+	if handle.SessionID != req.Session.SessionID || handle.TaskID != req.Session.TaskID {
 		return types.Obligation{}, &decisionPatch{
 			effect:       types.EffectDeny,
 			reason:       "secret_handle_scope_mismatch",

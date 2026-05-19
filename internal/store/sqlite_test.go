@@ -248,6 +248,7 @@ func TestSQLiteStoreStateRoundTrip(t *testing.T) {
 		Placeholder: "[SECRET_HANDLE:1]",
 		SecretHash:  "sha256:test",
 		CreatedAt:   now,
+		ExpiresAt:   now.Add(1 * time.Hour),
 	}
 	if err := store.SaveSecretHandle(handle, "sk-test-value"); err != nil {
 		t.Fatalf("save secret handle: %v", err)
@@ -258,6 +259,9 @@ func TestSQLiteStoreStateRoundTrip(t *testing.T) {
 	}
 	if !found || foundHandle.SecretHash != handle.SecretHash || value != "sk-test-value" {
 		t.Fatalf("secret handle did not round trip: found=%v handle=%#v value=%q", found, foundHandle, value)
+	}
+	if foundHandle.ExpiresAt.IsZero() {
+		t.Fatal("expires_at should be preserved")
 	}
 }
 

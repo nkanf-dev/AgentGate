@@ -34,6 +34,26 @@ var secretDetectors = []regexPattern{
 		valueGroup: 0,
 	},
 	{
+		kind:       "aws_access_key",
+		pattern:    regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
+		valueGroup: 0,
+	},
+	{
+		kind:       "github_token",
+		pattern:    regexp.MustCompile(`\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}\b`),
+		valueGroup: 0,
+	},
+	{
+		kind:       "slack_token",
+		pattern:    regexp.MustCompile(`\bxox[bpors]-[0-9A-Za-z-]{10,}\b`),
+		valueGroup: 0,
+	},
+	{
+		kind:       "jwt",
+		pattern:    regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_._+/-]+=*\b`),
+		valueGroup: 0,
+	},
+	{
 		kind:       "generic_api_key",
 		pattern:    regexp.MustCompile(`(?i)\b(api[_-]?key|token|secret|password)\b\s*[:=]\s*([A-Za-z0-9_./+=-]{8,})`),
 		valueGroup: 2,
