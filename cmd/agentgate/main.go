@@ -75,9 +75,17 @@ func run() error {
 	// Secret detector: ML (openai/privacy-filter) if enabled, else regex.
 	detector := buildDetector()
 
+	engine := core.NewEngine(
+		core.WithEventStore(db),
+		core.WithStateStore(db),
+		core.WithPolicyBundle(policyBundle),
+		core.WithPolicyBundles(bundles),
+		core.WithDetector(detector),
+	)
+
 	srv := &http.Server{
 		Addr: addr,
-		Handler: httpapi.NewServer(core.NewEngine(core.WithEventStore(db), core.WithStateStore(db), core.WithPolicyBundle(policyBundle), core.WithPolicyBundles(bundles), core.WithDetector(detector)), authz.New(authz.Config{
+		Handler: httpapi.NewServer(engine, authz.New(authz.Config{
 			AdapterTokens:  splitCSV(getenv("AGENTGATE_ADAPTER_TOKENS", "adapter-local-token")),
 			OperatorTokens: splitCSV(getenv("AGENTGATE_OPERATOR_TOKENS", "operator-local-token")),
 			AdminTokens:    splitCSV(getenv("AGENTGATE_ADMIN_TOKENS", "admin-local-token")),
@@ -95,6 +103,7 @@ func run() error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		engine.Close()
 		return srv.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {

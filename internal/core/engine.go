@@ -40,12 +40,17 @@ type Engine struct {
 	policyHistory map[int]policy.Bundle
 	policyRecords []policy.VersionRecord
 	detector      scanner.Detector
+
+	maxEvents          int
+	eventRetentionDays int
+	eventStopCh        chan struct{}
 }
 
 type EventStore interface {
 	AppendEvent(event types.EventEnvelope) error
 	ListEvents(limit int) ([]types.EventEnvelope, error)
 	GetEventByDecisionID(decisionID string) (types.EventEnvelope, bool, error)
+	PruneEvents(before time.Time) (int64, error)
 }
 
 type StateStore interface {
@@ -179,20 +184,22 @@ var idCounter atomic.Uint64
 
 func NewEngine(options ...Option) *Engine {
 	engine := &Engine{
-		startedAt:     time.Now().UTC(),
-		registrations: make(map[string]adapterState),
-		integrations:  make(map[string]types.IntegrationDefinition),
-		events:        make([]types.EventEnvelope, 0, 128),
-		policyBundle:  policy.DefaultBundle(),
-		policyBundles: []policy.Bundle{defaultPolicyBundle(policy.DefaultBundle())},
-		runtimes:      make(map[string]*managedRuntimeState),
-		secretHandles: make(map[string]types.SecretHandle),
-		secretValues:  make(map[string]string),
-		approvals:     make(map[string]approvalState),
-		attemptGrants: make(map[string]types.AttemptGrant),
-		policyHistory: make(map[int]policy.Bundle),
-		policyRecords: make([]policy.VersionRecord, 0, 1),
-		detector:      scanner.RegexDetector{},
+		startedAt:          time.Now().UTC(),
+		registrations:      make(map[string]adapterState),
+		integrations:       make(map[string]types.IntegrationDefinition),
+		events:             make([]types.EventEnvelope, 0, 128),
+		policyBundle:       policy.DefaultBundle(),
+		policyBundles:      []policy.Bundle{defaultPolicyBundle(policy.DefaultBundle())},
+		runtimes:           make(map[string]*managedRuntimeState),
+		secretHandles:      make(map[string]types.SecretHandle),
+		secretValues:       make(map[string]string),
+		approvals:          make(map[string]approvalState),
+		attemptGrants:      make(map[string]types.AttemptGrant),
+		policyHistory:      make(map[int]policy.Bundle),
+		policyRecords:      make([]policy.VersionRecord, 0, 1),
+		detector:           scanner.RegexDetector{},
+		maxEvents:          10000,
+		eventRetentionDays: 30,
 	}
 	for _, option := range options {
 		option(engine)
@@ -200,6 +207,7 @@ func NewEngine(options ...Option) *Engine {
 	engine.seedPolicyHistory()
 	engine.bootstrapManagedRuntimes()
 	engine.hydrateFromStore()
+	engine.startEventCleanup()
 	return engine
 }
 
@@ -284,6 +292,68 @@ func WithPolicyBundles(bundles []policy.Bundle) Option {
 func WithDetector(d scanner.Detector) Option {
 	return func(engine *Engine) {
 		engine.detector = d
+	}
+}
+
+func WithMaxEvents(n int) Option {
+	return func(engine *Engine) {
+		if n > 0 {
+			engine.maxEvents = n
+		}
+	}
+}
+
+func WithEventRetentionDays(n int) Option {
+	return func(engine *Engine) {
+		if n > 0 {
+			engine.eventRetentionDays = n
+		}
+	}
+}
+
+func (e *Engine) startEventCleanup() {
+	if e.eventStore == nil {
+		return
+	}
+	e.eventStopCh = make(chan struct{})
+	e.pruneOldEvents()
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("prune events: panic: %v", r)
+						}
+					}()
+					e.pruneOldEvents()
+				}()
+			case <-e.eventStopCh:
+				return
+			}
+		}
+	}()
+}
+
+func (e *Engine) pruneOldEvents() {
+	before := time.Now().UTC().Add(-time.Duration(e.eventRetentionDays) * 24 * time.Hour)
+	n, err := e.eventStore.PruneEvents(before)
+	if err != nil {
+		log.Printf("prune events: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("prune events: deleted %d events older than %d days", n, e.eventRetentionDays)
+	}
+}
+
+func (e *Engine) Close() {
+	if e.eventStopCh != nil {
+		close(e.eventStopCh)
+		e.eventStopCh = nil
 	}
 }
 
@@ -2355,8 +2425,8 @@ func (e *Engine) appendEvent(event types.EventEnvelope) error {
 	defer e.mu.Unlock()
 
 	e.events = append(e.events, event)
-	if len(e.events) > 1000 {
-		e.events = e.events[len(e.events)-1000:]
+	if len(e.events) > e.maxEvents {
+		e.events = e.events[len(e.events)-e.maxEvents:]
 	}
 	return nil
 }

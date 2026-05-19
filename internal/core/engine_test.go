@@ -1511,3 +1511,71 @@ func TestResolveApprovalWriteOrderSQLiteFirst(t *testing.T) {
 		t.Fatalf("memory should have no ghost grants: count=%d", grantCount)
 	}
 }
+
+func TestMaxEventsIsConfigurable(t *testing.T) {
+	engine := NewEngine(WithMaxEvents(3))
+
+	for i := 0; i < 5; i++ {
+		engine.appendEvent(types.EventEnvelope{
+			EventID:   newID("evt"),
+			EventType: "test",
+			Summary:   fmt.Sprintf("event_%d", i),
+			OccurredAt: time.Now().UTC(),
+		})
+	}
+
+	events, err := engine.Events(10)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events (max), got %d", len(events))
+	}
+	if events[0].Summary != "event_2" {
+		t.Fatalf("expected FIFO eviction, oldest should be event_2, got %q", events[0].Summary)
+	}
+}
+
+func TestEventCleanupRunsInBackground(t *testing.T) {
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+
+	engine := NewEngine(
+		WithEventStore(stateStore),
+		WithEventRetentionDays(1),
+	)
+	defer engine.Close()
+
+	now := time.Now().UTC()
+	old := types.EventEnvelope{
+		EventID:    "evt_cleanup_old",
+		EventType:  "test",
+		Summary:    "old",
+		OccurredAt: now.Add(-2 * 24 * time.Hour),
+	}
+	recent := types.EventEnvelope{
+		EventID:    "evt_cleanup_recent",
+		EventType:  "test",
+		Summary:    "recent",
+		OccurredAt: now,
+	}
+	if err := stateStore.AppendEvent(old); err != nil {
+		t.Fatalf("append old: %v", err)
+	}
+	if err := stateStore.AppendEvent(recent); err != nil {
+		t.Fatalf("append recent: %v", err)
+	}
+
+	engine.pruneOldEvents()
+
+	events, err := stateStore.ListEvents(10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(events) != 1 || events[0].EventID != "evt_cleanup_recent" {
+		t.Fatalf("expected only recent event after prune, got %#v", events)
+	}
+}

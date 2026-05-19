@@ -316,3 +316,56 @@ func TestSQLiteStorePolicyVersionLifecycle(t *testing.T) {
 		t.Fatalf("version 1 did not round trip: found=%v bundle=%#v", found, versionOne)
 	}
 }
+
+func TestPruneEvents(t *testing.T) {
+	store, err := OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+
+	old := types.EventEnvelope{
+		EventID:    "evt_old",
+		EventType:  "test",
+		Summary:    "old",
+		OccurredAt: now.Add(-8 * 24 * time.Hour),
+	}
+	recent := types.EventEnvelope{
+		EventID:    "evt_recent",
+		EventType:  "test",
+		Summary:    "recent",
+		OccurredAt: now.Add(-1 * time.Hour),
+	}
+	if err := store.AppendEvent(old); err != nil {
+		t.Fatalf("append old: %v", err)
+	}
+	if err := store.AppendEvent(recent); err != nil {
+		t.Fatalf("append recent: %v", err)
+	}
+
+	cutoff := now.Add(-7 * 24 * time.Hour)
+	deleted, err := store.PruneEvents(cutoff)
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("expected 1 deleted, got %d", deleted)
+	}
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(events) != 1 || events[0].EventID != "evt_recent" {
+		t.Fatalf("expected only recent event, got %#v", events)
+	}
+
+	deleted, err = store.PruneEvents(cutoff)
+	if err != nil {
+		t.Fatalf("prune again: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("expected 0 on second prune, got %d", deleted)
+	}
+}

@@ -400,6 +400,54 @@ ON CONFLICT(event_id) DO UPDATE SET
 	return nil
 }
 
+func (s *SQLiteStore) PruneEvents(before time.Time) (int64, error) {
+	ts := before.Format(time.RFC3339Nano)
+
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return 0, fmt.Errorf("prune events begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var total int64
+
+	// evidence_records FK-references security_events — delete children first.
+	result, err := tx.ExecContext(context.Background(),
+		`DELETE FROM evidence_records WHERE created_at < ?`, ts,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("prune evidence records: %w", err)
+	}
+	if n, _ := result.RowsAffected(); n > 0 {
+		total += n
+	}
+
+	result, err = tx.ExecContext(context.Background(),
+		`DELETE FROM security_events WHERE occurred_at < ?`, ts,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("prune security events: %w", err)
+	}
+	if n, _ := result.RowsAffected(); n > 0 {
+		total += n
+	}
+
+	result, err = tx.ExecContext(context.Background(),
+		`DELETE FROM event_envelopes WHERE occurred_at < ?`, ts,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("prune event envelopes: %w", err)
+	}
+	if n, _ := result.RowsAffected(); n > 0 {
+		total += n
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("prune events commit: %w", err)
+	}
+	return total, nil
+}
+
 func (s *SQLiteStore) ListEvents(limit int) ([]types.EventEnvelope, error) {
 	if limit < 1 {
 		limit = 100
