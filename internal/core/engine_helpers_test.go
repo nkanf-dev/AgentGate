@@ -125,18 +125,16 @@ func TestFirstNonEmpty(t *testing.T) {
 
 func TestUpdateSessionFacts(t *testing.T) {
 	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
-	event := types.EventEnvelope{
-		Effect:  types.EffectAllow,
-		Summary: "test_reason",
-		Metadata: map[string]interface{}{
-			"target_identifier": "api/test",
-			"tool":              "bash",
-			"side_effects":      []interface{}{"network_egress"},
-		},
-		OccurredAt: now.Add(-time.Minute),
+	req := types.PolicyRequest{
+		Target: types.TargetContext{Identifier: "api/test"},
+		Action: types.ActionContext{Tool: "bash", SideEffects: []string{"network_egress"}},
+	}
+	decision := types.PolicyDecision{
+		Effect:     types.EffectAllow,
+		ReasonCode: "test_reason",
 	}
 
-	facts := updateSessionFacts(types.SessionFacts{}, event, now)
+	facts := updateSessionFacts(types.SessionFacts{}, req, decision, nil, now)
 	if facts.RequestCount != 1 {
 		t.Fatalf("expected RequestCount=1, got %d", facts.RequestCount)
 	}
@@ -146,8 +144,8 @@ func TestUpdateSessionFacts(t *testing.T) {
 	if facts.LastEffect != "allow" {
 		t.Fatalf("expected LastEffect=allow, got %q", facts.LastEffect)
 	}
-	if facts.FirstRequestAt == nil || !facts.FirstRequestAt.Equal(event.OccurredAt) {
-		t.Fatalf("expected FirstRequestAt=%v, got %v", event.OccurredAt, facts.FirstRequestAt)
+	if facts.FirstRequestAt == nil || !facts.FirstRequestAt.Equal(now) {
+		t.Fatalf("expected FirstRequestAt=%v, got %v", now, facts.FirstRequestAt)
 	}
 	if facts.LastRequestAt == nil || !facts.LastRequestAt.Equal(now) {
 		t.Fatalf("expected LastRequestAt=%v, got %v", now, facts.LastRequestAt)
@@ -165,14 +163,14 @@ func TestUpdateSessionFacts(t *testing.T) {
 
 func TestUpdateSessionFactsDeny(t *testing.T) {
 	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
-	event := types.EventEnvelope{
+	req := types.PolicyRequest{
+		Target: types.TargetContext{Identifier: "api/blocked"},
+	}
+	decision := types.PolicyDecision{
 		Effect: types.EffectDeny,
-		Metadata: map[string]interface{}{
-			"target_identifier": "api/blocked",
-		},
 	}
 
-	facts := updateSessionFacts(types.SessionFacts{}, event, now)
+	facts := updateSessionFacts(types.SessionFacts{}, req, decision, nil, now)
 	if facts.DenyCount != 1 {
 		t.Fatalf("expected DenyCount=1, got %d", facts.DenyCount)
 	}
@@ -183,12 +181,12 @@ func TestUpdateSessionFactsDeny(t *testing.T) {
 
 func TestUpdateSessionFactsApproval(t *testing.T) {
 	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
-	event := types.EventEnvelope{
-		Effect:   types.EffectApprovalRequired,
-		Metadata: map[string]interface{}{},
+	req := types.PolicyRequest{}
+	decision := types.PolicyDecision{
+		Effect: types.EffectApprovalRequired,
 	}
 
-	facts := updateSessionFacts(types.SessionFacts{}, event, now)
+	facts := updateSessionFacts(types.SessionFacts{}, req, decision, nil, now)
 	if facts.ApprovalCount != 1 {
 		t.Fatalf("expected ApprovalCount=1, got %d", facts.ApprovalCount)
 	}

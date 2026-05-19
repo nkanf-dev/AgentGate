@@ -1634,6 +1634,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 	var reason string
 	var appliedRules []string
 	var obligations []types.Obligation
+	var newTaints []types.Taint
 	e.mu.RLock()
 	activePolicy := e.policyBundle
 	activeBundles := clonePolicyBundles(e.policyBundles)
@@ -1645,8 +1646,11 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 		appliedRules = patch.appliedRules
 		obligations = append([]types.Obligation(nil), patch.obligations...)
 	} else {
+		taintsBefore := len(req.Context.Taints)
 		inputFacts := e.enrichPolicyFacts(&req)
+		newTaints = append([]types.Taint(nil), req.Context.Taints[taintsBefore:]...)
 		sessionFacts := e.sessionFactsForDecision(req.Session.SessionID)
+		req.Context.Taints = mergeTaints(req.Context.Taints, sessionFacts.Taints)
 		policyEvaluation = policy.EvaluateBundles(activeBundles, req, sessionFacts)
 		effect = policyEvaluation.Effect
 		reason = policyEvaluation.ReasonCode
@@ -1742,6 +1746,10 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 		return types.PolicyDecision{}, errStatus(http.StatusInternalServerError, "event_store_write_failed", err.Error())
 	}
 
+	if err := e.updateSessionFactsFromDecision(req, decision, newTaints, now); err != nil {
+		log.Printf("session facts update failed: %v", err)
+	}
+
 	return decision, nil
 }
 
@@ -1770,7 +1778,6 @@ func (e *Engine) Report(req types.ReportRequest) (types.ReportResponse, error) {
 	}); err != nil {
 		return types.ReportResponse{}, errStatus(http.StatusInternalServerError, "event_store_write_failed", err.Error())
 	}
-	go e.updateSessionFactsFromReport(req, now)
 
 	return types.ReportResponse{Accepted: true, RecordedAt: now}, nil
 }
@@ -2266,55 +2273,34 @@ func (e *Engine) sessionFactsForDecision(sessionID string) types.SessionFacts {
 	return normalizeSessionFacts(record.Facts)
 }
 
-func (e *Engine) updateSessionFactsFromReport(report types.ReportRequest, reportedAt time.Time) {
-	if e.stateStore == nil || report.DecisionID == "" {
-		return
+func (e *Engine) updateSessionFactsFromDecision(req types.PolicyRequest, decision types.PolicyDecision, newTaints []types.Taint, now time.Time) error {
+	if e.stateStore == nil || req.Session.SessionID == "" {
+		return nil
 	}
-	decisionEvent, found, err := e.lookupDecisionEvent(report.DecisionID)
-	if err != nil || !found || decisionEvent.SessionID == "" {
-		return
-	}
-	_ = e.stateStore.UpdateSessionFacts(decisionEvent.SessionID, func(record types.SessionFactsRecord, found bool) (types.SessionFactsRecord, error) {
+	return e.stateStore.UpdateSessionFacts(req.Session.SessionID, func(record types.SessionFactsRecord, found bool) (types.SessionFactsRecord, error) {
 		if !found {
 			record = types.SessionFactsRecord{
-				SessionID: decisionEvent.SessionID,
+				SessionID: req.Session.SessionID,
 				Facts: types.SessionFacts{
 					DistinctTargets:     []string{},
 					DistinctTools:       []string{},
 					DistinctReasonCodes: []string{},
 					SideEffectSequence:  []string{},
+					Taints:              []types.Taint{},
 				},
 			}
 		}
-		record.AdapterID = firstNonEmpty(record.AdapterID, report.AdapterID, decisionEvent.AdapterID, stringValue(decisionEvent.Metadata["host_id"]))
-		record.UpdatedAt = reportedAt
-		record.Facts = updateSessionFacts(record.Facts, decisionEvent, reportedAt)
+		record.AdapterID = firstNonEmpty(record.AdapterID, stringValue(req.Policy["integration_id"]))
+		record.UpdatedAt = now
+		record.Facts = updateSessionFacts(record.Facts, req, decision, newTaints, now)
 		return record, nil
 	})
 }
 
-func (e *Engine) lookupDecisionEvent(decisionID string) (types.EventEnvelope, bool, error) {
-	if e.eventStore != nil {
-		event, found, err := e.eventStore.GetEventByDecisionID(decisionID)
-		if err != nil || found {
-			return event, found, err
-		}
-	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	for index := len(e.events) - 1; index >= 0; index-- {
-		event := e.events[index]
-		if event.DecisionID == decisionID && event.EventType == "policy_decision" {
-			return event, true, nil
-		}
-	}
-	return types.EventEnvelope{}, false, nil
-}
-
-func updateSessionFacts(facts types.SessionFacts, event types.EventEnvelope, reportedAt time.Time) types.SessionFacts {
+func updateSessionFacts(facts types.SessionFacts, req types.PolicyRequest, decision types.PolicyDecision, newTaints []types.Taint, now time.Time) types.SessionFacts {
 	facts = normalizeSessionFacts(facts)
 	facts.RequestCount++
-	switch event.Effect {
+	switch decision.Effect {
 	case types.EffectDeny, types.EffectExclusion:
 		facts.DenyCount++
 	case types.EffectApprovalRequired:
@@ -2322,21 +2308,25 @@ func updateSessionFacts(facts types.SessionFacts, event types.EventEnvelope, rep
 	case types.EffectAllow, types.EffectAllowWithAudit:
 		facts.AllowCount++
 	}
-	facts.LastEffect = string(event.Effect)
+	facts.LastEffect = string(decision.Effect)
 	if facts.FirstRequestAt == nil || facts.FirstRequestAt.IsZero() {
-		first := reportedAt
-		if !event.OccurredAt.IsZero() {
-			first = event.OccurredAt
-		}
+		first := now
 		facts.FirstRequestAt = &first
 	}
-	last := reportedAt
-	facts.LastRequestAt = &last
-	facts.DistinctTargets = addDistinct(facts.DistinctTargets, stringValue(event.Metadata["target_identifier"]))
-	facts.DistinctTools = addDistinct(facts.DistinctTools, stringValue(event.Metadata["tool"]))
-	facts.DistinctReasonCodes = addDistinct(facts.DistinctReasonCodes, event.Summary)
-	facts.SideEffectSequence = appendCapped(facts.SideEffectSequence, stringSliceValue(event.Metadata["side_effects"]), 20)
+	facts.LastRequestAt = &now
+	facts.DistinctTargets = addDistinct(facts.DistinctTargets, req.Target.Identifier)
+	facts.DistinctTools = addDistinct(facts.DistinctTools, req.Action.Tool)
+	facts.DistinctReasonCodes = addDistinct(facts.DistinctReasonCodes, decision.ReasonCode)
+	facts.SideEffectSequence = appendCapped(facts.SideEffectSequence, req.Action.SideEffects, 20)
+	facts.Taints = mergeTaints(facts.Taints, newTaints)
 	return facts
+}
+
+func mergeTaints(existing []types.Taint, additions []types.Taint) []types.Taint {
+	for _, t := range additions {
+		existing = appendTaintOnce(existing, t)
+	}
+	return existing
 }
 
 func normalizeSessionFacts(facts types.SessionFacts) types.SessionFacts {
@@ -2351,6 +2341,9 @@ func normalizeSessionFacts(facts types.SessionFacts) types.SessionFacts {
 	}
 	if facts.SideEffectSequence == nil {
 		facts.SideEffectSequence = []string{}
+	}
+	if facts.Taints == nil {
+		facts.Taints = []types.Taint{}
 	}
 	return facts
 }

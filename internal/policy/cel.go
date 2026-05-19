@@ -108,6 +108,7 @@ func celActivation(request types.PolicyRequest, sessionFacts types.SessionFacts)
 			"distinct_tools":        sessionFacts.DistinctTools,
 			"distinct_reason_codes": sessionFacts.DistinctReasonCodes,
 			"side_effect_sequence":  sessionFacts.SideEffectSequence,
+			"taints":                taintStrings(sessionFacts.Taints),
 			"last_effect":           sessionFacts.LastEffect,
 			"last_request_at":       timeString(sessionFacts.LastRequestAt),
 			"first_request_at":      timeString(sessionFacts.FirstRequestAt),

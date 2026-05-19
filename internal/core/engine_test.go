@@ -613,7 +613,7 @@ func TestPolicyDecisionEventIncludesPolicyTraceMetadata(t *testing.T) {
 	}
 }
 
-func TestSessionFactsAreUpdatedAfterReportAndInjectedIntoCEL(t *testing.T) {
+func TestSessionFactsAccumulateAcrossDecisions(t *testing.T) {
 	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
@@ -666,18 +666,14 @@ func TestSessionFactsAreUpdatedAfterReportAndInjectedIntoCEL(t *testing.T) {
 	if first.Effect != types.EffectDeny {
 		t.Fatalf("first effect = %q, want deny", first.Effect)
 	}
-	if _, err := engine.Report(types.ReportRequest{
-		RequestID:  first.RequestID,
-		DecisionID: first.DecisionID,
-		AdapterID:  "openclaw-main",
-		Surface:    types.SurfaceRuntime,
-		Outcome:    "blocked",
-	}); err != nil {
-		t.Fatalf("report: %v", err)
+
+	record, found, err := stateStore.GetSessionFacts("sess_history")
+	if err != nil {
+		t.Fatalf("get session facts: %v", err)
 	}
-	waitForSessionFacts(t, stateStore, "sess_history", func(facts types.SessionFacts) bool {
-		return facts.DenyCount == 1 && len(facts.SideEffectSequence) == 1
-	})
+	if !found || record.Facts.DenyCount != 1 || len(record.Facts.SideEffectSequence) != 1 {
+		t.Fatalf("session facts not updated synchronously after Decide: found=%v facts=%#v", found, record.Facts)
+	}
 
 	second, err := engine.Decide(types.PolicyRequest{
 		RequestID:   "req_history_second",
@@ -696,7 +692,7 @@ func TestSessionFactsAreUpdatedAfterReportAndInjectedIntoCEL(t *testing.T) {
 	}
 }
 
-func TestSessionFactsIgnoreReportsWithoutDecisionEvent(t *testing.T) {
+func TestReportDoesNotCreateSessionFacts(t *testing.T) {
 	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
@@ -713,25 +709,144 @@ func TestSessionFactsIgnoreReportsWithoutDecisionEvent(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("report: %v", err)
 	}
-	time.Sleep(50 * time.Millisecond)
 	_, found, err := stateStore.GetSessionFacts("sess_unknown")
 	if err != nil {
 		t.Fatalf("get session facts: %v", err)
 	}
 	if found {
-		t.Fatal("report without matching decision event should not create session facts")
+		t.Fatal("Report() should not create session facts; facts are updated in Decide()")
+	}
+}
+
+func TestTaintsMergedFromSessionIntoDecision(t *testing.T) {
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "runtime.tainted.deny",
+			Priority:     200,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectDeny,
+			ReasonCode:   "taint_propagation_blocks",
+			When:         policy.Condition{Language: "cel", Expression: `context.taints.exists(t, t == "secret_bearing")`},
+		},
+	})
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(bundle))
+
+	// Seed session facts with a historical taint.
+	if err := stateStore.UpsertSessionFacts(types.SessionFactsRecord{
+		SessionID: "sess_taint",
+		UpdatedAt: time.Now().UTC(),
+		Facts: types.SessionFacts{
+			Taints:              []types.Taint{types.TaintSecretBearing},
+			DistinctTargets:     []string{},
+			DistinctTools:       []string{},
+			DistinctReasonCodes: []string{},
+			SideEffectSequence:  []string{},
+		},
+	}); err != nil {
+		t.Fatalf("seed session facts: %v", err)
+	}
+
+	// A runtime request with no taints of its own should inherit secret_bearing from session.
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_taint_inherit",
+		RequestKind: types.RequestKindToolAttempt,
+		Session:     types.SessionContext{SessionID: "sess_taint", TaskID: "task_1", AttemptID: "attempt_1"},
+		Action:      types.ActionContext{Tool: "bash"},
+		Target:      types.TargetContext{Identifier: "some-api"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectDeny || decision.ReasonCode != "taint_propagation_blocks" {
+		t.Fatalf("expected deny due to inherited taint, got effect=%q reason=%q", decision.Effect, decision.ReasonCode)
+	}
+
+	// Session facts should NOT accumulate inherited taints — only the seed taint should be present.
+	record, found, err := stateStore.GetSessionFacts("sess_taint")
+	if err != nil {
+		t.Fatalf("get facts: %v", err)
+	}
+	if !found {
+		t.Fatal("session facts not found")
+	}
+	count := 0
+	for _, t := range record.Facts.Taints {
+		if t == types.TaintSecretBearing {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("inherited taints should not be re-persisted, got %d secret_bearing taints: %#v", count, record.Facts.Taints)
+	}
+}
+
+func TestNewTaintsPersistedToSessionFacts(t *testing.T) {
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "input.allow",
+			Priority:     1,
+			Surface:      types.SurfaceInput,
+			RequestKinds: []types.RequestKind{types.RequestKindInput},
+			Effect:       types.EffectAllow,
+			ReasonCode:   "input_allowed",
+		},
+	})
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(bundle))
+
+	// First request: input with secrets triggers enrichPolicyFacts which adds TaintSecretBearing.
+	_, err = engine.Decide(types.PolicyRequest{
+		RequestID:   "req_new_taint",
+		RequestKind: types.RequestKindInput,
+		Session:     types.SessionContext{SessionID: "sess_new_taint", TaskID: "task_1"},
+		Content:     types.ContentContext{Summary: "user sent api key"},
+		Context:     types.DecisionContext{Surface: types.SurfaceInput, Raw: map[string]interface{}{"text": "sk-1234567890abcdef1234567890abcdef"}},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+
+	record, found, err := stateStore.GetSessionFacts("sess_new_taint")
+	if err != nil {
+		t.Fatalf("get facts: %v", err)
+	}
+	if !found {
+		t.Fatal("session facts not found after Decide()")
+	}
+	hasSecretBearing := false
+	for _, t := range record.Facts.Taints {
+		if t == types.TaintSecretBearing {
+			hasSecretBearing = true
+		}
+	}
+	if !hasSecretBearing {
+		t.Fatalf("new taint from enrichPolicyFacts should be persisted: %#v", record.Facts.Taints)
 	}
 }
 
 func TestSessionFactsSideEffectSequenceIsCapped(t *testing.T) {
 	facts := types.SessionFacts{}
 	for index := 0; index < 25; index++ {
-		facts = updateSessionFacts(facts, types.EventEnvelope{
-			Effect:     types.EffectAllowWithAudit,
-			Summary:    "allow",
-			Metadata:   map[string]interface{}{"side_effects": []string{fmt.Sprintf("effect_%02d", index)}},
-			OccurredAt: time.Date(2026, 4, 29, 12, index, 0, 0, time.UTC),
-		}, time.Date(2026, 4, 29, 12, index, 1, 0, time.UTC))
+		req := types.PolicyRequest{
+			Action: types.ActionContext{SideEffects: []string{fmt.Sprintf("effect_%02d", index)}},
+		}
+		decision := types.PolicyDecision{
+			Effect: types.EffectAllowWithAudit,
+		}
+		facts = updateSessionFacts(facts, req, decision, nil, time.Date(2026, 4, 29, 12, index, 1, 0, time.UTC))
 	}
 	if len(facts.SideEffectSequence) != 20 {
 		t.Fatalf("side effect cap = %d, want 20: %#v", len(facts.SideEffectSequence), facts.SideEffectSequence)
@@ -1135,26 +1250,6 @@ func eventEffect(events []types.EventEnvelope, eventType string) types.Effect {
 		}
 	}
 	return ""
-}
-
-func waitForSessionFacts(t *testing.T, stateStore *store.SQLiteStore, sessionID string, ready func(types.SessionFacts) bool) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		record, found, err := stateStore.GetSessionFacts(sessionID)
-		if err != nil {
-			t.Fatalf("get session facts: %v", err)
-		}
-		if found && ready(record.Facts) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	record, found, err := stateStore.GetSessionFacts(sessionID)
-	if err != nil {
-		t.Fatalf("get session facts after wait: %v", err)
-	}
-	t.Fatalf("session facts not ready: found=%v record=%#v", found, record)
 }
 
 func coreTestBundle(rules []policy.Rule) policy.Bundle {

@@ -216,6 +216,7 @@ type SessionFacts struct {
 	DistinctTools       []string   `json:"distinct_tools"`
 	DistinctReasonCodes []string   `json:"distinct_reason_codes"`
 	SideEffectSequence  []string   `json:"side_effect_sequence"`
+	Taints              []Taint    `json:"taints,omitempty"`
 	LastEffect          string     `json:"last_effect,omitempty"`
 	LastRequestAt       *time.Time `json:"last_request_at,omitempty"`
 	FirstRequestAt      *time.Time `json:"first_request_at,omitempty"`
