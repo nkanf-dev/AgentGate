@@ -2607,6 +2607,213 @@ func TestObligationDeduplicationMultipleRulesSameType(t *testing.T) {
 	}
 }
 
+func TestDuplicateApprovalPrevention(t *testing.T) {
+	engine := NewEngine()
+
+	// First call creates an approval.
+	first, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_dup_1",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_dup", TaskID: "task_1", AttemptID: "att_1"},
+		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
+		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("first decide: %v", err)
+	}
+	if first.Effect != types.EffectApprovalRequired {
+		t.Fatalf("first effect = %q, want approval_required", first.Effect)
+	}
+	firstApprovalID := approvalIDFromDecision(t, first)
+
+	// Second call with same (session, task, attempt) should return same approval.
+	second, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_dup_2",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_dup", TaskID: "task_1", AttemptID: "att_1"},
+		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
+		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("second decide: %v", err)
+	}
+	if second.Effect != types.EffectApprovalRequired {
+		t.Fatalf("second effect = %q, want approval_required", second.Effect)
+	}
+	secondApprovalID := approvalIDFromDecision(t, second)
+	if firstApprovalID != secondApprovalID {
+		t.Fatalf("expected same approval_id on retry, got first=%s second=%s", firstApprovalID, secondApprovalID)
+	}
+
+	// Only one approval should exist in the engine.
+	engine.mu.RLock()
+	approvalCount := len(engine.approvals)
+	engine.mu.RUnlock()
+	if approvalCount != 1 {
+		t.Fatalf("expected 1 approval, got %d", approvalCount)
+	}
+}
+
+func TestDuplicateApprovalExpiredCreatesNew(t *testing.T) {
+	engine := NewEngine()
+
+	// First call creates an approval.
+	first, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_exp_dup_1",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_exp_dup", TaskID: "task_1", AttemptID: "att_1"},
+		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
+		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("first decide: %v", err)
+	}
+	firstApprovalID := approvalIDFromDecision(t, first)
+
+	// Expire the approval manually.
+	engine.mu.Lock()
+	for id, a := range engine.approvals {
+		if a.ApprovalID == firstApprovalID {
+			a.ExpiresAt = time.Now().Add(-1 * time.Minute)
+			engine.approvals[id] = a
+		}
+	}
+	engine.mu.Unlock()
+
+	// Second call should create a NEW approval (not reuse the expired one).
+	second, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_exp_dup_2",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_exp_dup", TaskID: "task_1", AttemptID: "att_1"},
+		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
+		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("second decide: %v", err)
+	}
+	secondApprovalID := approvalIDFromDecision(t, second)
+	if firstApprovalID == secondApprovalID {
+		t.Fatalf("expected new approval after expiry, got same id: %s", firstApprovalID)
+	}
+}
+
+func TestApprovalTimeoutFromRuntimePolicy(t *testing.T) {
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "runtime.bash.approval",
+			Priority:     100,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectApprovalRequired,
+			ReasonCode:   "bash_requires_approval",
+			Obligations:  []policy.Obligation{{Type: "approval_request"}},
+			When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
+		},
+	})
+	bundle.RuntimePolicy.ApprovalTimeout = policy.Duration{Duration: 30 * time.Second}
+	engine := NewEngine(WithPolicyBundle(bundle))
+
+	before := time.Now().UTC()
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_timeout",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_timeout", TaskID: "task_1", AttemptID: "att_1"},
+		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
+		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+
+	var expiresAt time.Time
+	for _, ob := range decision.Obligations {
+		if ob.Type == "approval_request" {
+			if exp, ok := ob.Params["expires_at"].(time.Time); ok {
+				expiresAt = exp
+			}
+		}
+	}
+	if expiresAt.IsZero() {
+		t.Fatal("approval_request missing expires_at")
+	}
+	// Should be ~30s from before, not ~10m.
+	elapsed := expiresAt.Sub(before)
+	if elapsed > 2*time.Minute {
+		t.Fatalf("approval timeout too long: %v, expected ~30s", elapsed)
+	}
+	if elapsed < 20*time.Second {
+		t.Fatalf("approval timeout too short: %v, expected ~30s", elapsed)
+	}
+}
+
+func TestApprovalReasonFromPolicy(t *testing.T) {
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "runtime.bash.approval",
+			Priority:     100,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectApprovalRequired,
+			ReasonCode:   "bash_requires_approval",
+			Obligations:  []policy.Obligation{{Type: "approval_request"}},
+			When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
+		},
+	})
+	engine := NewEngine(WithPolicyBundle(bundle))
+
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_reason",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_reason", TaskID: "task_1", AttemptID: "att_1"},
+		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
+		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+
+	var approvalReason string
+	for _, ob := range decision.Obligations {
+		if ob.Type == "approval_request" {
+			if r, ok := ob.Params["reason"].(string); ok {
+				approvalReason = r
+			}
+		}
+	}
+	// The reason should be the rule's reason code, not the old hardcoded string.
+	if approvalReason == "High-risk runtime attempt paused by AgentGate policy." {
+		t.Fatalf("approval reason should come from policy, got hardcoded string: %q", approvalReason)
+	}
+	if approvalReason == "" {
+		t.Fatal("approval_request missing reason")
+	}
+}
+
+func approvalIDFromDecision(t *testing.T, decision types.PolicyDecision) string {
+	t.Helper()
+	for _, ob := range decision.Obligations {
+		if ob.Type == "approval_request" {
+			if id, ok := ob.Params["approval_id"].(string); ok {
+				return id
+			}
+		}
+	}
+	t.Fatalf("no approval_request obligation in decision: %#v", decision.Obligations)
+	return ""
+}
+
 func TestExecutionOrderValidationSkipsPolicy(t *testing.T) {
 	engine := NewEngine()
 

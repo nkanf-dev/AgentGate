@@ -12,6 +12,28 @@ import (
 	"github.com/agentgate/agentgate/internal/types"
 )
 
+// Duration wraps time.Duration with JSON string support (e.g. "10m", "1h").
+type Duration struct {
+	time.Duration
+}
+
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(d.String())
+}
+
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	d.Duration = parsed
+	return nil
+}
+
 type Bundle struct {
 	BundleID       string         `json:"bundle_id,omitempty"`
 	Name           string         `json:"name,omitempty"`
@@ -97,6 +119,7 @@ type RuntimePolicy struct {
 	RequireApprovalTools       []string `json:"require_approval_tools,omitempty"`
 	RequireApprovalSideEffects []string `json:"require_approval_side_effects,omitempty"`
 	RequireApprovalOpenWorld   bool     `json:"require_approval_open_world,omitempty"`
+	ApprovalTimeout            Duration `json:"approval_timeout,omitempty"`
 }
 
 type ResourcePolicy struct {

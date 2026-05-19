@@ -1138,6 +1138,11 @@ func aggregateBundles(bundles []policy.Bundle) policy.Bundle {
 	bundle.Rules = append(bundle.Rules, corePolicy.Rules...)
 
 	maxVersion := 0
+	mergedTools := append([]string(nil), bundle.RuntimePolicy.RequireApprovalTools...)
+	mergedSideEffects := append([]string(nil), bundle.RuntimePolicy.RequireApprovalSideEffects...)
+	mergedOpenWorld := bundle.RuntimePolicy.RequireApprovalOpenWorld
+	mergedTimeout := bundle.RuntimePolicy.ApprovalTimeout
+
 	for _, managedBundle := range bundles {
 		if managedBundle.BundleID == "core" {
 			continue
@@ -1149,8 +1154,25 @@ func aggregateBundles(bundles []policy.Bundle) policy.Bundle {
 			maxVersion = managedBundle.Version
 		}
 		bundle.Rules = append(bundle.Rules, managedBundle.Rules...)
+
+		rp := managedBundle.RuntimePolicy
+		mergedTools = appendUnique(mergedTools, rp.RequireApprovalTools)
+		mergedSideEffects = appendUnique(mergedSideEffects, rp.RequireApprovalSideEffects)
+		if rp.RequireApprovalOpenWorld {
+			mergedOpenWorld = true
+		}
+		if mergedTimeout.Duration == 0 && rp.ApprovalTimeout.Duration > 0 {
+			mergedTimeout = rp.ApprovalTimeout
+		}
 	}
 	bundle.Version = maxVersion
+	bundle.RuntimePolicy = policy.RuntimePolicy{
+		RequireApprovalTools:       mergedTools,
+		RequireApprovalSideEffects: mergedSideEffects,
+		RequireApprovalOpenWorld:   mergedOpenWorld,
+		ApprovalTimeout:            mergedTimeout,
+	}
+
 	// When no user-managed rules exist (only CorePolicy), fall back to
 	// DefaultBundle rules as a sensible baseline. An empty bundle intentionally
 	// targeting deny-all should include at least one explicit deny rule so this
@@ -1159,6 +1181,20 @@ func aggregateBundles(bundles []policy.Bundle) policy.Bundle {
 		bundle.Rules = append(bundle.Rules, policy.DefaultBundle().Rules...)
 	}
 	return bundle
+}
+
+func appendUnique(base, additions []string) []string {
+	seen := make(map[string]bool, len(base))
+	for _, s := range base {
+		seen[s] = true
+	}
+	for _, s := range additions {
+		if !seen[s] {
+			base = append(base, s)
+			seen[s] = true
+		}
+	}
+	return base
 }
 
 func (e *Engine) Integrations() (types.IntegrationsResponse, error) {
@@ -1723,7 +1759,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 		obligations = append([]types.Obligation(nil), policyEvaluation.Obligations...)
 	}
 
-	if enriched, patch := e.executeObligations(obligations, req, inputFacts, now); patch != nil {
+	if enriched, patch := e.executeObligations(obligations, req, inputFacts, reason, now); patch != nil {
 		effect = patch.effect
 		reason = patch.reason
 		appliedRules = patch.appliedRules
@@ -2002,7 +2038,7 @@ func (e *Engine) Events(limit int) ([]types.EventEnvelope, error) {
 // (e.g., both bash and open_world rules declare approval_request). Deduplication
 // ensures one approval per decision — the policy declares intent, the executor
 // materializes it once.
-func (e *Engine) executeObligations(obligations []types.Obligation, req types.PolicyRequest, facts inputSecretFacts, now time.Time) ([]types.Obligation, *decisionPatch) {
+func (e *Engine) executeObligations(obligations []types.Obligation, req types.PolicyRequest, facts inputSecretFacts, reason string, now time.Time) ([]types.Obligation, *decisionPatch) {
 	enriched := make([]types.Obligation, 0, len(obligations))
 	executed := make(map[string]bool)
 	for _, ob := range obligations {
@@ -2040,7 +2076,7 @@ func (e *Engine) executeObligations(obligations []types.Obligation, req types.Po
 				continue
 			}
 			executed[ob.Type] = true
-			result, patch := e.executeApprovalRequest(req, now)
+			result, patch := e.executeApprovalRequest(req, reason, now)
 			if patch != nil {
 				return nil, patch
 			}
@@ -2186,10 +2222,35 @@ func (e *Engine) executeResolveSecretHandle(req types.PolicyRequest, now time.Ti
 	}, nil
 }
 
-func (e *Engine) executeApprovalRequest(req types.PolicyRequest, now time.Time) (types.Obligation, *decisionPatch) {
+func (e *Engine) executeApprovalRequest(req types.PolicyRequest, reason string, now time.Time) (types.Obligation, *decisionPatch) {
+	// Check for existing pending approval on the same attempt.
+	if existing := e.findPendingApproval(req.Session.SessionID, req.Session.TaskID, req.Session.AttemptID, now); existing != nil {
+		return types.Obligation{
+			Type: "approval_request",
+			Params: map[string]interface{}{
+				"approval_id": existing.ApprovalID,
+				"scope":       "attempt",
+				"channel":     existing.Channel,
+				"session_id":  existing.SessionID,
+				"task_id":     existing.TaskID,
+				"attempt_id":  existing.AttemptID,
+				"reason":      existing.Reason,
+				"expires_at":  existing.ExpiresAt,
+			},
+		}, nil
+	}
+
+	timeout := 10 * time.Minute
+	if e.policyBundle.RuntimePolicy.ApprovalTimeout.Duration > 0 {
+		timeout = e.policyBundle.RuntimePolicy.ApprovalTimeout.Duration
+	}
 	approvalID := newID("appr")
-	expiresAt := now.Add(10 * time.Minute)
+	expiresAt := now.Add(timeout)
 	approvalChannel := e.approvalChannelForRequest(req)
+	approvalReason := reason
+	if approvalReason == "" {
+		approvalReason = "High-risk runtime attempt paused by AgentGate policy."
+	}
 	approval := approvalState{
 		ApprovalID: approvalID,
 		RequestID:  req.RequestID,
@@ -2197,7 +2258,7 @@ func (e *Engine) executeApprovalRequest(req types.PolicyRequest, now time.Time) 
 		TaskID:     req.Session.TaskID,
 		AttemptID:  req.Session.AttemptID,
 		Status:     types.ApprovalPending,
-		Reason:     "High-risk runtime attempt paused by AgentGate policy.",
+		Reason:     approvalReason,
 		Channel:    approvalChannel,
 		CreatedAt:  now,
 		ExpiresAt:  expiresAt,
@@ -2224,10 +2285,26 @@ func (e *Engine) executeApprovalRequest(req types.PolicyRequest, now time.Time) 
 			"session_id":  req.Session.SessionID,
 			"task_id":     req.Session.TaskID,
 			"attempt_id":  req.Session.AttemptID,
-			"reason":      approval.Reason,
+			"reason":      approvalReason,
 			"expires_at":  expiresAt,
 		},
 	}, nil
+}
+
+func (e *Engine) findPendingApproval(sessionID, taskID, attemptID string, now time.Time) *approvalState {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for _, approval := range e.approvals {
+		if approval.Status == types.ApprovalPending &&
+			approval.ExpiresAt.After(now) &&
+			approval.SessionID == sessionID &&
+			approval.TaskID == taskID &&
+			approval.AttemptID == attemptID {
+			a := approval
+			return &a
+		}
+	}
+	return nil
 }
 
 
