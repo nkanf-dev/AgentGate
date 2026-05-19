@@ -208,11 +208,12 @@ type SessionFactsRecord struct {
 }
 
 type SessionFacts struct {
-	RequestCount        int        `json:"request_count"`
-	DenyCount           int        `json:"deny_count"`
-	ApprovalCount       int        `json:"approval_count"`
-	AllowCount          int        `json:"allow_count"`
-	DistinctTargets     []string   `json:"distinct_targets"`
+	RequestCount         int        `json:"request_count"`
+	DenyCount            int        `json:"deny_count"`
+	ApprovalCount        int        `json:"approval_count"`
+	AllowCount           int        `json:"allow_count"`
+	AllowWithAuditCount  int        `json:"allow_with_audit_count"`
+	DistinctTargets      []string   `json:"distinct_targets"`
 	DistinctTools       []string   `json:"distinct_tools"`
 	DistinctReasonCodes []string   `json:"distinct_reason_codes"`
 	SideEffectSequence  []string   `json:"side_effect_sequence"`

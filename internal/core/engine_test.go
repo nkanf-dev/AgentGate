@@ -614,6 +614,107 @@ func TestPolicyDecisionEventIncludesPolicyTraceMetadata(t *testing.T) {
 	}
 }
 
+func TestAllowWithAuditEventMetadata(t *testing.T) {
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "input.allow_audit",
+			Priority:     100,
+			Surface:      types.SurfaceInput,
+			RequestKinds: []types.RequestKind{types.RequestKindInput},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "input_allowed_with_audit",
+			When:         policy.Condition{Language: "cel", Expression: "true"},
+		},
+	})
+	engine := NewEngine(WithEventStore(stateStore), WithPolicyBundle(bundle))
+
+	_, err = engine.Decide(types.PolicyRequest{
+		RequestID:   "req_audit_meta",
+		RequestKind: types.RequestKindInput,
+		Actor:       types.ActorContext{UserID: "u1"},
+		Session:     types.SessionContext{SessionID: "sess_audit_meta", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context:     types.DecisionContext{Surface: types.SurfaceInput},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+
+	events, err := engine.Events(10)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	var decisionEvent types.EventEnvelope
+	for _, event := range events {
+		if event.RequestID == "req_audit_meta" && event.EventType == "policy_decision" {
+			decisionEvent = event
+			break
+		}
+	}
+	if decisionEvent.EventID == "" {
+		t.Fatalf("missing policy decision event: %#v", events)
+	}
+	if decisionEvent.Effect != types.EffectAllowWithAudit {
+		t.Fatalf("effect = %q, want allow_with_audit", decisionEvent.Effect)
+	}
+	if decisionEvent.Metadata["audit_trigger"] == nil {
+		t.Fatalf("audit_trigger metadata missing for allow_with_audit: %#v", decisionEvent.Metadata)
+	}
+	if decisionEvent.Metadata["matched_rule_count"] == nil {
+		t.Fatalf("matched_rule_count metadata missing for allow_with_audit: %#v", decisionEvent.Metadata)
+	}
+
+	// Verify a plain allow event does NOT have audit_trigger.
+	plainBundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "input.allow_plain",
+			Priority:     100,
+			Surface:      types.SurfaceInput,
+			RequestKinds: []types.RequestKind{types.RequestKindInput},
+			Effect:       types.EffectAllow,
+			ReasonCode:   "input_allowed",
+			When:         policy.Condition{Language: "cel", Expression: "true"},
+		},
+	})
+	plainEngine := NewEngine(WithEventStore(stateStore), WithPolicyBundle(plainBundle))
+	_, err = plainEngine.Decide(types.PolicyRequest{
+		RequestID:   "req_plain_meta",
+		RequestKind: types.RequestKindInput,
+		Actor:       types.ActorContext{UserID: "u1"},
+		Session:     types.SessionContext{SessionID: "sess_plain_meta", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context:     types.DecisionContext{Surface: types.SurfaceInput},
+	})
+	if err != nil {
+		t.Fatalf("decide plain: %v", err)
+	}
+	events, err = plainEngine.Events(20)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	var plainEvent types.EventEnvelope
+	for _, event := range events {
+		if event.RequestID == "req_plain_meta" && event.EventType == "policy_decision" {
+			plainEvent = event
+			break
+		}
+	}
+	if plainEvent.EventID == "" {
+		t.Fatalf("missing plain decision event")
+	}
+	if plainEvent.Metadata["audit_trigger"] != nil {
+		t.Fatalf("plain allow should not have audit_trigger: %#v", plainEvent.Metadata)
+	}
+}
+
 func TestSessionFactsAccumulateAcrossDecisions(t *testing.T) {
 	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
 	if err != nil {
@@ -854,6 +955,80 @@ func TestSessionFactsSideEffectSequenceIsCapped(t *testing.T) {
 	}
 	if facts.SideEffectSequence[0] != "effect_05" || facts.SideEffectSequence[19] != "effect_24" {
 		t.Fatalf("unexpected capped sequence: %#v", facts.SideEffectSequence)
+	}
+}
+
+func TestSessionFactsAllowWithAuditCountSeparate(t *testing.T) {
+	facts := types.SessionFacts{}
+	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	req := types.PolicyRequest{}
+
+	// 3 plain allows.
+	for i := 0; i < 3; i++ {
+		facts = updateSessionFacts(facts, req, types.PolicyDecision{Effect: types.EffectAllow}, nil, now)
+	}
+	// 2 allow_with_audit.
+	for i := 0; i < 2; i++ {
+		facts = updateSessionFacts(facts, req, types.PolicyDecision{Effect: types.EffectAllowWithAudit}, nil, now)
+	}
+	if facts.AllowCount != 5 {
+		t.Fatalf("allow_count = %d, want 5", facts.AllowCount)
+	}
+	if facts.AllowWithAuditCount != 2 {
+		t.Fatalf("allow_with_audit_count = %d, want 2", facts.AllowWithAuditCount)
+	}
+}
+
+func TestAuditTriggerFromObligations(t *testing.T) {
+	cases := []struct {
+		name        string
+		obligations []types.Obligation
+		reason      string
+		want        string
+	}{
+		{
+			name:   "no obligations falls back to reason",
+			reason: "some_reason",
+			want:   "some_reason",
+		},
+		{
+			name: "rewrite_input triggers secret_rewrite",
+			obligations: []types.Obligation{
+				{Type: "rewrite_input"},
+			},
+			want: "secret_rewrite",
+		},
+		{
+			name: "multiple obligations joined",
+			obligations: []types.Obligation{
+				{Type: "rewrite_input"},
+				{Type: "resolve_secret_handle"},
+			},
+			want: "secret_rewrite,secret_handle_access",
+		},
+		{
+			name: "approval_request triggers approval_required",
+			obligations: []types.Obligation{
+				{Type: "approval_request"},
+			},
+			want: "approval_required",
+		},
+		{
+			name: "audit_event is skipped",
+			obligations: []types.Obligation{
+				{Type: "rewrite_input"},
+				{Type: "audit_event"},
+			},
+			want: "secret_rewrite",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := auditTrigger(tc.obligations, tc.reason)
+			if got != tc.want {
+				t.Fatalf("auditTrigger = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

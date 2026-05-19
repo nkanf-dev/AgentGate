@@ -1753,6 +1753,40 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 	}
 	traceMetadata := decision.Explanation.PolicyTrace
 
+	metadata := map[string]interface{}{
+		"request_kind":        req.RequestKind,
+		"actor_user":          req.Actor.UserID,
+		"host_id":             req.Actor.HostID,
+		"integration_id":      mapStringValue(req.Policy, "integration_id"),
+		"operation":           req.Action.Operation,
+		"tool":                req.Action.Tool,
+		"content_summary":     req.Content.Summary,
+		"side_effects":        append([]string(nil), req.Action.SideEffects...),
+		"open_world":          req.Action.OpenWorld,
+		"target_kind":         req.Target.Kind,
+		"target_identifier":   req.Target.Identifier,
+		"applied_rules":       appliedRules,
+		"obligations":         obligationTypes(obligations),
+		"task_id":             req.Session.TaskID,
+		"attempt_id":          req.Session.AttemptID,
+		"approval_id":         approvalIDFromObligations(obligations),
+		"approval_scope":      approvalScopeFromObligations(obligations),
+		"approval_channel":    approvalChannelFromObligations(obligations),
+		"approval_expires_at": approvalExpiresAtFromObligations(obligations),
+		"warnings":            warnings,
+		"policy_version":      traceMetadata.PolicyVersion,
+		"policy_status":       traceMetadata.PolicyStatus,
+		"selected_rule":       traceMetadata.SelectedRule,
+		"top_priority":        traceMetadata.TopPriority,
+		"defaulted":           traceMetadata.Defaulted,
+		"matched_rules":       policyRuleTraceIDs(traceMetadata.MatchedRules),
+	}
+
+	if effect == types.EffectAllowWithAudit {
+		metadata["audit_trigger"] = auditTrigger(obligations, reason)
+		metadata["matched_rule_count"] = len(traceMetadata.MatchedRules)
+	}
+
 	if err := e.appendEvent(types.EventEnvelope{
 		EventID:    newID("evt_decide"),
 		EventType:  "policy_decision",
@@ -1762,34 +1796,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 		Surface:    surface,
 		Effect:     effect,
 		Summary:    reason,
-		Metadata: map[string]interface{}{
-			"request_kind":        req.RequestKind,
-			"actor_user":          req.Actor.UserID,
-			"host_id":             req.Actor.HostID,
-			"integration_id":      mapStringValue(req.Policy, "integration_id"),
-			"operation":           req.Action.Operation,
-			"tool":                req.Action.Tool,
-			"content_summary":     req.Content.Summary,
-			"side_effects":        append([]string(nil), req.Action.SideEffects...),
-			"open_world":          req.Action.OpenWorld,
-			"target_kind":         req.Target.Kind,
-			"target_identifier":   req.Target.Identifier,
-			"applied_rules":       appliedRules,
-			"obligations":         obligationTypes(obligations),
-			"task_id":             req.Session.TaskID,
-			"attempt_id":          req.Session.AttemptID,
-			"approval_id":         approvalIDFromObligations(obligations),
-			"approval_scope":      approvalScopeFromObligations(obligations),
-			"approval_channel":    approvalChannelFromObligations(obligations),
-			"approval_expires_at": approvalExpiresAtFromObligations(obligations),
-			"warnings":            warnings,
-			"policy_version":      traceMetadata.PolicyVersion,
-			"policy_status":       traceMetadata.PolicyStatus,
-			"selected_rule":       traceMetadata.SelectedRule,
-			"top_priority":        traceMetadata.TopPriority,
-			"defaulted":           traceMetadata.Defaulted,
-			"matched_rules":       policyRuleTraceIDs(traceMetadata.MatchedRules),
-		},
+		Metadata:   metadata,
 		OccurredAt: now,
 	}); err != nil {
 		return types.PolicyDecision{}, errStatus(http.StatusInternalServerError, "event_store_write_failed", err.Error())
@@ -2323,8 +2330,11 @@ func updateSessionFacts(facts types.SessionFacts, req types.PolicyRequest, decis
 		facts.DenyCount++
 	case types.EffectApprovalRequired:
 		facts.ApprovalCount++
-	case types.EffectAllow, types.EffectAllowWithAudit:
+	case types.EffectAllow:
 		facts.AllowCount++
+	case types.EffectAllowWithAudit:
+		facts.AllowCount++
+		facts.AllowWithAuditCount++
 	}
 	facts.LastEffect = string(decision.Effect)
 	if facts.FirstRequestAt == nil || facts.FirstRequestAt.IsZero() {
@@ -2682,6 +2692,30 @@ func auditObligation(severity string, params map[string]interface{}) types.Oblig
 		copied[key] = value
 	}
 	return types.Obligation{Type: "audit_event", Params: copied}
+}
+
+// auditTrigger returns a human-readable description of why allow_with_audit was
+// triggered, derived from the obligation types present in the decision.
+func auditTrigger(obligations []types.Obligation, reason string) string {
+	triggers := make([]string, 0, len(obligations))
+	for _, ob := range obligations {
+		switch ob.Type {
+		case "rewrite_input":
+			triggers = append(triggers, "secret_rewrite")
+		case "resolve_secret_handle":
+			triggers = append(triggers, "secret_handle_access")
+		case "approval_request":
+			triggers = append(triggers, "approval_required")
+		case "audit_event":
+			// Skip — auto-attached by the obligation executor, not a trigger reason.
+		case "task_control":
+			triggers = append(triggers, "task_control")
+		}
+	}
+	if len(triggers) == 0 {
+		return reason
+	}
+	return strings.Join(triggers, ",")
 }
 
 func abortTaskObligation() types.Obligation {
