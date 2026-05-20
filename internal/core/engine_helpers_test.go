@@ -30,7 +30,7 @@ func TestNormalizeSessionFactsPreservesValues(t *testing.T) {
 		DistinctTargets:     []string{"api/a"},
 		DistinctTools:       []string{"bash"},
 		DistinctReasonCodes: []string{"reason"},
-		SideEffectSequence:  []string{"network"},
+		SideEffectSequence:  []types.SideEffect{"network"},
 	}
 	normalized := normalizeSessionFacts(facts)
 	if len(normalized.DistinctTargets) != 1 || normalized.DistinctTargets[0] != "api/a" {
@@ -127,7 +127,7 @@ func TestUpdateSessionFacts(t *testing.T) {
 	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
 	req := types.PolicyRequest{
 		Target: types.TargetContext{Identifier: "api/test"},
-		Action: types.ActionContext{Tool: "bash", SideEffects: []string{"network_egress"}},
+		Action: types.ActionContext{Tool: "bash", SideEffects: []types.SideEffect{types.SideEffectNetworkEgress}},
 	}
 	decision := types.PolicyDecision{
 		Effect:     types.EffectAllow,

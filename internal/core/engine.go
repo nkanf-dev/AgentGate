@@ -182,9 +182,6 @@ type PolicyBundlesResponse struct {
 const integrationStaleAfter = 5 * time.Minute
 const secretHandleTTL = 1 * time.Hour
 
-// Well-known side effect values used by adapters and CEL rules.
-// Pending #18: migrate to typed constants.
-const SideEffectNetworkEgress = "network_egress"
 
 var idCounter atomic.Uint64
 
@@ -1151,7 +1148,7 @@ func aggregateBundles(bundles []policy.Bundle) policy.Bundle {
 
 	maxVersion := 0
 	mergedTools := append([]string(nil), bundle.RuntimePolicy.RequireApprovalTools...)
-	mergedSideEffects := append([]string(nil), bundle.RuntimePolicy.RequireApprovalSideEffects...)
+	mergedSideEffects := append([]types.SideEffect(nil), bundle.RuntimePolicy.RequireApprovalSideEffects...)
 	mergedOpenWorld := bundle.RuntimePolicy.RequireApprovalOpenWorld
 	mergedTimeout := bundle.RuntimePolicy.ApprovalTimeout
 
@@ -1195,8 +1192,8 @@ func aggregateBundles(bundles []policy.Bundle) policy.Bundle {
 	return bundle
 }
 
-func appendUnique(base, additions []string) []string {
-	seen := make(map[string]bool, len(base))
+func appendUnique[T comparable](base, additions []T) []T {
+	seen := make(map[T]bool, len(base))
 	for _, s := range base {
 		seen[s] = true
 	}
@@ -1746,7 +1743,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 		// not content detection. Set when the runtime request indicates external
 		// world interaction.
 		if surface == types.SurfaceRuntime {
-			if req.Action.OpenWorld || containsString(req.Action.SideEffects, SideEffectNetworkEgress) {
+			if req.Action.OpenWorld || containsSideEffect(req.Action.SideEffects, types.SideEffectNetworkEgress) {
 				req.Context.Taints = appendTaintOnce(req.Context.Taints, types.TaintUntrustedExternal)
 			}
 		}
@@ -1826,7 +1823,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 		"operation":           req.Action.Operation,
 		"tool":                req.Action.Tool,
 		"content_summary":     req.Content.Summary,
-		"side_effects":        append([]string(nil), req.Action.SideEffects...),
+		"side_effects":        append([]types.SideEffect(nil), req.Action.SideEffects...),
 		"open_world":          req.Action.OpenWorld,
 		"target_kind":         req.Target.Kind,
 		"target_identifier":   req.Target.Identifier,
@@ -2068,10 +2065,10 @@ func (e *Engine) Events(limit int) ([]types.EventEnvelope, error) {
 // materializes it once.
 func (e *Engine) executeObligations(obligations []types.Obligation, req types.PolicyRequest, facts inputSecretFacts, reason string, now time.Time) ([]types.Obligation, *decisionPatch) {
 	enriched := make([]types.Obligation, 0, len(obligations))
-	executed := make(map[string]bool)
+	executed := make(map[types.ObligationType]bool)
 	for _, ob := range obligations {
 		switch ob.Type {
-		case "rewrite_input":
+		case types.ObligationRewriteInput:
 			if executed[ob.Type] {
 				continue
 			}
@@ -2082,14 +2079,14 @@ func (e *Engine) executeObligations(obligations []types.Obligation, req types.Po
 			}
 			enriched = append(enriched, result)
 			enriched = append(enriched, types.Obligation{
-				Type: "audit_event",
+				Type: types.ObligationAuditEvent,
 				Params: map[string]interface{}{
 					"severity":        "warning",
 					"finding_count":   len(facts.findings),
 					"secret_findings": result.Params["secret_findings"],
 				},
 			})
-		case "resolve_secret_handle":
+		case types.ObligationResolveSecretHandle:
 			if executed[ob.Type] {
 				continue
 			}
@@ -2099,7 +2096,7 @@ func (e *Engine) executeObligations(obligations []types.Obligation, req types.Po
 				return nil, patch
 			}
 			enriched = append(enriched, result)
-		case "approval_request":
+		case types.ObligationApprovalRequest:
 			if executed[ob.Type] {
 				continue
 			}
@@ -2118,7 +2115,7 @@ func (e *Engine) executeObligations(obligations []types.Obligation, req types.Po
 
 func (e *Engine) executeRewriteInput(req types.PolicyRequest, facts inputSecretFacts, now time.Time) (types.Obligation, *decisionPatch) {
 	if len(facts.findings) == 0 {
-		return types.Obligation{Type: "rewrite_input"}, nil
+		return types.Obligation{Type: types.ObligationRewriteInput}, nil
 	}
 
 	handles := make([]types.SecretHandle, 0, len(facts.findings))
@@ -2170,7 +2167,7 @@ func (e *Engine) executeRewriteInput(req types.PolicyRequest, facts inputSecretF
 	e.mu.Unlock()
 
 	return types.Obligation{
-		Type: "rewrite_input",
+		Type: types.ObligationRewriteInput,
 		Params: map[string]interface{}{
 			"text":             rewritten,
 			"bodyForAgent":     rewritten,
@@ -2240,7 +2237,7 @@ func (e *Engine) executeResolveSecretHandle(req types.PolicyRequest, now time.Ti
 		}
 	}
 	return types.Obligation{
-		Type: "resolve_secret_handle",
+		Type: types.ObligationResolveSecretHandle,
 		Params: map[string]interface{}{
 			"handle_id":    handle.HandleID,
 			"placeholder":  handle.Placeholder,
@@ -2254,7 +2251,7 @@ func (e *Engine) executeApprovalRequest(req types.PolicyRequest, reason string, 
 	// Check for existing pending approval on the same attempt.
 	if existing := e.findPendingApproval(req.Session.SessionID, req.Session.TaskID, req.Session.AttemptID, now); existing != nil {
 		return types.Obligation{
-			Type: "approval_request",
+			Type: types.ObligationApprovalRequest,
 			Params: map[string]interface{}{
 				"approval_id": existing.ApprovalID,
 				"scope":       "attempt",
@@ -2305,7 +2302,7 @@ func (e *Engine) executeApprovalRequest(req types.PolicyRequest, reason string, 
 	e.approvals[approvalID] = approval
 	e.mu.Unlock()
 	return types.Obligation{
-		Type: "approval_request",
+		Type: types.ObligationApprovalRequest,
 		Params: map[string]interface{}{
 			"approval_id": approvalID,
 			"scope":       "attempt",
@@ -2428,7 +2425,7 @@ func (e *Engine) updateSessionFactsFromDecision(req types.PolicyRequest, decisio
 					DistinctTargets:     []string{},
 					DistinctTools:       []string{},
 					DistinctReasonCodes: []string{},
-					SideEffectSequence:  []string{},
+					SideEffectSequence:  []types.SideEffect{},
 					Taints:              []types.Taint{},
 				},
 			}
@@ -2463,7 +2460,10 @@ func updateSessionFacts(facts types.SessionFacts, req types.PolicyRequest, decis
 	facts.DistinctTargets = addDistinct(facts.DistinctTargets, req.Target.Identifier)
 	facts.DistinctTools = addDistinct(facts.DistinctTools, req.Action.Tool)
 	facts.DistinctReasonCodes = addDistinct(facts.DistinctReasonCodes, decision.ReasonCode)
-	facts.SideEffectSequence = appendCapped(facts.SideEffectSequence, req.Action.SideEffects, 20)
+	facts.SideEffectSequence = append(facts.SideEffectSequence, req.Action.SideEffects...)
+	if len(facts.SideEffectSequence) > 20 {
+		facts.SideEffectSequence = facts.SideEffectSequence[len(facts.SideEffectSequence)-20:]
+	}
 	facts.Taints = mergeTaints(facts.Taints, newTaints)
 	return facts
 }
@@ -2486,7 +2486,7 @@ func normalizeSessionFacts(facts types.SessionFacts) types.SessionFacts {
 		facts.DistinctReasonCodes = []string{}
 	}
 	if facts.SideEffectSequence == nil {
-		facts.SideEffectSequence = []string{}
+		facts.SideEffectSequence = []types.SideEffect{}
 	}
 	if facts.Taints == nil {
 		facts.Taints = []types.Taint{}
@@ -2554,7 +2554,7 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func containsString(haystack []string, needle string) bool {
+func containsSideEffect(haystack []types.SideEffect, needle types.SideEffect) bool {
 	for _, s := range haystack {
 		if s == needle {
 			return true
@@ -2852,7 +2852,7 @@ func auditObligation(severity string, params map[string]interface{}) types.Oblig
 	for key, value := range params {
 		copied[key] = value
 	}
-	return types.Obligation{Type: "audit_event", Params: copied}
+	return types.Obligation{Type: types.ObligationAuditEvent, Params: copied}
 }
 
 // auditTrigger returns a human-readable description of why allow_with_audit was
@@ -2861,15 +2861,15 @@ func auditTrigger(obligations []types.Obligation, reason string) string {
 	triggers := make([]string, 0, len(obligations))
 	for _, ob := range obligations {
 		switch ob.Type {
-		case "rewrite_input":
+		case types.ObligationRewriteInput:
 			triggers = append(triggers, "secret_rewrite")
-		case "resolve_secret_handle":
+		case types.ObligationResolveSecretHandle:
 			triggers = append(triggers, "secret_handle_access")
-		case "approval_request":
+		case types.ObligationApprovalRequest:
 			triggers = append(triggers, "approval_required")
-		case "audit_event":
+		case types.ObligationAuditEvent:
 			// Skip — auto-attached by the obligation executor, not a trigger reason.
-		case "task_control":
+		case types.ObligationTaskControl:
 			triggers = append(triggers, "task_control")
 		}
 	}
@@ -2881,7 +2881,7 @@ func auditTrigger(obligations []types.Obligation, reason string) string {
 
 func abortTaskObligation() types.Obligation {
 	return types.Obligation{
-		Type: "task_control",
+		Type: types.ObligationTaskControl,
 		Params: map[string]interface{}{
 			"action": "abort_task",
 		},
@@ -2889,8 +2889,8 @@ func abortTaskObligation() types.Obligation {
 }
 
 
-func obligationTypes(obligations []types.Obligation) []string {
-	result := make([]string, 0, len(obligations))
+func obligationTypes(obligations []types.Obligation) []types.ObligationType {
+	result := make([]types.ObligationType, 0, len(obligations))
 	for _, obligation := range obligations {
 		result = append(result, obligation.Type)
 	}
@@ -2911,7 +2911,7 @@ func policyRuleTraceIDs(rules []types.PolicyRuleTrace) []string {
 
 func approvalIDFromObligations(obligations []types.Obligation) string {
 	for _, obligation := range obligations {
-		if obligation.Type != "approval_request" {
+		if obligation.Type != types.ObligationApprovalRequest {
 			continue
 		}
 		value, ok := obligation.Params["approval_id"].(string)
@@ -2924,7 +2924,7 @@ func approvalIDFromObligations(obligations []types.Obligation) string {
 
 func approvalScopeFromObligations(obligations []types.Obligation) string {
 	for _, obligation := range obligations {
-		if obligation.Type != "approval_request" {
+		if obligation.Type != types.ObligationApprovalRequest {
 			continue
 		}
 		value, ok := obligation.Params["scope"].(string)
@@ -2937,7 +2937,7 @@ func approvalScopeFromObligations(obligations []types.Obligation) string {
 
 func approvalExpiresAtFromObligations(obligations []types.Obligation) string {
 	for _, obligation := range obligations {
-		if obligation.Type != "approval_request" {
+		if obligation.Type != types.ObligationApprovalRequest {
 			continue
 		}
 		switch value := obligation.Params["expires_at"].(type) {
@@ -2952,7 +2952,7 @@ func approvalExpiresAtFromObligations(obligations []types.Obligation) string {
 
 func approvalChannelFromObligations(obligations []types.Obligation) string {
 	for _, obligation := range obligations {
-		if obligation.Type != "approval_request" {
+		if obligation.Type != types.ObligationApprovalRequest {
 			continue
 		}
 		value, ok := obligation.Params["channel"].(string)

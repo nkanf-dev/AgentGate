@@ -58,17 +58,19 @@ func TestLoadDefaultPolicy(t *testing.T) {
 	}
 	if !bundle.RequiresRuntimeApproval(types.PolicyRequest{
 		RequestKind: types.RequestKindToolAttempt,
-		Action:      types.ActionContext{SideEffects: []string{"network_egress"}},
+		Action:      types.ActionContext{SideEffects: []types.SideEffect{types.SideEffectNetworkEgress}},
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	}) {
 		t.Fatal("network egress should require runtime approval")
 	}
+	// Unknown side effect value (e.g., deserialized from JSON with an unrecognized type)
+	// should not match any approval rule — the system must handle gracefully.
 	if bundle.RequiresRuntimeApproval(types.PolicyRequest{
 		RequestKind: types.RequestKindToolAttempt,
-		Action:      types.ActionContext{Tool: "read", SideEffects: []string{"filesystem_read"}},
+		Action:      types.ActionContext{Tool: "read", SideEffects: []types.SideEffect{"filesystem_read"}},
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	}) {
-		t.Fatal("read-only action should not require runtime approval")
+		t.Fatal("unknown side effect should not require runtime approval")
 	}
 	execEvaluation := bundle.Evaluate(types.PolicyRequest{
 		RequestKind: types.RequestKindToolAttempt,
@@ -98,7 +100,7 @@ func TestLoadDefaultPolicy(t *testing.T) {
 		RequestKind: types.RequestKindToolAttempt,
 		Action: types.ActionContext{
 			Tool:        "exec",
-			SideEffects: []string{"network_egress"},
+			SideEffects: []types.SideEffect{types.SideEffectNetworkEgress},
 		},
 		Content: types.ContentContext{
 			DataClasses: []types.DataClass{types.DataClassSecret},
@@ -492,7 +494,7 @@ func TestCELConditionsExpressAndSemantics(t *testing.T) {
 	}
 	miss := bundle.Evaluate(types.PolicyRequest{
 		RequestKind: types.RequestKindToolAttempt,
-		Action:      types.ActionContext{Tool: "bash", SideEffects: []string{"filesystem_write"}},
+		Action:      types.ActionContext{Tool: "bash", SideEffects: []types.SideEffect{types.SideEffectFilesystemWrite}},
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	})
 	if miss.Effect != types.EffectDeny {
@@ -500,7 +502,7 @@ func TestCELConditionsExpressAndSemantics(t *testing.T) {
 	}
 	hit := bundle.Evaluate(types.PolicyRequest{
 		RequestKind: types.RequestKindToolAttempt,
-		Action:      types.ActionContext{Tool: "bash", SideEffects: []string{"filesystem_write", "process_spawn"}},
+		Action:      types.ActionContext{Tool: "bash", SideEffects: []types.SideEffect{types.SideEffectFilesystemWrite, types.SideEffectProcessSpawn}},
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	})
 	if hit.Effect != types.EffectApprovalRequired {
@@ -528,23 +530,25 @@ func TestCELConditionMatchesPolicyFacts(t *testing.T) {
 	if err := bundle.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
+	// Unknown side effect value (e.g., deserialized from JSON with an unrecognized type)
+	// should not match the CEL rule — graceful degradation for forward compatibility.
 	miss := bundle.Evaluate(types.PolicyRequest{
 		RequestKind: types.RequestKindToolAttempt,
 		Action: types.ActionContext{
 			Tool:        "bash",
-			SideEffects: []string{"filesystem_read"},
+			SideEffects: []types.SideEffect{"filesystem_read"},
 		},
 		Content: types.ContentContext{DataClasses: []types.DataClass{types.DataClassSecret}},
 		Context: types.DecisionContext{Surface: types.SurfaceRuntime},
 	})
 	if miss.Effect != types.EffectDeny {
-		t.Fatalf("cel should not match read-only side effect: %#v", miss)
+		t.Fatalf("cel should not match unknown side effect: %#v", miss)
 	}
 	hit := bundle.Evaluate(types.PolicyRequest{
 		RequestKind: types.RequestKindToolAttempt,
 		Action: types.ActionContext{
 			Tool:        "bash",
-			SideEffects: []string{"network_egress"},
+			SideEffects: []types.SideEffect{types.SideEffectNetworkEgress},
 		},
 		Content: types.ContentContext{DataClasses: []types.DataClass{types.DataClassSecret}},
 		Context: types.DecisionContext{Surface: types.SurfaceRuntime},
@@ -578,7 +582,7 @@ func TestCELConditionMatchesSessionFacts(t *testing.T) {
 	}, types.SessionFacts{
 		DenyCount:          5,
 		DistinctTargets:    []string{"a", "b", "c"},
-		SideEffectSequence: []string{"network_egress"},
+		SideEffectSequence: []types.SideEffect{types.SideEffectNetworkEgress},
 	})
 	if miss.Effect != types.EffectDeny {
 		t.Fatalf("session facts below threshold should not match: %#v", miss)
@@ -590,7 +594,7 @@ func TestCELConditionMatchesSessionFacts(t *testing.T) {
 	}, types.SessionFacts{
 		DenyCount:          6,
 		DistinctTargets:    []string{"a", "b", "c"},
-		SideEffectSequence: []string{"filesystem_write", "network_egress"},
+		SideEffectSequence: []types.SideEffect{types.SideEffectFilesystemWrite, types.SideEffectNetworkEgress},
 	})
 	if hit.Effect != types.EffectApprovalRequired || hit.SelectedRule != "runtime.session.deny_escalation" {
 		t.Fatalf("session facts should match escalation rule: %#v", hit)
@@ -714,7 +718,7 @@ func containsRule(rules []string, expected string) bool {
 	return false
 }
 
-func hasTestObligation(obligations []types.Obligation, expected string) bool {
+func hasTestObligation(obligations []types.Obligation, expected types.ObligationType) bool {
 	for _, obligation := range obligations {
 		if obligation.Type == expected {
 			return true
@@ -854,9 +858,9 @@ func TestDefaultBundleHasObligationDeclarations(t *testing.T) {
 	bundle := DefaultBundle()
 
 	// Build a map of rule ID → obligation types.
-	ruleObligations := make(map[string][]string)
+	ruleObligations := make(map[string][]types.ObligationType)
 	for _, rule := range bundle.Rules {
-		types := make([]string, 0, len(rule.Obligations))
+		types := make([]types.ObligationType, 0, len(rule.Obligations))
 		for _, ob := range rule.Obligations {
 			types = append(types, ob.Type)
 		}
@@ -865,13 +869,13 @@ func TestDefaultBundleHasObligationDeclarations(t *testing.T) {
 
 	// Input secret rule must declare rewrite_input.
 	inputObs := ruleObligations["input.secret.rewrite_to_handle"]
-	if !containsString(inputObs, "rewrite_input") {
+	if !containsObligationType(inputObs, "rewrite_input") {
 		t.Fatalf("input.secret.rewrite_to_handle missing rewrite_input obligation: %v", inputObs)
 	}
 
 	// Resource resolve rule must declare resolve_secret_handle.
 	resourceObs := ruleObligations["resource.secret_handle.resolve"]
-	if !containsString(resourceObs, "resolve_secret_handle") {
+	if !containsObligationType(resourceObs, "resolve_secret_handle") {
 		t.Fatalf("resource.secret_handle.resolve missing resolve_secret_handle obligation: %v", resourceObs)
 	}
 
@@ -886,7 +890,7 @@ func TestDefaultBundleHasObligationDeclarations(t *testing.T) {
 	}
 	for _, ruleID := range approvalRules {
 		obs := ruleObligations[ruleID]
-		if !containsString(obs, "approval_request") {
+		if !containsObligationType(obs, "approval_request") {
 			t.Fatalf("%s missing approval_request obligation: %v", ruleID, obs)
 		}
 	}
@@ -898,13 +902,13 @@ func TestDefaultBundleHasObligationDeclarations(t *testing.T) {
 	}
 	for _, ruleID := range egressRules {
 		obs := ruleObligations[ruleID]
-		if !containsString(obs, "approval_request") {
+		if !containsObligationType(obs, "approval_request") {
 			t.Fatalf("%s missing approval_request obligation: %v", ruleID, obs)
 		}
 	}
 }
 
-func containsString(slice []string, target string) bool {
+func containsObligationType(slice []types.ObligationType, target types.ObligationType) bool {
 	for _, s := range slice {
 		if s == target {
 			return true

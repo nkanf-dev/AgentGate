@@ -87,7 +87,7 @@ type Condition struct {
 }
 
 type Obligation struct {
-	Type   string                 `json:"type"`
+	Type   types.ObligationType   `json:"type"`
 	Params map[string]interface{} `json:"params,omitempty"`
 }
 
@@ -117,7 +117,7 @@ type InputPolicy struct {
 
 type RuntimePolicy struct {
 	RequireApprovalTools       []string `json:"require_approval_tools,omitempty"`
-	RequireApprovalSideEffects []string `json:"require_approval_side_effects,omitempty"`
+	RequireApprovalSideEffects []types.SideEffect `json:"require_approval_side_effects,omitempty"`
 	RequireApprovalOpenWorld   bool     `json:"require_approval_open_world,omitempty"`
 	ApprovalTimeout            Duration `json:"approval_timeout,omitempty"`
 }
@@ -153,7 +153,7 @@ func DefaultBundle() Bundle {
 				Effect:       types.EffectAllowWithAudit,
 				ReasonCode:   "input_secret_rewritten_to_handles",
 				Obligations: []Obligation{
-					{Type: "rewrite_input"},
+					{Type: types.ObligationRewriteInput},
 				},
 				When: Condition{
 					Language:   "cel",
@@ -182,7 +182,7 @@ func DefaultBundle() Bundle {
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "runtime_high_risk_requires_approval",
 				Obligations: []Obligation{
-					{Type: "approval_request"},
+					{Type: types.ObligationApprovalRequest},
 				},
 				When: Condition{
 					Language:   "cel",
@@ -198,7 +198,7 @@ func DefaultBundle() Bundle {
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "runtime_high_risk_requires_approval",
 				Obligations: []Obligation{
-					{Type: "approval_request"},
+					{Type: types.ObligationApprovalRequest},
 				},
 				When: Condition{
 					Language:   "cel",
@@ -214,7 +214,7 @@ func DefaultBundle() Bundle {
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "runtime_high_risk_requires_approval",
 				Obligations: []Obligation{
-					{Type: "approval_request"},
+					{Type: types.ObligationApprovalRequest},
 				},
 				When: Condition{
 					Language:   "cel",
@@ -230,7 +230,7 @@ func DefaultBundle() Bundle {
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "runtime_high_risk_requires_approval",
 				Obligations: []Obligation{
-					{Type: "approval_request"},
+					{Type: types.ObligationApprovalRequest},
 				},
 				When: Condition{
 					Language:   "cel",
@@ -246,7 +246,7 @@ func DefaultBundle() Bundle {
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "runtime_secret_egress_requires_approval",
 				Obligations: []Obligation{
-					{Type: "approval_request"},
+					{Type: types.ObligationApprovalRequest},
 				},
 				When: Condition{
 					Language:   "cel",
@@ -263,7 +263,7 @@ func DefaultBundle() Bundle {
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "runtime_untrusted_write_requires_approval",
 				Obligations: []Obligation{
-					{Type: "approval_request"},
+					{Type: types.ObligationApprovalRequest},
 				},
 				When: Condition{
 					Language:   "cel",
@@ -296,7 +296,7 @@ func DefaultBundle() Bundle {
 				Effect:       types.EffectAllowWithAudit,
 				ReasonCode:   "secret_handle_resolve_allowed",
 				Obligations: []Obligation{
-					{Type: "resolve_secret_handle"},
+					{Type: types.ObligationResolveSecretHandle},
 				},
 				When: Condition{
 					Language:   "cel",
@@ -312,7 +312,7 @@ func DefaultBundle() Bundle {
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "resource_secret_egress_requires_approval",
 				Obligations: []Obligation{
-					{Type: "approval_request"},
+					{Type: types.ObligationApprovalRequest},
 				},
 				When: Condition{
 					Language:   "cel",
@@ -328,7 +328,7 @@ func DefaultBundle() Bundle {
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "resource_untrusted_egress_requires_approval",
 				Obligations: []Obligation{
-					{Type: "approval_request"},
+					{Type: types.ObligationApprovalRequest},
 				},
 				When: Condition{
 					Language:   "cel",
@@ -342,7 +342,7 @@ func DefaultBundle() Bundle {
 		},
 		RuntimePolicy: RuntimePolicy{
 			RequireApprovalTools:       []string{"bash"},
-			RequireApprovalSideEffects: []string{"filesystem_write", "network_egress", "process_spawn", "secret_resolve"},
+			RequireApprovalSideEffects: []types.SideEffect{types.SideEffectFilesystemWrite, types.SideEffectNetworkEgress, types.SideEffectProcessSpawn, types.SideEffectSecretResolve},
 			RequireApprovalOpenWorld:   true,
 		},
 		ResourcePolicy: ResourcePolicy{
@@ -440,7 +440,8 @@ func (b Bundle) Validate() error {
 			if obligation.Type == "" {
 				return fmt.Errorf("rule %q has obligation without type", rule.ID)
 			}
-			if strings.TrimSpace(obligation.Type) != obligation.Type || strings.ContainsAny(obligation.Type, " \t\n\r") {
+			typeStr := string(obligation.Type)
+			if strings.TrimSpace(typeStr) != typeStr || strings.ContainsAny(typeStr, " \t\n\r") {
 				return fmt.Errorf("rule %q obligation type must be a compact token", rule.ID)
 			}
 			if containsSensitiveParam(obligation.Params) {
@@ -502,7 +503,7 @@ func EvaluateBundles(bundles []Bundle, request types.PolicyRequest, sessionFacts
 			Obligations: []types.Obligation{
 				auditObligation("critical", request.Context.Surface),
 				{
-					Type: "task_control",
+					Type: types.ObligationTaskControl,
 					Params: map[string]interface{}{
 						"action": "abort_task",
 					},
@@ -537,7 +538,7 @@ func EvaluateBundles(bundles []Bundle, request types.PolicyRequest, sessionFacts
 					Obligations: []types.Obligation{
 						auditObligation("critical", request.Context.Surface),
 						{
-							Type: "task_control",
+							Type: types.ObligationTaskControl,
 							Params: map[string]interface{}{
 								"action": "abort_task",
 							},
@@ -566,7 +567,7 @@ func EvaluateBundles(bundles []Bundle, request types.PolicyRequest, sessionFacts
 			Obligations: []types.Obligation{
 				auditObligation("critical", request.Context.Surface),
 				{
-					Type: "task_control",
+					Type: types.ObligationTaskControl,
 					Params: map[string]interface{}{
 						"action": "abort_task",
 					},
@@ -679,9 +680,9 @@ func convertObligations(obligations []Obligation) []types.Obligation {
 func ensureEffectObligations(effect types.Effect, obligations []types.Obligation) []types.Obligation {
 	switch effect {
 	case types.EffectDeny, types.EffectExclusion:
-		if !hasObligation(obligations, "task_control") {
+		if !hasObligation(obligations, types.ObligationTaskControl) {
 			obligations = append(obligations, types.Obligation{
-				Type: "task_control",
+				Type: types.ObligationTaskControl,
 				Params: map[string]interface{}{
 					"action": "abort_task",
 				},
@@ -691,7 +692,7 @@ func ensureEffectObligations(effect types.Effect, obligations []types.Obligation
 	return obligations
 }
 
-func hasObligation(obligations []types.Obligation, obligationType string) bool {
+func hasObligation(obligations []types.Obligation, obligationType types.ObligationType) bool {
 	for _, obligation := range obligations {
 		if obligation.Type == obligationType {
 			return true
@@ -702,7 +703,7 @@ func hasObligation(obligations []types.Obligation, obligationType string) bool {
 
 func auditObligation(severity string, surface types.Surface) types.Obligation {
 	return types.Obligation{
-		Type: "audit_event",
+		Type: types.ObligationAuditEvent,
 		Params: map[string]interface{}{
 			"severity": severity,
 			"surface":  surface,
@@ -752,7 +753,7 @@ func normalizeSessionFacts(facts types.SessionFacts) types.SessionFacts {
 		facts.DistinctReasonCodes = []string{}
 	}
 	if facts.SideEffectSequence == nil {
-		facts.SideEffectSequence = []string{}
+		facts.SideEffectSequence = []types.SideEffect{}
 	}
 	return facts
 }
@@ -809,7 +810,7 @@ func validateCondition(ruleID string, condition Condition) error {
 
 func validateObligationCompatibility(rule Rule, obligation Obligation) error {
 	switch obligation.Type {
-	case "task_control":
+	case types.ObligationTaskControl:
 		action, ok := obligation.Params["action"].(string)
 		if !ok || action == "" {
 			return fmt.Errorf("rule %q task_control obligation requires action", rule.ID)

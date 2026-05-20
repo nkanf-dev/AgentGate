@@ -82,7 +82,7 @@ func celActivation(request types.PolicyRequest, sessionFacts types.SessionFacts)
 		"action": map[string]interface{}{
 			"operation":    request.Action.Operation,
 			"tool":         request.Action.Tool,
-			"side_effects": request.Action.SideEffects,
+			"side_effects": sideEffectStrings(request.Action.SideEffects),
 			"open_world":   request.Action.OpenWorld,
 		},
 		"target": map[string]interface{}{
@@ -109,7 +109,7 @@ func celActivation(request types.PolicyRequest, sessionFacts types.SessionFacts)
 			"distinct_targets":       sessionFacts.DistinctTargets,
 			"distinct_tools":        sessionFacts.DistinctTools,
 			"distinct_reason_codes": sessionFacts.DistinctReasonCodes,
-			"side_effect_sequence":  sessionFacts.SideEffectSequence,
+			"side_effect_sequence":  sideEffectStrings(sessionFacts.SideEffectSequence),
 			"taints":                taintStrings(sessionFacts.Taints),
 			"last_effect":           sessionFacts.LastEffect,
 			"last_request_at":       timeString(sessionFacts.LastRequestAt),
@@ -134,6 +134,14 @@ func dataClassStrings(values []types.DataClass) []string {
 }
 
 func taintStrings(values []types.Taint) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, string(value))
+	}
+	return result
+}
+
+func sideEffectStrings(values []types.SideEffect) []string {
 	result := make([]string, 0, len(values))
 	for _, value := range values {
 		result = append(result, string(value))

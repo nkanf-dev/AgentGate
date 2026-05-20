@@ -335,7 +335,7 @@ func TestEdgeSourceTrackingDoubleSignal(t *testing.T) {
 		RequestID:   "req_double_signal",
 		RequestKind: types.RequestKindToolAttempt,
 		Session:     types.SessionContext{SessionID: "sess_double", TaskID: "task_1", AttemptID: "att_1"},
-		Action:      types.ActionContext{Tool: "fetch", Operation: "fetch", OpenWorld: true, SideEffects: []string{"network_egress"}},
+		Action:      types.ActionContext{Tool: "fetch", Operation: "fetch", OpenWorld: true, SideEffects: []types.SideEffect{types.SideEffectNetworkEgress}},
 		Target:      types.TargetContext{Kind: "api"},
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	})
@@ -530,7 +530,7 @@ func TestEdgeSourceTrackingNetworkEgressOnly(t *testing.T) {
 		RequestID:   "req_ne_only",
 		RequestKind: types.RequestKindToolAttempt,
 		Session:     types.SessionContext{SessionID: "sess_ne_only", TaskID: "task_1", AttemptID: "att_1"},
-		Action:      types.ActionContext{Tool: "curl", Operation: "fetch", SideEffects: []string{"network_egress"}},
+		Action:      types.ActionContext{Tool: "curl", Operation: "fetch", SideEffects: []types.SideEffect{types.SideEffectNetworkEgress}},
 		Target:      types.TargetContext{Kind: "url"},
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	})
@@ -571,7 +571,7 @@ func TestEdgeSourceTrackingNonNetworkSideEffects(t *testing.T) {
 		RequestID:   "req_non_net",
 		RequestKind: types.RequestKindToolAttempt,
 		Session:     types.SessionContext{SessionID: "sess_non_net", TaskID: "task_1", AttemptID: "att_1"},
-		Action:      types.ActionContext{Tool: "write", Operation: "write", SideEffects: []string{"filesystem_write"}},
+		Action:      types.ActionContext{Tool: "write", Operation: "write", SideEffects: []types.SideEffect{types.SideEffectFilesystemWrite}},
 		Target:      types.TargetContext{Kind: "file"},
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	})

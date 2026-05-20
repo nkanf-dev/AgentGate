@@ -94,7 +94,7 @@ func TestSQLiteStoreSessionFactsRoundTrip(t *testing.T) {
 			DistinctTargets:     []string{"api/a", "api/b"},
 			DistinctTools:       []string{"bash"},
 			DistinctReasonCodes: []string{"runtime_high_risk_requires_approval"},
-			SideEffectSequence:  []string{"network_egress"},
+			SideEffectSequence:  []types.SideEffect{types.SideEffectNetworkEgress},
 			LastEffect:          "approval_required",
 			LastRequestAt:       &now,
 			FirstRequestAt:      &first,
@@ -121,7 +121,7 @@ func TestSQLiteStoreSessionFactsRoundTrip(t *testing.T) {
 			t.Fatal("expected existing session facts in update callback")
 		}
 		existing.Facts.RequestCount++
-		existing.Facts.SideEffectSequence = append(existing.Facts.SideEffectSequence, "filesystem_write")
+		existing.Facts.SideEffectSequence = append(existing.Facts.SideEffectSequence, types.SideEffectFilesystemWrite)
 		existing.UpdatedAt = now.Add(time.Minute)
 		return existing, nil
 	}); err != nil {

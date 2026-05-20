@@ -415,7 +415,7 @@ func TestRuntimeApprovalUsesIntegrationApprovalChannel(t *testing.T) {
 		Action: types.ActionContext{
 			Tool:        "exec",
 			Operation:   "execute",
-			SideEffects: []string{"process_spawn"},
+			SideEffects: []types.SideEffect{types.SideEffectProcessSpawn},
 			OpenWorld:   true,
 		},
 		Target:  types.TargetContext{Kind: "process"},
@@ -758,7 +758,7 @@ func TestSessionFactsAccumulateAcrossDecisions(t *testing.T) {
 		RequestKind: types.RequestKindToolAttempt,
 		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
 		Session:     types.SessionContext{SessionID: "sess_history", TaskID: "task_1", AttemptID: "attempt_1"},
-		Action:      types.ActionContext{Tool: "fetch", Operation: "fetch", SideEffects: []string{"network_egress"}},
+		Action:      types.ActionContext{Tool: "fetch", Operation: "fetch", SideEffects: []types.SideEffect{types.SideEffectNetworkEgress}},
 		Target:      types.TargetContext{Kind: "api", Identifier: "blocked-api"},
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	})
@@ -782,7 +782,7 @@ func TestSessionFactsAccumulateAcrossDecisions(t *testing.T) {
 		RequestKind: types.RequestKindToolAttempt,
 		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
 		Session:     types.SessionContext{SessionID: "sess_history", TaskID: "task_1", AttemptID: "attempt_2"},
-		Action:      types.ActionContext{Tool: "fetch", Operation: "fetch", SideEffects: []string{"network_egress"}},
+		Action:      types.ActionContext{Tool: "fetch", Operation: "fetch", SideEffects: []types.SideEffect{types.SideEffectNetworkEgress}},
 		Target:      types.TargetContext{Kind: "api", Identifier: "new-api"},
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	})
@@ -849,7 +849,7 @@ func TestTaintsMergedFromSessionIntoDecision(t *testing.T) {
 			DistinctTargets:     []string{},
 			DistinctTools:       []string{},
 			DistinctReasonCodes: []string{},
-			SideEffectSequence:  []string{},
+			SideEffectSequence:  []types.SideEffect{},
 		},
 	}); err != nil {
 		t.Fatalf("seed session facts: %v", err)
@@ -986,7 +986,7 @@ func TestSourceTrackingTaintUntrustedExternal(t *testing.T) {
 			RequestID:   "req_src_ne",
 			RequestKind: types.RequestKindToolAttempt,
 			Session:     types.SessionContext{SessionID: "sess_src_ne", TaskID: "task_1", AttemptID: "att_1"},
-			Action:      types.ActionContext{Tool: "fetch", Operation: "fetch", SideEffects: []string{"network_egress"}},
+			Action:      types.ActionContext{Tool: "fetch", Operation: "fetch", SideEffects: []types.SideEffect{types.SideEffectNetworkEgress}},
 			Target:      types.TargetContext{Kind: "api"},
 			Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 		})
@@ -1236,7 +1236,7 @@ func TestSessionFactsSideEffectSequenceIsCapped(t *testing.T) {
 	facts := types.SessionFacts{}
 	for index := 0; index < 25; index++ {
 		req := types.PolicyRequest{
-			Action: types.ActionContext{SideEffects: []string{fmt.Sprintf("effect_%02d", index)}},
+			Action: types.ActionContext{SideEffects: []types.SideEffect{types.SideEffect(fmt.Sprintf("effect_%02d", index))}},
 		}
 		decision := types.PolicyDecision{
 			Effect: types.EffectAllowWithAudit,
@@ -1695,7 +1695,7 @@ func containsAppliedRule(rules []string, expected string) bool {
 	return false
 }
 
-func hasObligation(obligations []types.Obligation, expected string) bool {
+func hasObligation(obligations []types.Obligation, expected types.ObligationType) bool {
 	for _, obligation := range obligations {
 		if obligation.Type == expected {
 			return true

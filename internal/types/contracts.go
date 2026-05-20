@@ -180,7 +180,7 @@ type SessionContext struct {
 type ActionContext struct {
 	Operation   string   `json:"operation,omitempty"`
 	Tool        string   `json:"tool,omitempty"`
-	SideEffects []string `json:"side_effects,omitempty"`
+	SideEffects []SideEffect `json:"side_effects,omitempty"`
 	OpenWorld   bool     `json:"open_world,omitempty"`
 }
 
@@ -216,7 +216,7 @@ type SessionFacts struct {
 	DistinctTargets      []string   `json:"distinct_targets"`
 	DistinctTools       []string   `json:"distinct_tools"`
 	DistinctReasonCodes []string   `json:"distinct_reason_codes"`
-	SideEffectSequence  []string   `json:"side_effect_sequence"`
+	SideEffectSequence  []SideEffect `json:"side_effect_sequence"`
 	Taints              []Taint    `json:"taints,omitempty"`
 	LastEffect          string     `json:"last_effect,omitempty"`
 	LastRequestAt       *time.Time `json:"last_request_at,omitempty"`
@@ -224,7 +224,7 @@ type SessionFacts struct {
 }
 
 type Obligation struct {
-	Type   string                 `json:"type"`
+	Type   ObligationType         `json:"type"`
 	Params map[string]interface{} `json:"params,omitempty"`
 }
 
