@@ -39,7 +39,8 @@ type Engine struct {
 	attemptGrants map[string]types.AttemptGrant
 	policyHistory map[int]policy.Bundle
 	policyRecords []policy.VersionRecord
-	detector      scanner.Detector
+	detector           scanner.Detector
+	injectionDetector  scanner.InjectionDetector
 
 	maxEvents          int
 	eventRetentionDays int
@@ -181,6 +182,10 @@ type PolicyBundlesResponse struct {
 const integrationStaleAfter = 5 * time.Minute
 const secretHandleTTL = 1 * time.Hour
 
+// Well-known side effect values used by adapters and CEL rules.
+// Pending #18: migrate to typed constants.
+const SideEffectNetworkEgress = "network_egress"
+
 var idCounter atomic.Uint64
 
 func NewEngine(options ...Option) *Engine {
@@ -199,6 +204,7 @@ func NewEngine(options ...Option) *Engine {
 		policyHistory:      make(map[int]policy.Bundle),
 		policyRecords:      make([]policy.VersionRecord, 0, 1),
 		detector:           scanner.RegexDetector{},
+		injectionDetector:  scanner.RegexInjectionDetector{},
 		maxEvents:          10000,
 		eventRetentionDays: 30,
 	}
@@ -294,6 +300,12 @@ func WithPolicyBundles(bundles []policy.Bundle) Option {
 func WithDetector(d scanner.Detector) Option {
 	return func(engine *Engine) {
 		engine.detector = d
+	}
+}
+
+func WithInjectionDetector(d scanner.InjectionDetector) Option {
+	return func(engine *Engine) {
+		engine.injectionDetector = d
 	}
 }
 
@@ -1727,9 +1739,23 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 	var inputFacts inputSecretFacts
 	var sessionFacts types.SessionFacts
 	if !decisionReady {
-		taintsBefore := len(req.Context.Taints)
+		// Enrichment: detect secrets/injections and map to taints.
 		inputFacts = e.enrichPolicyFacts(&req)
-		newTaints = append([]types.Taint(nil), req.Context.Taints[taintsBefore:]...)
+
+		// Source tracking: TaintUntrustedExternal is a source-level annotation,
+		// not content detection. Set when the runtime request indicates external
+		// world interaction.
+		if surface == types.SurfaceRuntime {
+			if req.Action.OpenWorld || containsString(req.Action.SideEffects, SideEffectNetworkEgress) {
+				req.Context.Taints = appendTaintOnce(req.Context.Taints, types.TaintUntrustedExternal)
+			}
+		}
+
+		// Snapshot taints before session merge. This captures both adapter
+		// pre-set taints and taints added by enrichment/source tracking.
+		// mergeTaints below deduplicates, so passing the full slice is safe.
+		newTaints = append([]types.Taint(nil), req.Context.Taints...)
+
 		sessionFacts = e.sessionFactsForDecision(req.Session.SessionID)
 		req.Context.Taints = mergeTaints(req.Context.Taints, sessionFacts.Taints)
 		if len(inputFacts.findings) > 0 {
@@ -1738,16 +1764,18 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 			}
 			req.Context.Raw["has_secret_findings"] = true
 		}
+	}
 
-		if req.RequestKind == types.RequestKindToolAttempt && surface == types.SurfaceRuntime {
-			if grant, ok := e.hasValidGrant(req.Session, now); ok {
-				effect = types.EffectAllowWithAudit
-				reason = "user_allow_once_valid"
-				appliedRules = []string{"runtime.high_risk.allow_once_grant"}
-				obligations = []types.Obligation{auditObligation("info", map[string]interface{}{"approval_id": grant.ApprovalID})}
-				policyEvaluation = policy.Evaluation{Effect: effect, ReasonCode: reason, AppliedRules: appliedRules}
-				decisionReady = true
-			}
+	// Grant check: short-circuit after enrichment so taints are always
+	// accumulated regardless of whether a grant matches.
+	if !decisionReady && req.RequestKind == types.RequestKindToolAttempt && surface == types.SurfaceRuntime {
+		if grant, ok := e.hasValidGrant(req.Session, now); ok {
+			effect = types.EffectAllowWithAudit
+			reason = "user_allow_once_valid"
+			appliedRules = []string{"runtime.high_risk.allow_once_grant"}
+			obligations = []types.Obligation{auditObligation("info", map[string]interface{}{"approval_id": grant.ApprovalID})}
+			policyEvaluation = policy.Evaluation{Effect: effect, ReasonCode: reason, AppliedRules: appliedRules}
+			decisionReady = true
 		}
 	}
 
@@ -2526,6 +2554,15 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func containsString(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Engine) appendEvent(event types.EventEnvelope) error {
 	if e.eventStore != nil {
 		if err := e.eventStore.AppendEvent(event); err != nil {
@@ -2672,28 +2709,62 @@ func requestValidationEvaluation(patch *decisionPatch) policy.Evaluation {
 }
 
 func (e *Engine) enrichPolicyFacts(req *types.PolicyRequest) inputSecretFacts {
-	if req.RequestKind != types.RequestKindInput || req.Context.Surface != types.SurfaceInput {
+	text := e.extractScannableText(req)
+	if text == "" {
 		return inputSecretFacts{}
 	}
-	text, ok := rawString(req.Context.Raw, "text")
-	if !ok {
-		text, ok = rawString(req.Context.Raw, "body")
-	}
-	if !ok {
-		return inputSecretFacts{}
-	}
-	findings, err := e.detector.DetectSecrets(text)
+
+	// Secret detection (existing).
+	secretFindings, err := e.detector.DetectSecrets(text)
 	if err != nil {
 		log.Printf("secret detection error: %v", err)
-		return inputSecretFacts{text: text}
+		secretFindings = nil
 	}
-	if len(findings) == 0 {
-		return inputSecretFacts{text: text}
+
+	// Injection detection (new).
+	var injectionFindings []scanner.InjectionFinding
+	if e.injectionDetector != nil {
+		injectionFindings, err = e.injectionDetector.DetectInjections(text)
+		if err != nil {
+			log.Printf("injection detection error: %v", err)
+			injectionFindings = nil
+		}
 	}
-	req.Content.DataClasses = appendDataClassOnce(req.Content.DataClasses, types.DataClassSecret)
-	req.Content.DataClasses = appendDataClassOnce(req.Content.DataClasses, types.DataClassCredential)
-	req.Context.Taints = appendTaintOnce(req.Context.Taints, types.TaintSecretBearing)
-	return inputSecretFacts{text: text, findings: findings}
+
+	// Map findings to taints via the mapping layer.
+	taints := scanner.FindingsToTaints(secretFindings, injectionFindings)
+	for _, t := range taints {
+		req.Context.Taints = appendTaintOnce(req.Context.Taints, t)
+	}
+
+	// Set data classes for secret findings.
+	if len(secretFindings) > 0 {
+		req.Content.DataClasses = appendDataClassOnce(req.Content.DataClasses, types.DataClassSecret)
+		req.Content.DataClasses = appendDataClassOnce(req.Content.DataClasses, types.DataClassCredential)
+	}
+
+	return inputSecretFacts{text: text, findings: secretFindings}
+}
+
+// extractScannableText returns the text content to scan for secrets and
+// injections. For input surface it reads from context.Raw["text"/"body"],
+// for runtime surface it reads from content.summary or context.Raw["text"].
+func (e *Engine) extractScannableText(req *types.PolicyRequest) string {
+	switch req.Context.Surface {
+	case types.SurfaceInput:
+		text, ok := rawString(req.Context.Raw, "text")
+		if !ok {
+			text, _ = rawString(req.Context.Raw, "body")
+		}
+		return text
+	case types.SurfaceRuntime:
+		if text, ok := rawString(req.Context.Raw, "text"); ok {
+			return text
+		}
+		return req.Content.Summary
+	default:
+		return ""
+	}
 }
 
 func appendDataClassOnce(values []types.DataClass, value types.DataClass) []types.DataClass {
