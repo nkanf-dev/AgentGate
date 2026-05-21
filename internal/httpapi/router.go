@@ -32,17 +32,18 @@ import (
 )
 
 type Server struct {
-	engine     *core.Engine
-	authorizer *authz.Authorizer
+	engine      *core.Engine
+	authorizer  *authz.Authorizer
+	corsOrigins []string
 }
 
-func NewServer(engine *core.Engine, authorizer *authz.Authorizer) *Server {
-	return &Server{engine: engine, authorizer: authorizer}
+func NewServer(engine *core.Engine, authorizer *authz.Authorizer, corsOrigins []string) *Server {
+	return &Server{engine: engine, authorizer: authorizer, corsOrigins: corsOrigins}
 }
 
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
-	r.Use(corsMiddleware)
+	r.Use(corsMiddleware(s.corsOrigins))
 
 	// Health
 	r.Get("/healthz", s.healthz)
@@ -121,21 +122,23 @@ func staticConsoleHandler() http.Handler {
 	})
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if isAllowedOrigin(origin) {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization")
-		}
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+			if isAllowedOrigin(origin, allowedOrigins) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization")
+			}
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func (s *Server) swaggerUI(w http.ResponseWriter, r *http.Request) {
@@ -691,7 +694,25 @@ func writeError(w http.ResponseWriter, status int, code string, message string) 
 	})
 }
 
-func isAllowedOrigin(origin string) bool {
+func isAllowedOrigin(origin string, allowedOrigins []string) bool {
+	if origin == "" {
+		return false
+	}
+
+	// Check configured origins.
+	if len(allowedOrigins) > 0 {
+		for _, allowed := range allowedOrigins {
+			if allowed == "*" {
+				return true
+			}
+			if strings.EqualFold(allowed, origin) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Default: allow localhost for development.
 	parsed, err := url.Parse(origin)
 	if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") {
 		switch parsed.Hostname() {

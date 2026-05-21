@@ -3,16 +3,17 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/agentgate/agentgate/internal/authz"
+	"github.com/agentgate/agentgate/internal/config"
 	"github.com/agentgate/agentgate/internal/core"
 	"github.com/agentgate/agentgate/internal/httpapi"
 	"github.com/agentgate/agentgate/internal/policy"
@@ -30,15 +31,19 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	sqliteDSN := getenv("AGENTGATE_SQLITE_DSN", "file:agentgate.db?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)")
-	db, err := store.OpenSQLite(ctx, sqliteDSN)
+	// Load configuration.
+	cfg, err := config.Load(config.GetConfigPath())
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	db, err := store.OpenSQLite(ctx, cfg.Database.DSN)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	policyPath := getenv("AGENTGATE_POLICY_PATH", "config/default_policy.json")
-	policyBundle, err := policy.LoadFile(policyPath)
+	policyBundle, err := policy.LoadFile(cfg.Policy.Path)
 	if err != nil {
 		return err
 	}
@@ -47,7 +52,7 @@ func run() error {
 	} else if found {
 		policyBundle = activeBundle
 	} else {
-		if _, err := db.SavePolicyVersion(policyBundle, "bootstrap", "initial policy from AGENTGATE_POLICY_PATH", 0, policyBundle.IssuedAt); err != nil {
+		if _, err := db.SavePolicyVersion(policyBundle, "bootstrap", "initial policy from config", 0, policyBundle.IssuedAt); err != nil {
 			return err
 		}
 	}
@@ -70,8 +75,6 @@ func run() error {
 		bundles = []policy.Bundle{bootstrap}
 	}
 
-	addr := getenv("AGENTGATE_ADDR", ":8080")
-
 	// Secret detector: ML (openai/privacy-filter) if enabled, else regex.
 	detector := buildDetector()
 
@@ -84,18 +87,18 @@ func run() error {
 	)
 
 	srv := &http.Server{
-		Addr: addr,
+		Addr: cfg.Server.Addr,
 		Handler: httpapi.NewServer(engine, authz.New(authz.Config{
-			AdapterTokens:  splitCSV(getenv("AGENTGATE_ADAPTER_TOKENS", "adapter-local-token")),
-			OperatorTokens: splitCSV(getenv("AGENTGATE_OPERATOR_TOKENS", "operator-local-token")),
-			AdminTokens:    splitCSV(getenv("AGENTGATE_ADMIN_TOKENS", "admin-local-token")),
-		})).Router(),
+			AdapterTokens:  cfg.Auth.AdapterTokens,
+			OperatorTokens: cfg.Auth.OperatorTokens,
+			AdminTokens:    cfg.Auth.AdminTokens,
+		}), cfg.Server.CORSOrigins).Router(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("agentgate listening on %s", addr)
+		log.Printf("agentgate listening on %s", cfg.Server.Addr)
 		errCh <- srv.ListenAndServe()
 	}()
 
@@ -111,29 +114,6 @@ func run() error {
 		}
 		return err
 	}
-}
-
-func getenv(key, fallback string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		return fallback
-	}
-	return value
-}
-
-func splitCSV(value string) []string {
-	if value == "" {
-		return nil
-	}
-	parts := strings.Split(value, ",")
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			result = append(result, part)
-		}
-	}
-	return result
 }
 
 func buildDetector() scanner.Detector {

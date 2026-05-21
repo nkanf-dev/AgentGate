@@ -254,7 +254,7 @@ func TestCORSAllowsLocalDevPorts(t *testing.T) {
 	}
 	for _, origin := range tests {
 		t.Run(origin, func(t *testing.T) {
-			if !isAllowedOrigin(origin) {
+			if !isAllowedOrigin(origin, nil) {
 				t.Fatalf("expected local origin %q to be allowed", origin)
 			}
 		})
@@ -262,8 +262,40 @@ func TestCORSAllowsLocalDevPorts(t *testing.T) {
 }
 
 func TestCORSRejectsNonLocalOrigin(t *testing.T) {
-	if isAllowedOrigin("https://example.com") {
+	if isAllowedOrigin("https://example.com", nil) {
 		t.Fatal("non-local origin should not be allowed")
+	}
+}
+
+func TestCORSRespectsConfiguredOrigins(t *testing.T) {
+	// Test specific origins.
+	origins := []string{"https://console.agentgate.io", "https://app.example.com"}
+	if !isAllowedOrigin("https://console.agentgate.io", origins) {
+		t.Fatal("configured origin should be allowed")
+	}
+	if !isAllowedOrigin("https://app.example.com", origins) {
+		t.Fatal("second configured origin should be allowed")
+	}
+	if isAllowedOrigin("https://evil.com", origins) {
+		t.Fatal("non-configured origin should be rejected")
+	}
+	// When origins are configured, localhost should also be rejected.
+	if isAllowedOrigin("http://localhost:5174", origins) {
+		t.Fatal("localhost should be rejected when origins are configured")
+	}
+
+	// Test wildcard.
+	wildcard := []string{"*"}
+	if !isAllowedOrigin("https://any.origin.com", wildcard) {
+		t.Fatal("wildcard should allow any origin")
+	}
+
+	// Test empty origins falls back to localhost.
+	if !isAllowedOrigin("http://localhost:5174", nil) {
+		t.Fatal("localhost should be allowed when origins are nil")
+	}
+	if isAllowedOrigin("https://example.com", nil) {
+		t.Fatal("non-local origin should be rejected when origins are nil")
 	}
 }
 
@@ -272,5 +304,5 @@ func testRouter() http.Handler {
 		AdapterTokens:  []string{"adapter-token"},
 		OperatorTokens: []string{"operator-token"},
 		AdminTokens:    []string{"admin-token"},
-	})).Router()
+	}), nil).Router()
 }
