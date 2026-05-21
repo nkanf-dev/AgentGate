@@ -288,6 +288,158 @@ func TestDecisionCoverageUsesStateStoreAfterEngineRestart(t *testing.T) {
 	}
 }
 
+func TestAdapterCapabilityEnforcedAtDecisionTime(t *testing.T) {
+	engine := NewEngine()
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+	engine.stateStore = stateStore
+
+	// Register adapter with full capabilities (required by registration validation)
+	_, err = engine.RegisterAdapter(types.AdapterRegistration{
+		AdapterID:     "input-adapter",
+		IntegrationID: "integration-input",
+		AdapterKind:   "host_plugin",
+		Surfaces:      []types.Surface{types.SurfaceInput},
+		Capabilities: types.AdapterCapabilities{
+			CanBlock:        true,
+			CanRewriteInput: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("register adapter: %v", err)
+	}
+
+	// Now update the registration to remove CanRewriteInput (simulating adapter reconfiguration)
+	engine.mu.Lock()
+	engine.registrations["input-adapter"] = adapterState{
+		registration: types.AdapterRegistration{
+			AdapterID:     "input-adapter",
+			IntegrationID: "integration-input",
+			AdapterKind:   "host_plugin",
+			Surfaces:      []types.Surface{types.SurfaceInput},
+			Capabilities: types.AdapterCapabilities{
+				CanBlock:        true,
+				CanRewriteInput: false,
+			},
+		},
+	}
+	engine.mu.Unlock()
+
+	decision, err := engine.Decide(types.PolicyRequest{
+		RequestID:   "req_capability_check",
+		RequestKind: types.RequestKindInput,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context: types.DecisionContext{
+			Surface: types.SurfaceInput,
+			Raw: map[string]interface{}{
+				"text": "api_key: sk-test-1234567890abcdef deploy",
+			},
+		},
+		Policy: map[string]interface{}{
+			"integration_id": "integration-input",
+		},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectDeny {
+		t.Fatalf("effect = %q, want deny when adapter cannot rewrite input", decision.Effect)
+	}
+	if decision.ReasonCode != "adapter_cannot_rewrite_input" {
+		t.Fatalf("reason = %q, want adapter_cannot_rewrite_input", decision.ReasonCode)
+	}
+	if len(decision.AppliedRules) == 0 || decision.AppliedRules[0] != "core.adapter.capability_check" {
+		t.Fatalf("appliedRules = %v, want [core.adapter.capability_check]", decision.AppliedRules)
+	}
+	hasAudit := false
+	for _, ob := range decision.Obligations {
+		if ob.Type == types.ObligationAuditEvent {
+			hasAudit = true
+			break
+		}
+	}
+	if !hasAudit {
+		t.Fatal("decision should include audit_event obligation")
+	}
+
+	// Register adapter with full capabilities for runtime
+	_, err = engine.RegisterAdapter(types.AdapterRegistration{
+		AdapterID:     "runtime-adapter",
+		IntegrationID: "integration-runtime",
+		AdapterKind:   "host_plugin",
+		Surfaces:      []types.Surface{types.SurfaceRuntime},
+		Capabilities: types.AdapterCapabilities{
+			CanBlock:            true,
+			CanPauseForApproval: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("register adapter: %v", err)
+	}
+
+	// Now update the registration to remove CanPauseForApproval
+	engine.mu.Lock()
+	engine.registrations["runtime-adapter"] = adapterState{
+		registration: types.AdapterRegistration{
+			AdapterID:     "runtime-adapter",
+			IntegrationID: "integration-runtime",
+			AdapterKind:   "host_plugin",
+			Surfaces:      []types.Surface{types.SurfaceRuntime},
+			Capabilities: types.AdapterCapabilities{
+				CanBlock:            true,
+				CanPauseForApproval: false,
+			},
+		},
+	}
+	engine.mu.Unlock()
+
+	decision, err = engine.Decide(types.PolicyRequest{
+		RequestID:   "req_capability_check_runtime",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_2", TaskID: "task_2", AttemptID: "attempt_2"},
+		Action: types.ActionContext{
+			Tool:        "exec",
+			Operation:   "execute",
+			SideEffects: []types.SideEffect{types.SideEffectProcessSpawn},
+			OpenWorld:   true,
+		},
+		Target:  types.TargetContext{Kind: "process"},
+		Context: types.DecisionContext{Surface: types.SurfaceRuntime},
+		Policy: map[string]interface{}{
+			"integration_id": "integration-runtime",
+		},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectDeny {
+		t.Fatalf("effect = %q, want deny when adapter cannot pause for approval", decision.Effect)
+	}
+	if decision.ReasonCode != "adapter_cannot_pause_for_approval" {
+		t.Fatalf("reason = %q, want adapter_cannot_pause_for_approval", decision.ReasonCode)
+	}
+	if len(decision.AppliedRules) == 0 || decision.AppliedRules[0] != "core.adapter.capability_check" {
+		t.Fatalf("appliedRules = %v, want [core.adapter.capability_check]", decision.AppliedRules)
+	}
+	hasAudit = false
+	for _, ob := range decision.Obligations {
+		if ob.Type == types.ObligationAuditEvent {
+			hasAudit = true
+			break
+		}
+	}
+	if !hasAudit {
+		t.Fatal("decision should include audit_event obligation")
+	}
+}
+
 func TestIntegrationHealthMatchesByIntegrationIDOnly(t *testing.T) {
 	engine := NewEngine()
 

@@ -2064,6 +2064,7 @@ func (e *Engine) Events(limit int) ([]types.EventEnvelope, error) {
 // ensures one approval per decision — the policy declares intent, the executor
 // materializes it once.
 func (e *Engine) executeObligations(obligations []types.Obligation, req types.PolicyRequest, facts inputSecretFacts, reason string, now time.Time) ([]types.Obligation, *decisionPatch) {
+	capabilities, adapterFound := e.capabilitiesForRequest(req)
 	enriched := make([]types.Obligation, 0, len(obligations))
 	executed := make(map[types.ObligationType]bool)
 	for _, ob := range obligations {
@@ -2071,6 +2072,9 @@ func (e *Engine) executeObligations(obligations []types.Obligation, req types.Po
 		case types.ObligationRewriteInput:
 			if executed[ob.Type] {
 				continue
+			}
+			if adapterFound && !capabilities.CanRewriteInput {
+				return nil, capabilityDenialPatch("adapter_cannot_rewrite_input")
 			}
 			executed[ob.Type] = true
 			result, patch := e.executeRewriteInput(req, facts, now)
@@ -2099,6 +2103,9 @@ func (e *Engine) executeObligations(obligations []types.Obligation, req types.Po
 		case types.ObligationApprovalRequest:
 			if executed[ob.Type] {
 				continue
+			}
+			if adapterFound && !capabilities.CanPauseForApproval {
+				return nil, capabilityDenialPatch("adapter_cannot_pause_for_approval")
 			}
 			executed[ob.Type] = true
 			result, patch := e.executeApprovalRequest(req, reason, now)
@@ -2372,6 +2379,24 @@ func (e *Engine) approvalChannelForRequest(req types.PolicyRequest) string {
 		return ""
 	}
 	return definition.ApprovalChannel
+}
+
+func (e *Engine) capabilitiesForRequest(req types.PolicyRequest) (types.AdapterCapabilities, bool) {
+	integrationID := strings.TrimSpace(mapStringValue(req.Policy, "integration_id"))
+	if integrationID == "" {
+		integrationID = strings.TrimSpace(mapStringValue(req.Context.Raw, "integration_id"))
+	}
+	if integrationID == "" {
+		return types.AdapterCapabilities{}, false
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for _, state := range e.registrations {
+		if state.registration.IntegrationID == integrationID {
+			return state.registration.Capabilities, true
+		}
+	}
+	return types.AdapterCapabilities{}, false
 }
 
 func (e *Engine) hasCoverage(surface types.Surface) bool {
@@ -2691,6 +2716,18 @@ func requestValidationPatch(reason string) *decisionPatch {
 		effect:       types.EffectDeny,
 		reason:       reason,
 		appliedRules: []string{"core.request.validation"},
+		obligations: []types.Obligation{
+			auditObligation("critical", map[string]interface{}{"reason": reason}),
+			abortTaskObligation(),
+		},
+	}
+}
+
+func capabilityDenialPatch(reason string) *decisionPatch {
+	return &decisionPatch{
+		effect:       types.EffectDeny,
+		reason:       reason,
+		appliedRules: []string{"core.adapter.capability_check"},
 		obligations: []types.Obligation{
 			auditObligation("critical", map[string]interface{}{"reason": reason}),
 			abortTaskObligation(),
