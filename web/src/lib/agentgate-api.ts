@@ -682,8 +682,11 @@ function normalizeEvent(event: EventEnvelope): SecurityEvent {
     applied_rules: stringArray(metadata.applied_rules),
     obligations: stringArray(metadata.obligations),
     metadata: metadataItems(metadata),
+    // TODO: findings should come from actual findings data, not warnings
     findings: warnings,
+    // TODO: Backend never populates taints in event metadata - always empty
     taints: stringArray(metadata.taints),
+    // TODO: Backend never populates data_classes in event metadata - always empty
     data_classes: stringArray(metadata.data_classes),
     event_type: event.event_type,
   }

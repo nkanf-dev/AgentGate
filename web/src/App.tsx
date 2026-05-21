@@ -126,6 +126,7 @@ import {
   surfaceLabels,
 } from "@/lib/display-labels"
 import { IntegrationsView } from "@/features/integrations/IntegrationsView"
+import { OnboardingView } from "@/features/onboarding/OnboardingView"
 import { PolicyView } from "@/features/policy/PolicyView"
 
 type View =
@@ -285,7 +286,9 @@ function App() {
   const [surfaceFilter, setSurfaceFilter] = React.useState("all")
   const [queryText, setQueryText] = React.useState("")
   const { data, error, isFetching, refetch } = useQuery({
-    queryKey: ["agentgate-console", config.baseUrl || defaultConfig.baseUrl, config.operatorToken],
+    // TODO: operatorToken is not passed to fetchConsoleData - it reads from loadConfig() internally
+    // Consider passing token explicitly or removing from query key
+    queryKey: ["agentgate-console", config.baseUrl || defaultConfig.baseUrl],
     queryFn: ({ signal }) =>
       fetchConsoleData(config.baseUrl || defaultConfig.baseUrl, signal),
     retry: 1,
@@ -312,6 +315,7 @@ function App() {
   const approvals = data?.approvals ?? []
   const pendingApprovals = approvals.filter((approval) => approval.status === "pending")
   const histogram = data?.histogram ?? []
+  const isOnboarding = (coverage?.adapters.length ?? 0) === 0
 
   React.useEffect(() => {
     if (!selectedId && events[0]) {
@@ -367,6 +371,17 @@ function App() {
     document.title = `AgentGate Console - ${currentTitle}`
   }, [currentTitle])
 
+  if (isOnboarding) {
+    return (
+      <OnboardingView
+        coverage={coverage}
+        onComplete={() => {
+          void refetch()
+        }}
+      />
+    )
+  }
+
   return (
     <TooltipProvider>
       <SidebarProvider>
@@ -418,11 +433,18 @@ function App() {
                     <Badge variant={surfaceVariant[surface]}>
                       {surfaceLabel(surface)}
                     </Badge>
-                    <span className="text-muted-foreground">
+                    <Badge
+                      variant="outline"
+                      className={
+                        (coveredSurfaces[surface] ?? 0) > 0
+                          ? "border-green-500 text-green-500"
+                          : "border-red-500 text-red-500"
+                      }
+                    >
                       {(coveredSurfaces[surface] ?? 0) > 0
                         ? "Covered"
                         : "Gap"}
-                    </span>
+                    </Badge>
                   </div>
                 ))}
               </SidebarGroupContent>

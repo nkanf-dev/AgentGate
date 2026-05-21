@@ -94,10 +94,12 @@ export function statusLabel(status?: string) {
   return status ? statusLabels[status] ?? status : "Inactive"
 }
 
+// TODO: Exported but never imported - backend doesn't populate data_classes in events
 export function dataClassLabel(dataClass: string) {
   return dataClassLabels[dataClass] ?? titleCaseOption(dataClass)
 }
 
+// TODO: Exported but never imported - backend doesn't populate taints in events
 export function taintLabel(taint: string) {
   return taintLabels[taint] ?? titleCaseOption(taint)
 }

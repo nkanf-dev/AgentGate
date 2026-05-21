@@ -697,6 +697,8 @@ function IntegrationEditor({
                   </SelectContent>
                 </Select>
               </LabeledField>
+              {/* TODO: These Feishu-specific fields should be dynamic based on worker type */}
+              {/* Other workers will show irrelevant config fields */}
               <LabeledField label="Feishu App ID">
                 <Input
                   value={stringConfig(definition, "app_id")}
