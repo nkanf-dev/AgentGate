@@ -1,4 +1,6 @@
-# AgentGate
+<p align="center">
+  <img src="docs/agentgate-logo-horizontal.svg" alt="AgentGate" width="400">
+</p>
 
 **Policy decision and control plane for agent input, runtime action, and resource boundaries.**
 
