@@ -152,5 +152,14 @@ func GetConfigPath() string {
 	if path := os.Getenv("AGENTGATE_CONFIG"); path != "" {
 		return path
 	}
-	return "agentgate.yaml"
+
+	// Search in default locations.
+	defaults := []string{"agentgate.yaml", "config/agentgate.yaml"}
+	for _, p := range defaults {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+
+	return ""
 }
