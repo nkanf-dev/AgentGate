@@ -50,8 +50,6 @@ import {
 type IntegrationPage = "list" | "detail" | "edit" | "new"
 
 const integrationKindOptions = ["adapter", "transport", "resource_provider"]
-const managedWorkerOptions = ["feishu"]
-
 const healthVariant: Record<
   IntegrationHealthStatus,
   "default" | "secondary" | "destructive" | "outline"
@@ -413,7 +411,10 @@ function IntegrationDetail({
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3 md:grid-cols-4">
-            <DetailTile label="Worker" value={definition.health.runtime.worker ?? "Unknown"} />
+            <DetailTile
+              label="Command"
+              value={(definition.health.runtime.command ?? []).join(" ") || "Unknown"}
+            />
             <DetailTile label="Status" value={statusLabel(definition.health.runtime.status ?? "starting")} />
             <DetailTile label="PID" value={definition.health.runtime.pid ? String(definition.health.runtime.pid) : "Not running"} />
             <DetailTile label="Restarts" value={String(definition.health.runtime.restart_count ?? 0)} />
@@ -636,17 +637,18 @@ function IntegrationEditor({
               </div>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
-              <LabeledField label="Worker">
-                <Select
-                  value={definition.runtime?.worker ?? "feishu"}
-                  onValueChange={(worker) =>
+              <LabeledField label="Command">
+                <Input
+                  value={(definition.runtime?.command ?? []).join(" ")}
+                  placeholder="bun packages/feishu-adapter/dist/cli.js"
+                  onChange={(event) =>
                     onChange({
                       ...definition,
                       runtime: {
                         managed: true,
-                        worker,
+                        command: splitCommand(event.target.value),
                         enabled: definition.runtime?.enabled ?? true,
-                        config: definition.runtime?.config ?? {},
+                        env: definition.runtime?.env ?? {},
                         restart: definition.runtime?.restart ?? {
                           enabled: true,
                           max_attempts: 10,
@@ -655,18 +657,7 @@ function IntegrationEditor({
                       },
                     })
                   }
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {managedWorkerOptions.map((worker) => (
-                      <SelectItem key={worker} value={worker}>
-                        {statusLabel(worker)}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                />
               </LabeledField>
               <LabeledField label="Runtime Enabled">
                 <Select
@@ -676,9 +667,13 @@ function IntegrationEditor({
                       ...definition,
                       runtime: {
                         managed: true,
-                        worker: definition.runtime?.worker ?? "feishu",
+                        command:
+                          definition.runtime?.command ?? [
+                            "bun",
+                            "packages/feishu-adapter/dist/cli.js",
+                          ],
                         enabled: value === "true",
-                        config: definition.runtime?.config ?? {},
+                        env: definition.runtime?.env ?? {},
                         restart: definition.runtime?.restart ?? {
                           enabled: true,
                           max_attempts: 10,
@@ -697,40 +692,48 @@ function IntegrationEditor({
                   </SelectContent>
                 </Select>
               </LabeledField>
-              {/* TODO: These Feishu-specific fields should be dynamic based on worker type */}
-              {/* Other workers will show irrelevant config fields */}
-              <LabeledField label="Feishu App ID">
+              <LabeledField label="Env.AGENTGATE_FEISHU_ADAPTER_ID">
                 <Input
-                  value={stringConfig(definition, "app_id")}
-                  placeholder="cli_xxx"
+                  value={stringEnv(definition, "AGENTGATE_FEISHU_ADAPTER_ID")}
+                  placeholder="approval-feishu"
                   onChange={(event) =>
-                    updateRuntimeConfig(definition, onChange, "app_id", event.target.value)
+                    updateRuntimeEnv(
+                      definition,
+                      onChange,
+                      "AGENTGATE_FEISHU_ADAPTER_ID",
+                      event.target.value
+                    )
                   }
                 />
               </LabeledField>
-              <LabeledField label="Feishu App Secret">
+              <LabeledField label="Env.AGENTGATE_FEISHU_INTEGRATION_ID">
                 <Input
-                  value={stringConfig(definition, "app_secret")}
-                  placeholder="app secret"
+                  value={stringEnv(definition, "AGENTGATE_FEISHU_INTEGRATION_ID")}
+                  placeholder={definition.id || "openclaw-main"}
                   onChange={(event) =>
-                    updateRuntimeConfig(definition, onChange, "app_secret", event.target.value)
+                    updateRuntimeEnv(
+                      definition,
+                      onChange,
+                      "AGENTGATE_FEISHU_INTEGRATION_ID",
+                      event.target.value
+                    )
                   }
                 />
               </LabeledField>
-              <LabeledField label="Receive ID">
+              <LabeledField label="Env.FEISHU_RECEIVE_ID">
                 <Input
-                  value={stringConfig(definition, "receive_id")}
+                  value={stringEnv(definition, "FEISHU_RECEIVE_ID")}
                   placeholder="oc_xxx"
                   onChange={(event) =>
-                    updateRuntimeConfig(definition, onChange, "receive_id", event.target.value)
+                    updateRuntimeEnv(definition, onChange, "FEISHU_RECEIVE_ID", event.target.value)
                   }
                 />
               </LabeledField>
-              <LabeledField label="Receive ID Type">
+              <LabeledField label="Env.FEISHU_RECEIVE_ID_TYPE">
                 <Select
-                  value={stringConfig(definition, "receive_id_type") || "chat_id"}
+                  value={stringEnv(definition, "FEISHU_RECEIVE_ID_TYPE") || "chat_id"}
                   onValueChange={(value) =>
-                    updateRuntimeConfig(definition, onChange, "receive_id_type", value)
+                    updateRuntimeEnv(definition, onChange, "FEISHU_RECEIVE_ID_TYPE", value)
                   }
                 >
                   <SelectTrigger>
@@ -969,10 +972,10 @@ function blankDefinition(): IntegrationDefinitionInput {
     expected_surfaces: ["input", "runtime"],
     runtime: {
       managed: true,
-      worker: "feishu",
+      command: ["bun", "packages/feishu-adapter/dist/cli.js"],
       enabled: true,
-      config: {
-        receive_id_type: "chat_id",
+      env: {
+        FEISHU_RECEIVE_ID_TYPE: "chat_id",
       },
       restart: {
         enabled: true,
@@ -997,12 +1000,12 @@ function toDefinitionInput(
   }
 }
 
-function stringConfig(definition: IntegrationDefinitionInput, key: string) {
-  const value = definition.runtime?.config?.[key]
+function stringEnv(definition: IntegrationDefinitionInput, key: string) {
+  const value = definition.runtime?.env?.[key]
   return typeof value === "string" ? value : ""
 }
 
-function updateRuntimeConfig(
+function updateRuntimeEnv(
   definition: IntegrationDefinitionInput,
   onChange: (definition: IntegrationDefinitionInput) => void,
   key: string,
@@ -1012,10 +1015,11 @@ function updateRuntimeConfig(
     ...definition,
     runtime: {
       managed: true,
-      worker: definition.runtime?.worker ?? "feishu",
+      command:
+        definition.runtime?.command ?? ["bun", "packages/feishu-adapter/dist/cli.js"],
       enabled: definition.runtime?.enabled ?? true,
-      config: {
-        ...(definition.runtime?.config ?? {}),
+      env: {
+        ...(definition.runtime?.env ?? {}),
         [key]: value,
       },
       restart: definition.runtime?.restart ?? {
@@ -1025,6 +1029,13 @@ function updateRuntimeConfig(
       },
     },
   })
+}
+
+function splitCommand(value: string) {
+  return value
+    .split(/\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
 }
 
 function uniqueSurfaces(surfaces: Surface[]) {

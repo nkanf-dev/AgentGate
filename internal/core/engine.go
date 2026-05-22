@@ -3,13 +3,10 @@ package core
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -23,25 +20,31 @@ import (
 
 type Engine struct {
 	startedAt time.Time
-	mu        sync.RWMutex
 
+	// Subsystems
+	approvals ApprovalStore
+	vault     SecretVault
+	policy    *PolicyManager
+	runtimes  *RuntimeSupervisor
+
+	// Registrations (Memory-first, DB-confirmed)
+	regMu         sync.RWMutex
 	registrations map[string]adapterState
-	integrations  map[string]types.IntegrationDefinition
-	events        []types.EventEnvelope
-	eventStore    EventStore
-	stateStore    StateStore
-	policyBundle  policy.Bundle
-	policyBundles []policy.Bundle
-	runtimes      map[string]*managedRuntimeState
-	secretHandles map[string]types.SecretHandle
-	secretValues  map[string]string
-	approvals     map[string]approvalState
-	attemptGrants map[string]types.AttemptGrant
-	policyHistory map[int]policy.Bundle
-	policyRecords []policy.VersionRecord
-	detector           scanner.Detector
-	injectionDetector  scanner.InjectionDetector
 
+	// Infrastructure
+	eventStore EventStore
+	stateStore StateStore
+
+	// Temporary config for initialization
+	init struct {
+		detector          scanner.Detector
+		injectionDetector scanner.InjectionDetector
+		policyBundle      policy.Bundle
+		policyBundles     []policy.Bundle
+	}
+
+	eventMu            sync.RWMutex
+	events             []types.EventEnvelope
 	maxEvents          int
 	eventRetentionDays int
 	eventStopCh        chan struct{}
@@ -62,6 +65,7 @@ type StateStore interface {
 	ListIntegrationDefinitions() ([]types.IntegrationDefinition, error)
 	DeleteIntegrationDefinition(integrationID string) error
 	SaveApproval(approval types.ApprovalRecord) error
+	ResolveApprovalAtomic(command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error)
 	GetApproval(approvalID string) (types.ApprovalRecord, bool, error)
 	ListApprovals(limit int) ([]types.ApprovalRecord, error)
 	SaveAttemptGrant(sessionID string, taskID string, attemptID string, approvalID string, expiresAt time.Time) error
@@ -69,6 +73,7 @@ type StateStore interface {
 	SaveSecretHandle(handle types.SecretHandle, value string) error
 	GetSecretHandle(handleID string) (types.SecretHandle, string, bool, error)
 	SavePolicyVersion(bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time) (policy.VersionRecord, error)
+	SavePolicyVersionAtomic(bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time, event types.EventEnvelope) (policy.VersionRecord, error)
 	GetActivePolicyBundle() (policy.Bundle, policy.VersionRecord, bool, error)
 	GetPolicyBundleVersion(version int) (policy.Bundle, policy.VersionRecord, bool, error)
 	ListPolicyVersions(limit int) ([]policy.VersionRecord, error)
@@ -101,34 +106,6 @@ type decisionPatch struct {
 type inputSecretFacts struct {
 	text     string
 	findings []scanner.SecretFinding
-}
-
-type approvalState struct {
-	ApprovalID string
-	RequestID  string
-	SessionID  string
-	TaskID     string
-	AttemptID  string
-	Status     types.ApprovalStatus
-	Reason     string
-	CreatedAt  time.Time
-	ExpiresAt  time.Time
-	ResolvedAt *time.Time
-	OperatorID string
-	Channel    string
-}
-
-type managedRuntimeState struct {
-	IntegrationID string
-	Worker        string
-	Status        string
-	RestartCount  int
-	LastStartedAt *time.Time
-	LastExitedAt  *time.Time
-	LastHealthyAt *time.Time
-	LastError     string
-	Pid           int
-	cancel        context.CancelFunc
 }
 
 type Error struct {
@@ -182,87 +159,52 @@ type PolicyBundlesResponse struct {
 const integrationStaleAfter = 5 * time.Minute
 const secretHandleTTL = 1 * time.Hour
 
-
 var idCounter atomic.Uint64
 
 func NewEngine(options ...Option) *Engine {
 	engine := &Engine{
 		startedAt:          time.Now().UTC(),
 		registrations:      make(map[string]adapterState),
-		integrations:       make(map[string]types.IntegrationDefinition),
 		events:             make([]types.EventEnvelope, 0, 128),
-		policyBundle:       policy.DefaultBundle(),
-		policyBundles:      []policy.Bundle{policy.CorePolicyBundle(), defaultPolicyBundle(policy.DefaultBundle())},
-		runtimes:           make(map[string]*managedRuntimeState),
-		secretHandles:      make(map[string]types.SecretHandle),
-		secretValues:       make(map[string]string),
-		approvals:          make(map[string]approvalState),
-		attemptGrants:      make(map[string]types.AttemptGrant),
-		policyHistory:      make(map[int]policy.Bundle),
-		policyRecords:      make([]policy.VersionRecord, 0, 1),
-		detector:           scanner.RegexDetector{},
-		injectionDetector:  scanner.RegexInjectionDetector{},
 		maxEvents:          10000,
 		eventRetentionDays: 30,
 	}
+	// Defaults
+	engine.init.detector = scanner.RegexDetector{}
+	engine.init.injectionDetector = scanner.RegexInjectionDetector{}
+	engine.init.policyBundle = policy.DefaultBundle()
+	engine.init.policyBundles = []policy.Bundle{policy.CorePolicyBundle(), defaultPolicyBundle(policy.DefaultBundle())}
+
 	for _, option := range options {
 		option(engine)
 	}
-	engine.seedPolicyHistory()
-	engine.bootstrapManagedRuntimes()
+
+	// Initialize subsystems
+	engine.approvals = newApprovalStore(engine.stateStore)
+	engine.vault = newSecretVault(engine.stateStore, engine.init.detector, engine.init.injectionDetector)
+	engine.policy = newPolicyManager(engine.stateStore, engine.init.policyBundle, engine.init.policyBundles)
+	engine.runtimes = newRuntimeSupervisor()
+
 	engine.hydrateFromStore()
+	engine.bootstrapManagedRuntimes()
 	engine.startEventCleanup()
 	return engine
 }
 
-// hydrateFromStore loads approvals, secret handles, and attempt grants from
-// SQLite into memory.  No-op when stateStore is nil.
 func (e *Engine) hydrateFromStore() {
 	if e.stateStore == nil {
 		return
 	}
 
-	var approvalCount, handleCount, grantCount int
-
-	// Only pending approvals — expired ones are handled lazily with events.
-	const hydrationLimit = 1_000_000
-	records, err := e.stateStore.ListApprovals(hydrationLimit)
-	if err != nil {
-		log.Printf("hydrate: list approvals: %v", err)
-	} else {
-		for _, rec := range records {
-			if rec.Status != types.ApprovalPending {
-				continue
-			}
-			e.approvals[rec.ApprovalID] = approvalRecordToState(rec)
-			approvalCount++
-		}
+	if err := e.approvals.Hydrate(); err != nil {
+		log.Printf("hydrate approvals: %v", err)
 	}
-
-	handles, err := e.stateStore.ListSecretHandles()
-	if err != nil {
-		log.Printf("hydrate: list secret handles: %v", err)
-	} else {
-		for _, h := range handles {
-			e.secretHandles[h.Handle.HandleID] = h.Handle
-			e.secretValues[h.Handle.HandleID] = h.Value
-			handleCount++
-		}
+	if err := e.vault.Hydrate(); err != nil {
+		log.Printf("hydrate secret handles: %v", err)
 	}
-
-	grants, err := e.stateStore.ListAttemptGrants()
-	if err != nil {
-		log.Printf("hydrate: list attempt grants: %v", err)
-	} else {
-		for _, g := range grants {
-			key := attemptKey(g.SessionID, g.TaskID, g.AttemptID)
-			e.attemptGrants[key] = g.Grant
-			grantCount++
-		}
+	if err := e.policy.Hydrate(); err != nil {
+		log.Printf("hydrate policy: %v", err)
 	}
-
-	log.Printf("hydrate: loaded %d pending approvals, %d secret handles, %d attempt grants",
-		approvalCount, handleCount, grantCount)
 }
 
 func WithEventStore(store EventStore) Option {
@@ -280,29 +222,29 @@ func WithStateStore(store StateStore) Option {
 func WithPolicyBundle(bundle policy.Bundle) Option {
 	return func(engine *Engine) {
 		bundles := ensureCorePolicy([]policy.Bundle{bundle})
-		engine.policyBundles = bundles
-		engine.policyBundle = aggregateBundles(bundles)
+		engine.init.policyBundles = bundles
+		engine.init.policyBundle = aggregateBundles(bundles)
 	}
 }
 
 func WithPolicyBundles(bundles []policy.Bundle) Option {
 	return func(engine *Engine) {
-		engine.policyBundles = ensureCorePolicy(clonePolicyBundles(bundles))
-		if len(engine.policyBundles) > 0 {
-			engine.policyBundle = aggregateBundles(engine.policyBundles)
+		engine.init.policyBundles = ensureCorePolicy(clonePolicyBundles(bundles))
+		if len(engine.init.policyBundles) > 0 {
+			engine.init.policyBundle = aggregateBundles(engine.init.policyBundles)
 		}
 	}
 }
 
 func WithDetector(d scanner.Detector) Option {
 	return func(engine *Engine) {
-		engine.detector = d
+		engine.init.detector = d
 	}
 }
 
 func WithInjectionDetector(d scanner.InjectionDetector) Option {
 	return func(engine *Engine) {
-		engine.injectionDetector = d
+		engine.init.injectionDetector = d
 	}
 }
 
@@ -326,7 +268,9 @@ func (e *Engine) startEventCleanup() {
 	if e.eventStore == nil {
 		return
 	}
+	e.eventMu.Lock()
 	e.eventStopCh = make(chan struct{})
+	e.eventMu.Unlock()
 	e.pruneOldEvents()
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
@@ -342,26 +286,49 @@ func (e *Engine) startEventCleanup() {
 					}()
 					e.pruneOldEvents()
 				}()
-			case <-e.eventStopCh:
+			case <-e.stopCh():
 				return
 			}
 		}
 	}()
 }
 
+func (e *Engine) stopCh() <-chan struct{} {
+	e.eventMu.RLock()
+	defer e.eventMu.RUnlock()
+	return e.eventStopCh
+}
+
 func (e *Engine) pruneOldEvents() {
 	before := time.Now().UTC().Add(-time.Duration(e.eventRetentionDays) * 24 * time.Hour)
-	n, err := e.eventStore.PruneEvents(before)
-	if err != nil {
-		log.Printf("prune events: %v", err)
+	if e.eventStore != nil {
+		n, err := e.eventStore.PruneEvents(before)
+		if err != nil {
+			log.Printf("prune events: %v", err)
+			return
+		}
+		if n > 0 {
+			log.Printf("prune events: deleted %d events older than %d days", n, e.eventRetentionDays)
+		}
 		return
 	}
-	if n > 0 {
-		log.Printf("prune events: deleted %d events older than %d days", n, e.eventRetentionDays)
+	e.eventMu.Lock()
+	defer e.eventMu.Unlock()
+	cutoff := 0
+	for i, event := range e.events {
+		if event.OccurredAt.After(before) {
+			cutoff = i
+			break
+		}
+	}
+	if cutoff > 0 {
+		e.events = append([]types.EventEnvelope(nil), e.events[cutoff:]...)
 	}
 }
 
 func (e *Engine) Close() {
+	e.eventMu.Lock()
+	defer e.eventMu.Unlock()
 	if e.eventStopCh != nil {
 		close(e.eventStopCh)
 		e.eventStopCh = nil
@@ -373,9 +340,7 @@ func (e *Engine) StartedAt() time.Time {
 }
 
 func (e *Engine) PolicyStatus() map[string]interface{} {
-	e.mu.RLock()
-	bundle := e.policyBundle
-	e.mu.RUnlock()
+	bundle := e.policy.Active().bundle
 	return map[string]interface{}{
 		"version":   bundle.Version,
 		"status":    bundle.StatusValue(),
@@ -389,228 +354,26 @@ func (e *Engine) bootstrapManagedRuntimes() {
 	}
 	definitions, err := e.stateStore.ListIntegrationDefinitions()
 	if err != nil {
+		log.Printf("bootstrap managed runtimes: %v", err)
 		return
 	}
 	for _, definition := range definitions {
-		normalized, normalizeErr := normalizeIntegrationDefinition(definition)
-		if normalizeErr != nil {
-			continue
-		}
-		if err := e.reconcileManagedRuntime(normalized); err != nil {
-			e.setRuntimeError(normalized.ID, "bootstrap_failed", err)
+		if err := e.reconcileManagedRuntime(definition); err != nil {
+			e.runtimes.setError(definition.ID, "bootstrap_failed", err)
 		}
 	}
 }
 
 func (e *Engine) reconcileManagedRuntime(definition types.IntegrationDefinition) error {
-	if definition.Runtime == nil || !definition.Runtime.Managed || !definition.Runtime.Enabled || !definition.Enabled {
-		e.stopManagedRuntime(definition.ID)
-		return nil
-	}
-	return e.ensureManagedRuntime(definition)
-}
-
-func (e *Engine) ensureManagedRuntime(definition types.IntegrationDefinition) error {
-	e.mu.RLock()
-	current := e.runtimes[definition.ID]
-	e.mu.RUnlock()
-	if current != nil && (current.Status == "starting" || current.Status == "running") {
-		return nil
-	}
-	return e.startManagedRuntime(definition)
-}
-
-func (e *Engine) startManagedRuntime(definition types.IntegrationDefinition) error {
-	if definition.Runtime == nil {
-		return nil
-	}
-	command, env, err := managedRuntimeCommand(definition)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
-	cmd.Env = append(os.Environ(), env...)
-	cmd.Dir = resolveRepoRoot()
-
-	now := time.Now().UTC()
-	state := &managedRuntimeState{
-		IntegrationID: definition.ID,
-		Worker:        definition.Runtime.Worker,
-		Status:        "starting",
-		LastStartedAt: &now,
-		cancel:        cancel,
-	}
-
-	e.mu.Lock()
-	e.runtimes[definition.ID] = state
-	e.mu.Unlock()
-
-	if err := cmd.Start(); err != nil {
-		cancel()
-		e.setRuntimeError(definition.ID, "start_failed", err)
-		return err
-	}
-
-	e.mu.Lock()
-	state.Pid = cmd.Process.Pid
-	state.Status = "running"
-	started := time.Now().UTC()
-	state.LastHealthyAt = &started
-	e.mu.Unlock()
-
-	go e.watchManagedRuntime(definition, state, cmd)
-	return nil
-}
-
-func (e *Engine) watchManagedRuntime(definition types.IntegrationDefinition, state *managedRuntimeState, cmd *exec.Cmd) {
-	err := cmd.Wait()
-	exitedAt := time.Now().UTC()
-
-	e.mu.Lock()
-	current := e.runtimes[definition.ID]
-	if current == state {
-		state.LastExitedAt = &exitedAt
-		state.Pid = 0
-		if err != nil {
-			state.Status = "degraded"
-			state.LastError = err.Error()
-		} else {
-			state.Status = "stopped"
-			state.LastError = ""
-		}
-	}
-	e.mu.Unlock()
-
-	if definition.Runtime == nil || !definition.Runtime.Restart.Enabled {
-		return
-	}
-
-	e.mu.RLock()
-	current = e.runtimes[definition.ID]
-	e.mu.RUnlock()
-	if current != state {
-		return
-	}
-
-	if definition.Runtime.Restart.MaxAttempts > 0 && state.RestartCount >= definition.Runtime.Restart.MaxAttempts {
-		return
-	}
-
-	backoff := definition.Runtime.Restart.BackoffMs
-	if backoff <= 0 {
-		backoff = 2000
-	}
-
-	time.Sleep(time.Duration(backoff) * time.Millisecond)
-
-	e.mu.Lock()
-	if latest := e.runtimes[definition.ID]; latest == state {
-		state.RestartCount++
-	}
-	e.mu.Unlock()
-
-	_ = e.startManagedRuntime(definition)
-}
-
-func (e *Engine) stopManagedRuntime(integrationID string) {
-	e.mu.Lock()
-	state := e.runtimes[integrationID]
-	if state != nil {
-		delete(e.runtimes, integrationID)
-	}
-	e.mu.Unlock()
-	if state != nil && state.cancel != nil {
-		state.cancel()
-	}
-}
-
-func (e *Engine) setRuntimeError(integrationID string, status string, err error) {
-	now := time.Now().UTC()
-	e.mu.Lock()
-	state := e.runtimes[integrationID]
-	if state == nil {
-		state = &managedRuntimeState{IntegrationID: integrationID}
-		e.runtimes[integrationID] = state
-	}
-	state.Status = status
-	state.LastExitedAt = &now
-	if err != nil {
-		state.LastError = err.Error()
-	}
-	e.mu.Unlock()
-}
-
-func managedRuntimeCommand(definition types.IntegrationDefinition) ([]string, []string, error) {
-	if definition.Runtime == nil {
-		return nil, nil, nil
-	}
-	switch definition.Runtime.Worker {
-	case "feishu":
-		env, err := feishuRuntimeEnv(definition)
-		if err != nil {
-			return nil, nil, err
-		}
-		return []string{"bun", "packages/feishu-adapter/dist/cli.js"}, env, nil
-	default:
-		return nil, nil, fmt.Errorf("unsupported managed runtime worker %q", definition.Runtime.Worker)
-	}
-}
-
-func feishuRuntimeEnv(definition types.IntegrationDefinition) ([]string, error) {
-	if definition.Runtime == nil {
-		return nil, fmt.Errorf("missing runtime spec")
-	}
-	config := definition.Runtime.Config
-	required := []string{
-		"app_id",
-		"app_secret",
-		"receive_id",
-		"receive_id_type",
-	}
-	for _, key := range required {
-		if strings.TrimSpace(mapStringValue(config, key)) == "" {
-			return nil, fmt.Errorf("runtime config %q is required", key)
-		}
-	}
-	env := []string{
-		fmt.Sprintf("AGENTGATE_BASE_URL=%s", strings.TrimSpace(os.Getenv("AGENTGATE_MANAGED_BASE_URL"))),
-		fmt.Sprintf("AGENTGATE_ADAPTER_TOKEN=%s", strings.TrimSpace(os.Getenv("AGENTGATE_MANAGED_ADAPTER_TOKEN"))),
-		fmt.Sprintf("AGENTGATE_OPERATOR_TOKEN=%s", strings.TrimSpace(os.Getenv("AGENTGATE_MANAGED_OPERATOR_TOKEN"))),
-		fmt.Sprintf("AGENTGATE_FEISHU_ADAPTER_ID=%s", definition.ApprovalChannel),
-		fmt.Sprintf("AGENTGATE_FEISHU_INTEGRATION_ID=%s", definition.ID),
-		fmt.Sprintf("FEISHU_APP_ID=%s", mapStringValue(config, "app_id")),
-		fmt.Sprintf("FEISHU_APP_SECRET=%s", mapStringValue(config, "app_secret")),
-		fmt.Sprintf("FEISHU_RECEIVE_ID=%s", mapStringValue(config, "receive_id")),
-		fmt.Sprintf("FEISHU_RECEIVE_ID_TYPE=%s", mapStringValue(config, "receive_id_type")),
-		fmt.Sprintf("FEISHU_DOMAIN=%s", defaultString(mapStringValue(config, "domain"), "feishu")),
-		fmt.Sprintf("AGENTGATE_FEISHU_POLL_MS=%s", defaultString(mapStringValue(config, "poll_interval_ms"), "2000")),
-	}
-	return env, nil
-}
-
-func resolveRepoRoot() string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "."
-	}
-	return cwd
-}
-
-func defaultString(value string, fallback string) string {
-	if strings.TrimSpace(value) == "" {
-		return fallback
-	}
-	return value
+	return e.runtimes.Ensure(definition)
 }
 
 func (e *Engine) CurrentPolicy() PolicyCurrentResponse {
-	e.mu.RLock()
-	bundle := clonePolicyBundle(e.policyBundle)
-	record := e.activePolicyRecordLocked()
-	e.mu.RUnlock()
-	return PolicyCurrentResponse{Bundle: bundle, Record: record}
+	active := e.policy.Active()
+	return PolicyCurrentResponse{
+		Bundle: active.bundle,
+		Record: active.record,
+	}
 }
 
 func (e *Engine) PolicyBundles(includeArchived bool) (PolicyBundlesResponse, error) {
@@ -621,9 +384,8 @@ func (e *Engine) PolicyBundles(includeArchived bool) (PolicyBundlesResponse, err
 		}
 		return PolicyBundlesResponse{Bundles: bundles}, nil
 	}
-	e.mu.RLock()
-	bundles := clonePolicyBundles(e.policyBundles)
-	e.mu.RUnlock()
+	active := e.policy.Active()
+	bundles := active.bundles
 	if !includeArchived {
 		filtered := bundles[:0]
 		for _, bundle := range bundles {
@@ -633,12 +395,6 @@ func (e *Engine) PolicyBundles(includeArchived bool) (PolicyBundlesResponse, err
 		}
 		bundles = filtered
 	}
-	sort.SliceStable(bundles, func(i, j int) bool {
-		if bundles[i].Priority == bundles[j].Priority {
-			return bundles[i].UpdatedAt.After(bundles[j].UpdatedAt)
-		}
-		return bundles[i].Priority > bundles[j].Priority
-	})
 	return PolicyBundlesResponse{Bundles: bundles}, nil
 }
 
@@ -656,11 +412,10 @@ func (e *Engine) GetPolicyBundle(bundleID string) (policy.Bundle, error) {
 		}
 		return bundle, nil
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	for _, bundle := range e.policyBundles {
+	active := e.policy.Active()
+	for _, bundle := range active.bundles {
 		if bundle.BundleID == bundleID {
-			return clonePolicyBundle(bundle), nil
+			return bundle, nil
 		}
 	}
 	return policy.Bundle{}, errStatus(http.StatusNotFound, "policy_bundle_not_found", "policy bundle was not found")
@@ -677,8 +432,10 @@ func (e *Engine) CreatePolicyBundle(bundle policy.Bundle) (policy.Bundle, error)
 	if err := validateManagedBundle(bundle); err != nil {
 		return policy.Bundle{}, err
 	}
-	if err := e.savePolicyBundle(bundle); err != nil {
-		return policy.Bundle{}, err
+	if e.stateStore != nil {
+		if err := e.stateStore.SavePolicyBundle(bundle); err != nil {
+			return policy.Bundle{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
+		}
 	}
 	return bundle, nil
 }
@@ -695,8 +452,10 @@ func (e *Engine) UpdatePolicyBundle(bundleID string, bundle policy.Bundle) (poli
 	if err := validateManagedBundle(bundle); err != nil {
 		return policy.Bundle{}, err
 	}
-	if err := e.savePolicyBundle(bundle); err != nil {
-		return policy.Bundle{}, err
+	if e.stateStore != nil {
+		if err := e.stateStore.SavePolicyBundle(bundle); err != nil {
+			return policy.Bundle{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
+		}
 	}
 	return bundle, nil
 }
@@ -710,20 +469,6 @@ func (e *Engine) DeletePolicyBundle(bundleID string) error {
 		if err := e.stateStore.ArchivePolicyBundle(bundleID, now); err != nil {
 			return errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
 		}
-	}
-	e.mu.Lock()
-	for index := range e.policyBundles {
-		if e.policyBundles[index].BundleID == bundleID {
-			e.policyBundles[index].Status = policy.BundleStatusArchived
-			e.policyBundles[index].UpdatedAt = now
-			e.policyBundle = aggregateBundles(e.policyBundles)
-			e.mu.Unlock()
-			return nil
-		}
-	}
-	e.mu.Unlock()
-	if e.stateStore == nil {
-		return errStatus(http.StatusNotFound, "policy_bundle_not_found", "policy bundle was not found")
 	}
 	return nil
 }
@@ -746,11 +491,10 @@ func (e *Engine) PublishPolicyBundle(bundleID string) (policy.Bundle, error) {
 	if err := validateManagedBundle(bundle); err != nil {
 		return policy.Bundle{}, err
 	}
-	if err := e.savePolicyBundle(bundle); err != nil {
-		return policy.Bundle{}, err
-	}
-	if err := e.appendPolicyBundleEvent("policy_bundle_published", bundle); err != nil {
-		return policy.Bundle{}, errStatus(http.StatusInternalServerError, "event_store_write_failed", err.Error())
+	if e.stateStore != nil {
+		if err := e.stateStore.SavePolicyBundle(bundle); err != nil {
+			return policy.Bundle{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
+		}
 	}
 	return bundle, nil
 }
@@ -773,16 +517,7 @@ func (e *Engine) PolicyVersions(limit int) (PolicyVersionsResponse, error) {
 		}
 		return PolicyVersionsResponse{Versions: records}, nil
 	}
-	e.mu.RLock()
-	records := append([]policy.VersionRecord(nil), e.policyRecords...)
-	e.mu.RUnlock()
-	sort.SliceStable(records, func(i, j int) bool {
-		return records[i].Version > records[j].Version
-	})
-	if limit > 0 && len(records) > limit {
-		records = records[:limit]
-	}
-	return PolicyVersionsResponse{Versions: records}, nil
+	return PolicyVersionsResponse{Versions: []policy.VersionRecord{e.policy.Active().record}}, nil
 }
 
 func (e *Engine) PublishPolicy(req PolicyPublishRequest) (PolicyCurrentResponse, error) {
@@ -791,40 +526,18 @@ func (e *Engine) PublishPolicy(req PolicyPublishRequest) (PolicyCurrentResponse,
 	}
 
 	now := time.Now().UTC()
-	e.mu.Lock()
-	nextVersion := e.nextPolicyVersionLocked()
-	bundle := clonePolicyBundle(req.Bundle)
-	bundle.Version = nextVersion
-	bundle.Status = "active"
-	bundle.IssuedAt = now
-	if e.stateStore != nil {
-		record, err := e.stateStore.SavePolicyVersion(bundle, req.OperatorID, req.Message, 0, now)
-		if err != nil {
-			e.mu.Unlock()
-			return PolicyCurrentResponse{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
-		}
-		e.activatePolicyLocked(bundle, record)
-	} else {
-		record := policy.VersionRecord{
-			Version:     bundle.Version,
-			Status:      bundle.StatusValue(),
-			Active:      true,
-			RuleCount:   len(bundle.Rules),
-			PublishedAt: now,
-			PublishedBy: req.OperatorID,
-			Message:     req.Message,
-		}
-		e.activatePolicyLocked(bundle, record)
+	event := types.EventEnvelope{
+		EventID:   newID("evt_policy"),
+		EventType: "policy_published",
+		Summary:   "policy published",
+		Metadata: map[string]interface{}{
+			"operator_id":    req.OperatorID,
+			"message":        req.Message,
+			"published_at":   now.Format(time.RFC3339Nano),
+		},
+		OccurredAt: now,
 	}
-	e.policyBundles = ensureCorePolicy([]policy.Bundle{defaultPolicyBundle(bundle)})
-	e.policyBundle = aggregateBundles(e.policyBundles)
-	record := e.activePolicyRecordLocked()
-	e.mu.Unlock()
-
-	if err := e.appendPolicyLifecycleEvent("policy_published", bundle, record, req.OperatorID, req.Message, 0, now); err != nil {
-		return PolicyCurrentResponse{}, errStatus(http.StatusInternalServerError, "event_store_write_failed", err.Error())
-	}
-	return PolicyCurrentResponse{Bundle: clonePolicyBundle(bundle), Record: record}, nil
+	return e.policy.Publish(req.Bundle, req.OperatorID, req.Message, 0, now, event)
 }
 
 func (e *Engine) RollbackPolicy(req PolicyRollbackRequest) (PolicyCurrentResponse, error) {
@@ -833,377 +546,19 @@ func (e *Engine) RollbackPolicy(req PolicyRollbackRequest) (PolicyCurrentRespons
 	}
 
 	now := time.Now().UTC()
-	e.mu.Lock()
-	sourceBundle, found, err := e.policyBundleForVersionLocked(req.Version)
-	if err != nil {
-		e.mu.Unlock()
-		return PolicyCurrentResponse{}, err
-	}
-	if !found {
-		e.mu.Unlock()
-		return PolicyCurrentResponse{}, errStatus(http.StatusNotFound, "policy_version_not_found", "policy version was not found")
-	}
-
-	nextVersion := e.nextPolicyVersionLocked()
-	bundle := clonePolicyBundle(sourceBundle)
-	bundle.Version = nextVersion
-	bundle.Status = "active"
-	bundle.IssuedAt = now
-	message := req.Message
-	if message == "" {
-		message = fmt.Sprintf("rollback to policy version %d", req.Version)
-	}
-	if e.stateStore != nil {
-		record, err := e.stateStore.SavePolicyVersion(bundle, req.OperatorID, message, req.Version, now)
-		if err != nil {
-			e.mu.Unlock()
-			return PolicyCurrentResponse{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
-		}
-		e.activatePolicyLocked(bundle, record)
-	} else {
-		record := policy.VersionRecord{
-			Version:       bundle.Version,
-			Status:        bundle.StatusValue(),
-			Active:        true,
-			RuleCount:     len(bundle.Rules),
-			PublishedAt:   now,
-			PublishedBy:   req.OperatorID,
-			Message:       message,
-			SourceVersion: req.Version,
-		}
-		e.activatePolicyLocked(bundle, record)
-	}
-	e.policyBundles = ensureCorePolicy([]policy.Bundle{defaultPolicyBundle(bundle)})
-	e.policyBundle = aggregateBundles(e.policyBundles)
-	record := e.activePolicyRecordLocked()
-	e.mu.Unlock()
-
-	if err := e.appendPolicyLifecycleEvent("policy_rolled_back", bundle, record, req.OperatorID, message, req.Version, now); err != nil {
-		return PolicyCurrentResponse{}, errStatus(http.StatusInternalServerError, "event_store_write_failed", err.Error())
-	}
-	return PolicyCurrentResponse{Bundle: clonePolicyBundle(bundle), Record: record}, nil
-}
-
-func (e *Engine) seedPolicyHistory() {
-	bundle := clonePolicyBundle(e.policyBundle)
-	record := policy.VersionRecord{
-		Version:     bundle.Version,
-		Status:      bundle.StatusValue(),
-		Active:      true,
-		RuleCount:   len(bundle.Rules),
-		PublishedAt: bundle.IssuedAt,
-		Message:     "initial policy",
-	}
-	e.policyHistory[bundle.Version] = bundle
-	e.policyRecords = append(e.policyRecords, record)
-}
-
-func (e *Engine) activePolicyRecordLocked() policy.VersionRecord {
-	for _, record := range e.policyRecords {
-		if record.Active && record.Version == e.policyBundle.Version {
-			return record
-		}
-	}
-	return policy.VersionRecord{
-		Version:     e.policyBundle.Version,
-		Status:      e.policyBundle.StatusValue(),
-		Active:      true,
-		RuleCount:   len(e.policyBundle.Rules),
-		PublishedAt: e.policyBundle.IssuedAt,
-	}
-}
-
-func (e *Engine) nextPolicyVersionLocked() int {
-	next := e.policyBundle.Version + 1
-	if e.stateStore != nil {
-		if records, err := e.stateStore.ListPolicyVersions(1); err == nil && len(records) > 0 {
-			next = records[0].Version + 1
-		}
-	}
-	for _, record := range e.policyRecords {
-		if record.Version >= next {
-			next = record.Version + 1
-		}
-	}
-	return next
-}
-
-func (e *Engine) activatePolicyLocked(bundle policy.Bundle, record policy.VersionRecord) {
-	for index := range e.policyRecords {
-		e.policyRecords[index].Active = false
-		e.policyRecords[index].Status = "superseded"
-	}
-	record.Active = true
-	e.policyHistory[bundle.Version] = clonePolicyBundle(bundle)
-	replaced := false
-	for index := range e.policyRecords {
-		if e.policyRecords[index].Version == record.Version {
-			e.policyRecords[index] = record
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		e.policyRecords = append(e.policyRecords, record)
-	}
-}
-
-func (e *Engine) policyBundleForVersionLocked(version int) (policy.Bundle, bool, error) {
-	if bundle, ok := e.policyHistory[version]; ok {
-		return clonePolicyBundle(bundle), true, nil
-	}
-	if e.stateStore == nil {
-		return policy.Bundle{}, false, nil
-	}
-	bundle, _, found, err := e.stateStore.GetPolicyBundleVersion(version)
-	if err != nil {
-		return policy.Bundle{}, false, errStatus(http.StatusInternalServerError, "state_store_read_failed", err.Error())
-	}
-	if !found {
-		return policy.Bundle{}, false, nil
-	}
-	e.policyHistory[version] = clonePolicyBundle(bundle)
-	return clonePolicyBundle(bundle), true, nil
-}
-
-func (e *Engine) appendPolicyLifecycleEvent(eventType string, bundle policy.Bundle, record policy.VersionRecord, operatorID string, message string, sourceVersion int, now time.Time) error {
-	return e.appendEvent(types.EventEnvelope{
+	event := types.EventEnvelope{
 		EventID:   newID("evt_policy"),
-		EventType: eventType,
-		Summary:   fmt.Sprintf("policy version %d active", bundle.Version),
+		EventType: "policy_rolled_back",
+		Summary:   fmt.Sprintf("rolled back to version %d", req.Version),
 		Metadata: map[string]interface{}{
-			"policy_version": bundle.Version,
-			"policy_status":  bundle.StatusValue(),
-			"rule_count":     len(bundle.Rules),
-			"operator_id":    operatorID,
-			"message":        message,
-			"source_version": sourceVersion,
-			"published_at":   record.PublishedAt.Format(time.RFC3339Nano),
+			"operator_id":    req.OperatorID,
+			"message":        req.Message,
+			"source_version": req.Version,
+			"published_at":   now.Format(time.RFC3339Nano),
 		},
 		OccurredAt: now,
-	})
-}
-
-func policyValidationSuccess(bundle policy.Bundle) PolicyValidationResponse {
-	surfaceRules := map[types.Surface]int{
-		types.SurfaceInput:    0,
-		types.SurfaceRuntime:  0,
-		types.SurfaceResource: 0,
 	}
-	for _, rule := range bundle.Rules {
-		surfaceRules[rule.Surface]++
-	}
-	warnings := make([]string, 0)
-	for _, surface := range []types.Surface{types.SurfaceInput, types.SurfaceRuntime, types.SurfaceResource} {
-		if surfaceRules[surface] == 0 {
-			warnings = append(warnings, fmt.Sprintf("policy has no rules for %s surface", surface))
-		}
-	}
-	return PolicyValidationResponse{
-		Valid:        true,
-		Warnings:     warnings,
-		Version:      bundle.Version,
-		RuleCount:    len(bundle.Rules),
-		SurfaceRules: surfaceRules,
-	}
-}
-
-func clonePolicyBundle(bundle policy.Bundle) policy.Bundle {
-	payload, err := json.Marshal(bundle)
-	if err != nil {
-		return bundle
-	}
-	var cloned policy.Bundle
-	if err := json.Unmarshal(payload, &cloned); err != nil {
-		return bundle
-	}
-	return cloned
-}
-
-func defaultPolicyBundle(bundle policy.Bundle) policy.Bundle {
-	issuedAt := bundle.IssuedAt
-	if issuedAt.IsZero() {
-		issuedAt = time.Now().UTC()
-	}
-	result := clonePolicyBundle(bundle)
-	result.BundleID = "default"
-	result.Name = "Default bundle"
-	result.Description = "Bootstrap policy bundle"
-	result.Priority = 100
-	result.Status = policy.BundleStatusActive
-	result.CreatedAt = issuedAt
-	result.UpdatedAt = issuedAt
-	return result
-}
-
-func normalizeManagedBundle(bundle policy.Bundle, now time.Time) policy.Bundle {
-	bundle.BundleID = strings.TrimSpace(bundle.BundleID)
-	bundle.Name = strings.TrimSpace(bundle.Name)
-	bundle.Description = strings.TrimSpace(bundle.Description)
-	bundle.Status = strings.TrimSpace(bundle.Status)
-	if bundle.Status == "" {
-		bundle.Status = policy.BundleStatusInactive
-	}
-	if bundle.IssuedAt.IsZero() {
-		bundle.IssuedAt = now
-	}
-	return bundle
-}
-
-func validateManagedBundle(bundle policy.Bundle) error {
-	if bundle.Name == "" {
-		return errBadRequest("invalid_policy_bundle", "name is required")
-	}
-	switch bundle.Status {
-	case policy.BundleStatusActive, policy.BundleStatusInactive, policy.BundleStatusArchived:
-	default:
-		return errBadRequest("invalid_policy_bundle", "status must be active, inactive, or archived")
-	}
-	if bundle.Priority < 0 {
-		return errBadRequest("invalid_policy_bundle", "priority must be non-negative")
-	}
-	if err := bundle.Validate(); err != nil {
-		return errBadRequest("invalid_policy_bundle", err.Error())
-	}
-	return nil
-}
-
-func (e *Engine) savePolicyBundle(bundle policy.Bundle) error {
-	if e.stateStore != nil {
-		if err := e.stateStore.SavePolicyBundle(bundle); err != nil {
-			return errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
-		}
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	replaced := false
-	for index := range e.policyBundles {
-		if e.policyBundles[index].BundleID == bundle.BundleID {
-			e.policyBundles[index] = clonePolicyBundle(bundle)
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		e.policyBundles = append(e.policyBundles, clonePolicyBundle(bundle))
-	}
-	e.policyBundle = aggregateBundles(e.policyBundles)
-	return nil
-}
-
-func (e *Engine) appendPolicyBundleEvent(eventType string, bundle policy.Bundle) error {
-	now := time.Now().UTC()
-	return e.appendEvent(types.EventEnvelope{
-		EventID:   newID("evt_policy_bundle"),
-		EventType: eventType,
-		Summary:   bundle.Name,
-		Metadata: map[string]interface{}{
-			"bundle_id":       bundle.BundleID,
-			"bundle_name":     bundle.Name,
-			"bundle_priority": bundle.Priority,
-			"bundle_status":   bundle.Status,
-			"rule_count":      len(bundle.Rules),
-		},
-		OccurredAt: now,
-	})
-}
-
-func clonePolicyBundles(bundles []policy.Bundle) []policy.Bundle {
-	result := make([]policy.Bundle, 0, len(bundles))
-	for _, bundle := range bundles {
-		result = append(result, clonePolicyBundle(bundle))
-	}
-	return result
-}
-
-func ensureCorePolicy(bundles []policy.Bundle) []policy.Bundle {
-	hasCore := false
-	for i := range bundles {
-		if bundles[i].BundleID == "core" {
-			// CorePolicy must have at least default_deny and resource_unsupported_target.
-			// Replace with canonical CorePolicyBundle if rules are missing.
-			if len(bundles[i].Rules) < 2 {
-				bundles[i] = policy.CorePolicyBundle()
-			}
-			hasCore = true
-		}
-		if bundles[i].Status == "active_default" {
-			bundles[i].Status = policy.BundleStatusActive
-		}
-	}
-	if hasCore {
-		return bundles
-	}
-	return append([]policy.Bundle{policy.CorePolicyBundle()}, bundles...)
-}
-
-func aggregateBundles(bundles []policy.Bundle) policy.Bundle {
-	bundle := policy.DefaultBundle()
-	bundle.Status = "bundles_active"
-	bundle.IssuedAt = time.Now().UTC()
-	bundle.Rules = nil
-
-	corePolicy := policy.CorePolicyBundle()
-	bundle.Rules = append(bundle.Rules, corePolicy.Rules...)
-
-	maxVersion := 0
-	mergedTools := append([]string(nil), bundle.RuntimePolicy.RequireApprovalTools...)
-	mergedSideEffects := append([]types.SideEffect(nil), bundle.RuntimePolicy.RequireApprovalSideEffects...)
-	mergedOpenWorld := bundle.RuntimePolicy.RequireApprovalOpenWorld
-	mergedTimeout := bundle.RuntimePolicy.ApprovalTimeout
-
-	for _, managedBundle := range bundles {
-		if managedBundle.BundleID == "core" {
-			continue
-		}
-		if managedBundle.Status != policy.BundleStatusActive {
-			continue
-		}
-		if managedBundle.Version > maxVersion {
-			maxVersion = managedBundle.Version
-		}
-		bundle.Rules = append(bundle.Rules, managedBundle.Rules...)
-
-		rp := managedBundle.RuntimePolicy
-		mergedTools = appendUnique(mergedTools, rp.RequireApprovalTools)
-		mergedSideEffects = appendUnique(mergedSideEffects, rp.RequireApprovalSideEffects)
-		if rp.RequireApprovalOpenWorld {
-			mergedOpenWorld = true
-		}
-		if mergedTimeout.Duration == 0 && rp.ApprovalTimeout.Duration > 0 {
-			mergedTimeout = rp.ApprovalTimeout
-		}
-	}
-	bundle.Version = maxVersion
-	bundle.RuntimePolicy = policy.RuntimePolicy{
-		RequireApprovalTools:       mergedTools,
-		RequireApprovalSideEffects: mergedSideEffects,
-		RequireApprovalOpenWorld:   mergedOpenWorld,
-		ApprovalTimeout:            mergedTimeout,
-	}
-
-	// When no user-managed rules exist (only CorePolicy), fall back to
-	// DefaultBundle rules as a sensible baseline. An empty bundle intentionally
-	// targeting deny-all should include at least one explicit deny rule so this
-	// fallback does not activate.
-	if len(bundle.Rules) == len(corePolicy.Rules) {
-		bundle.Rules = append(bundle.Rules, policy.DefaultBundle().Rules...)
-	}
-	return bundle
-}
-
-func appendUnique[T comparable](base, additions []T) []T {
-	seen := make(map[T]bool, len(base))
-	for _, s := range base {
-		seen[s] = true
-	}
-	for _, s := range additions {
-		if !seen[s] {
-			base = append(base, s)
-			seen[s] = true
-		}
-	}
-	return base
+	return e.policy.Rollback(req.Version, req.OperatorID, req.Message, now, event)
 }
 
 func (e *Engine) Integrations() (types.IntegrationsResponse, error) {
@@ -1259,10 +614,6 @@ func (e *Engine) SaveIntegration(definition types.IntegrationDefinition) (types.
 		if err := e.stateStore.SaveIntegrationDefinition(normalized, now); err != nil {
 			return types.IntegrationDefinition{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
 		}
-	} else {
-		e.mu.Lock()
-		e.integrations[normalized.ID] = normalized
-		e.mu.Unlock()
 	}
 	adapters, err := e.adapterCoverages()
 	if err != nil {
@@ -1278,7 +629,7 @@ func (e *Engine) DeleteIntegration(integrationID string) error {
 	if integrationID == "" {
 		return errBadRequest("missing_integration_id", "integration id is required")
 	}
-	e.stopManagedRuntime(integrationID)
+	e.runtimes.Stop(integrationID)
 	if e.stateStore != nil {
 		if err := e.stateStore.DeleteIntegrationDefinition(integrationID); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -1288,13 +639,7 @@ func (e *Engine) DeleteIntegration(integrationID string) error {
 		}
 		return nil
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if _, found := e.integrations[integrationID]; !found {
-		return errStatus(http.StatusNotFound, "integration_not_found", "integration definition was not found")
-	}
-	delete(e.integrations, integrationID)
-	return nil
+	return errStatus(http.StatusNotFound, "integration_not_found", "integration definition was not found")
 }
 
 func (e *Engine) integrationDefinitions() ([]types.IntegrationDefinition, error) {
@@ -1305,13 +650,7 @@ func (e *Engine) integrationDefinitions() ([]types.IntegrationDefinition, error)
 		}
 		return definitions, nil
 	}
-	e.mu.RLock()
-	definitions := make([]types.IntegrationDefinition, 0, len(e.integrations))
-	for _, definition := range e.integrations {
-		definitions = append(definitions, definition)
-	}
-	e.mu.RUnlock()
-	return definitions, nil
+	return []types.IntegrationDefinition{}, nil
 }
 
 func (e *Engine) integrationDefinition(integrationID string) (types.IntegrationDefinition, bool, error) {
@@ -1322,10 +661,7 @@ func (e *Engine) integrationDefinition(integrationID string) (types.IntegrationD
 		}
 		return definition, found, nil
 	}
-	e.mu.RLock()
-	definition, found := e.integrations[integrationID]
-	e.mu.RUnlock()
-	return definition, found, nil
+	return types.IntegrationDefinition{}, false, nil
 }
 
 func (e *Engine) adapterCoverages() ([]types.AdapterCoverage, error) {
@@ -1336,7 +672,7 @@ func (e *Engine) adapterCoverages() ([]types.AdapterCoverage, error) {
 		}
 		return adapters, nil
 	}
-	e.mu.RLock()
+	e.regMu.RLock()
 	adapters := make([]types.AdapterCoverage, 0, len(e.registrations))
 	for _, state := range e.registrations {
 		reg := state.registration
@@ -1351,14 +687,14 @@ func (e *Engine) adapterCoverages() ([]types.AdapterCoverage, error) {
 			LastSeenAt:         state.lastSeenAt,
 		})
 	}
-	e.mu.RUnlock()
+	e.regMu.RUnlock()
 	return adapters, nil
 }
 
 func (e *Engine) hydrateIntegrationHealth(definition types.IntegrationDefinition, adapters []types.AdapterCoverage, now time.Time) types.IntegrationDefinition {
 	definition.Health = types.IntegrationHealth{ComputedAt: now}
 	definition.MatchedAdapters = nil
-	definition.Health.Runtime = e.runtimeView(definition.ID)
+	definition.Health.Runtime = e.runtimes.View(definition.ID)
 	if !definition.Enabled {
 		definition.Health.Status = types.IntegrationHealthDisabled
 		return definition
@@ -1410,138 +746,6 @@ func (e *Engine) hydrateIntegrationHealth(definition types.IntegrationDefinition
 	return definition
 }
 
-func (e *Engine) runtimeView(integrationID string) *types.IntegrationRuntimeView {
-	e.mu.RLock()
-	state := e.runtimes[integrationID]
-	e.mu.RUnlock()
-	if state == nil {
-		return nil
-	}
-	view := &types.IntegrationRuntimeView{
-		Managed:      true,
-		Worker:       state.Worker,
-		Status:       state.Status,
-		RestartCount: state.RestartCount,
-		LastError:    state.LastError,
-		Pid:          state.Pid,
-	}
-	if state.LastStartedAt != nil {
-		startedAt := *state.LastStartedAt
-		view.LastStartedAt = &startedAt
-	}
-	if state.LastExitedAt != nil {
-		exitedAt := *state.LastExitedAt
-		view.LastExitedAt = &exitedAt
-	}
-	if state.LastHealthyAt != nil {
-		healthyAt := *state.LastHealthyAt
-		view.LastHealthyAt = &healthyAt
-	}
-	return view
-}
-
-func runtimeHealthStatus(view *types.IntegrationRuntimeView) types.IntegrationHealthStatus {
-	if view == nil || !view.Managed {
-		return ""
-	}
-	switch view.Status {
-	case "starting":
-		return types.IntegrationHealthStarting
-	case "degraded", "error":
-		return types.IntegrationHealthDegraded
-	default:
-		return ""
-	}
-}
-
-func adapterHealthStatus(adapter types.AdapterCoverage, now time.Time) types.IntegrationHealthStatus {
-	if now.Sub(adapter.LastSeenAt) > integrationStaleAfter {
-		return types.IntegrationHealthStale
-	}
-	return types.IntegrationHealthConnected
-}
-
-func integrationStatusRank(status types.IntegrationHealthStatus) int {
-	switch status {
-	case types.IntegrationHealthConnected:
-		return 0
-	case types.IntegrationHealthStarting:
-		return 1
-	case types.IntegrationHealthDegraded:
-		return 2
-	case types.IntegrationHealthStale:
-		return 3
-	case types.IntegrationHealthMissing:
-		return 4
-	case types.IntegrationHealthUnmanaged:
-		return 5
-	case types.IntegrationHealthDisabled:
-		return 6
-	default:
-		return 7
-	}
-}
-
-func normalizeIntegrationDefinition(definition types.IntegrationDefinition) (types.IntegrationDefinition, error) {
-	definition.ID = strings.TrimSpace(definition.ID)
-	definition.Name = strings.TrimSpace(definition.Name)
-	definition.Kind = strings.TrimSpace(definition.Kind)
-	definition.ApprovalChannel = strings.TrimSpace(definition.ApprovalChannel)
-	definition.Health = types.IntegrationHealth{}
-	definition.MatchedAdapters = nil
-	if definition.ID == "" {
-		return types.IntegrationDefinition{}, fmt.Errorf("id is required")
-	}
-	if !isCompactToken(definition.ID) {
-		return types.IntegrationDefinition{}, fmt.Errorf("id must be a compact token")
-	}
-	if definition.Name == "" {
-		return types.IntegrationDefinition{}, fmt.Errorf("name is required")
-	}
-	if definition.Kind == "" {
-		return types.IntegrationDefinition{}, fmt.Errorf("kind is required")
-	}
-	if !isCompactToken(definition.Kind) {
-		return types.IntegrationDefinition{}, fmt.Errorf("kind must be a compact token")
-	}
-	if definition.ApprovalChannel != "" && !isCompactToken(definition.ApprovalChannel) {
-		return types.IntegrationDefinition{}, fmt.Errorf("approval_channel must be a compact token")
-	}
-	if definition.Runtime != nil {
-		if err := validateIntegrationRuntimeSpec(*definition.Runtime); err != nil {
-			return types.IntegrationDefinition{}, err
-		}
-	}
-	seenSurfaces := make(map[types.Surface]struct{}, len(definition.ExpectedSurfaces))
-	for _, surface := range definition.ExpectedSurfaces {
-		if !isValidSurface(surface) {
-			return types.IntegrationDefinition{}, fmt.Errorf("unsupported expected surface %q", surface)
-		}
-		if _, exists := seenSurfaces[surface]; exists {
-			return types.IntegrationDefinition{}, fmt.Errorf("duplicate expected surface %q", surface)
-		}
-		seenSurfaces[surface] = struct{}{}
-	}
-	return definition, nil
-}
-
-func validateIntegrationRuntimeSpec(spec types.IntegrationRuntimeSpec) error {
-	spec.Worker = strings.TrimSpace(spec.Worker)
-	if spec.Worker == "" {
-		return fmt.Errorf("runtime.worker is required")
-	}
-	if !isCompactToken(spec.Worker) {
-		return fmt.Errorf("runtime.worker must be a compact token")
-	}
-	if spec.Restart.MaxAttempts < 0 {
-		return fmt.Errorf("runtime.restart.max_attempts must be >= 0")
-	}
-	if spec.Restart.BackoffMs < 0 {
-		return fmt.Errorf("runtime.restart.backoff_ms must be >= 0")
-	}
-	return nil
-}
-
 func (e *Engine) RegisterAdapter(req types.AdapterRegistration) (types.RegistrationResult, error) {
 	if req.AdapterID == "" {
 		return types.RegistrationResult{}, errBadRequest("missing_adapter_id", "adapter_id is required")
@@ -1554,19 +758,18 @@ func (e *Engine) RegisterAdapter(req types.AdapterRegistration) (types.Registrat
 	}
 
 	now := time.Now().UTC()
-	e.mu.Lock()
-	e.registrations[req.AdapterID] = adapterState{
-		registration: req,
-		registeredAt: now,
-		lastSeenAt:   now,
-	}
-	e.mu.Unlock()
-
 	if e.stateStore != nil {
 		if err := e.stateStore.UpsertAdapterRegistration(req, now, now); err != nil {
 			return types.RegistrationResult{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
 		}
 	}
+	e.regMu.Lock()
+	e.registrations[req.AdapterID] = adapterState{
+		registration: req,
+		registeredAt: now,
+		lastSeenAt:   now,
+	}
+	e.regMu.Unlock()
 
 	metadata := map[string]interface{}{"adapter_kind": req.AdapterKind, "host_kind": req.Host.Kind}
 	if req.IntegrationID != "" {
@@ -1621,7 +824,7 @@ func (e *Engine) Coverage() types.CoverageResponse {
 		response.Warnings = append(response.Warnings, "coverage state store unavailable")
 	}
 
-	e.mu.RLock()
+	e.regMu.RLock()
 	for _, state := range e.registrations {
 		reg := state.registration
 		response.Adapters = append(response.Adapters, types.AdapterCoverage{
@@ -1638,7 +841,7 @@ func (e *Engine) Coverage() types.CoverageResponse {
 			response.Surfaces[surface]++
 		}
 	}
-	e.mu.RUnlock()
+	e.regMu.RUnlock()
 
 	for _, surface := range []types.Surface{types.SurfaceInput, types.SurfaceRuntime, types.SurfaceResource} {
 		if response.Surfaces[surface] == 0 {
@@ -1650,49 +853,9 @@ func (e *Engine) Coverage() types.CoverageResponse {
 }
 
 func (e *Engine) Approvals(limit int) (types.ApprovalsResponse, error) {
-	now := time.Now().UTC()
-	expired := make([]approvalState, 0)
-	if e.stateStore != nil {
-		approvals, err := e.stateStore.ListApprovals(limit)
-		if err != nil {
-			return types.ApprovalsResponse{}, errStatus(http.StatusInternalServerError, "state_store_read_failed", err.Error())
-		}
-		for index, approval := range approvals {
-			next, changed := expireApprovalIfNeeded(approval, now)
-			if changed {
-				approvals[index] = next
-				if err := e.stateStore.SaveApproval(next); err != nil {
-					return types.ApprovalsResponse{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
-				}
-				e.mu.Lock()
-				e.approvals[next.ApprovalID] = approvalRecordToState(next)
-				e.mu.Unlock()
-				expired = append(expired, approvalRecordToState(next))
-			}
-		}
-		if err := e.appendApprovalExpiryEvents(expired, now); err != nil {
-			return types.ApprovalsResponse{}, errStatus(http.StatusInternalServerError, "event_store_write_failed", err.Error())
-		}
-		return types.ApprovalsResponse{Approvals: approvals}, nil
-	}
-
-	e.mu.Lock()
-	approvals := make([]types.ApprovalRecord, 0, len(e.approvals))
-	for id, approval := range e.approvals {
-		record, changed := expireApprovalIfNeeded(approvalStateToRecord(approval), now)
-		if changed {
-			expiredState := approvalRecordToState(record)
-			e.approvals[id] = expiredState
-			expired = append(expired, expiredState)
-		}
-		approvals = append(approvals, record)
-	}
-	e.mu.Unlock()
-	sort.SliceStable(approvals, func(i, j int) bool {
-		return approvals[i].CreatedAt.After(approvals[j].CreatedAt)
-	})
-	if err := e.appendApprovalExpiryEvents(expired, now); err != nil {
-		return types.ApprovalsResponse{}, errStatus(http.StatusInternalServerError, "event_store_write_failed", err.Error())
+	approvals, err := e.approvals.List(limit)
+	if err != nil {
+		return types.ApprovalsResponse{}, errStatus(http.StatusInternalServerError, "state_store_read_failed", err.Error())
 	}
 	return types.ApprovalsResponse{Approvals: approvals}, nil
 }
@@ -1719,10 +882,9 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 	var appliedRules []string
 	var obligations []types.Obligation
 	var newTaints []types.Taint
-	e.mu.RLock()
-	activePolicy := e.policyBundle
-	activeBundles := clonePolicyBundles(e.policyBundles)
-	e.mu.RUnlock()
+
+	activePolicy := e.policy.Active()
+
 	decisionReady := false
 	if patch := validateDecisionRequest(req, surface); patch != nil {
 		policyEvaluation = requestValidationEvaluation(patch)
@@ -1736,24 +898,37 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 	var inputFacts inputSecretFacts
 	var sessionFacts types.SessionFacts
 	if !decisionReady {
-		// Enrichment: detect secrets/injections and map to taints.
-		inputFacts = e.enrichPolicyFacts(&req)
+		var enrichErr error
+		inputFacts, enrichErr = e.enrichPolicyFacts(&req)
+		if enrichErr != nil {
+			policyEvaluation = requestValidationEvaluation(&decisionPatch{
+				effect:       types.EffectDeny,
+				reason:       "secret_detection_failed",
+				appliedRules: []string{"core.secret_detection.fail_closed"},
+				obligations:  []types.Obligation{abortTaskObligation()},
+			})
+			effect = types.EffectDeny
+			reason = "secret_detection_failed"
+			appliedRules = []string{"core.secret_detection.fail_closed"}
+			obligations = []types.Obligation{abortTaskObligation()}
+			decisionReady = true
+		}
 
-		// Source tracking: TaintUntrustedExternal is a source-level annotation,
-		// not content detection. Set when the runtime request indicates external
-		// world interaction.
 		if surface == types.SurfaceRuntime {
 			if req.Action.OpenWorld || containsSideEffect(req.Action.SideEffects, types.SideEffectNetworkEgress) {
 				req.Context.Taints = appendTaintOnce(req.Context.Taints, types.TaintUntrustedExternal)
 			}
 		}
 
-		// Snapshot taints before session merge. This captures both adapter
-		// pre-set taints and taints added by enrichment/source tracking.
-		// mergeTaints below deduplicates, so passing the full slice is safe.
 		newTaints = append([]types.Taint(nil), req.Context.Taints...)
 
-		sessionFacts = e.sessionFactsForDecision(req.Session.SessionID)
+		var err error
+		sessionFacts, err = e.sessionFactsForDecision(req.Session.SessionID)
+		if err != nil {
+			log.Printf("session facts read failed, proceeding with empty facts: %v", err)
+			sessionFacts = types.SessionFacts{}
+		}
+
 		req.Context.Taints = mergeTaints(req.Context.Taints, sessionFacts.Taints)
 		if len(inputFacts.findings) > 0 {
 			if req.Context.Raw == nil {
@@ -1763,10 +938,8 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 		}
 	}
 
-	// Grant check: short-circuit after enrichment so taints are always
-	// accumulated regardless of whether a grant matches.
 	if !decisionReady && req.RequestKind == types.RequestKindToolAttempt && surface == types.SurfaceRuntime {
-		if grant, ok := e.hasValidGrant(req.Session, now); ok {
+		if grant, ok, err := e.approvals.ValidGrant(req.Session, now); err == nil && ok {
 			effect = types.EffectAllowWithAudit
 			reason = "user_allow_once_valid"
 			appliedRules = []string{"runtime.high_risk.allow_once_grant"}
@@ -1777,11 +950,19 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 	}
 
 	if !decisionReady {
-		policyEvaluation = policy.EvaluateBundles(activeBundles, req, sessionFacts)
+		policyEvaluation = policy.EvaluateBundles(activePolicy.bundles, req, sessionFacts)
 		effect = policyEvaluation.Effect
 		reason = policyEvaluation.ReasonCode
 		appliedRules = append([]string(nil), policyEvaluation.AppliedRules...)
 		obligations = append([]types.Obligation(nil), policyEvaluation.Obligations...)
+
+		// Safety check: EffectApprovalRequired must have an approval_request obligation.
+		if effect == types.EffectApprovalRequired && !hasObligation(obligations, types.ObligationApprovalRequest) {
+			effect = types.EffectDeny
+			reason = "broken_approval_rule"
+			appliedRules = append(appliedRules, "core.safety.missing_obligation")
+			obligations = []types.Obligation{abortTaskObligation()}
+		}
 	}
 
 	if enriched, patch := e.executeObligations(obligations, req, inputFacts, reason, now); patch != nil {
@@ -1793,9 +974,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 		obligations = enriched
 	}
 
-	if !isValidSurface(surface) {
-		// Unsupported surfaces are already denied by request validation.
-	} else if !e.hasCoverage(surface) {
+	if isValidSurface(surface) && !e.hasCoverage(surface) {
 		warnings = append(warnings, fmt.Sprintf("no adapter registration currently covers %s surface", surface))
 	}
 
@@ -1809,7 +988,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 		Explanation: types.DecisionExplanation{
 			Summary:     decisionSummary(reason),
 			Warnings:    warnings,
-			PolicyTrace: policyTrace(activePolicy, policyEvaluation),
+			PolicyTrace: policyTrace(activePolicy.bundle, policyEvaluation),
 		},
 		DecidedAt: now,
 	}
@@ -1877,7 +1056,14 @@ func (e *Engine) Report(req types.ReportRequest) (types.ReportResponse, error) {
 	}
 
 	now := time.Now().UTC()
-	redactedMetadata, redacted := redactAuditValue(req.Metadata, e.detector)
+	redactedMetadata, _, err := e.vault.RedactValue(context.Background(), req.Metadata)
+	if err != nil {
+		return types.ReportResponse{}, errStatus(http.StatusInternalServerError, "audit_redaction_failed", err.Error())
+	}
+	redactedError, err := e.vault.RedactString(context.Background(), req.ErrorMessage)
+	if err != nil {
+		return types.ReportResponse{}, errStatus(http.StatusInternalServerError, "audit_redaction_failed", err.Error())
+	}
 	if err := e.appendEvent(types.EventEnvelope{
 		EventID:    newID("evt_report"),
 		EventType:  "adapter_report",
@@ -1887,10 +1073,9 @@ func (e *Engine) Report(req types.ReportRequest) (types.ReportResponse, error) {
 		Surface:    req.Surface,
 		Summary:    req.Outcome,
 		Metadata: map[string]interface{}{
-			"error_message": redactAuditString(req.ErrorMessage, e.detector),
+			"error_message": redactedError,
 			"metadata":      redactedMetadata,
 			"obligations":   obligationTypes(req.Obligations),
-			"redacted":      redacted,
 		},
 		OccurredAt: now,
 	}); err != nil {
@@ -1906,163 +1091,60 @@ func (e *Engine) ResolveApproval(approvalID string, req types.ApprovalResolveReq
 	}
 
 	now := time.Now().UTC()
-	decision := strings.ToLower(strings.TrimSpace(req.Decision))
-
-	e.mu.Lock()
-	approval, ok := e.approvals[approvalID]
-	if !ok && e.stateStore != nil {
-		record, found, err := e.stateStore.GetApproval(approvalID)
-		if err != nil {
-			e.mu.Unlock()
-			return types.ApprovalResolveResponse{}, errStatus(http.StatusInternalServerError, "state_store_read_failed", err.Error())
-		}
-		if found {
-			approval = approvalRecordToState(record)
-			ok = true
-		}
+	command := types.ApprovalResolveCommand{
+		ApprovalID: approvalID,
+		Decision:   req.Decision,
+		OperatorID: req.OperatorID,
+		Channel:    req.Channel,
+		ResolvedAt: now,
 	}
-	if !ok {
-		e.mu.Unlock()
-		return types.ApprovalResolveResponse{}, errStatus(http.StatusNotFound, "approval_not_found", "approval was not found")
-	}
-	if approval.Status != types.ApprovalPending {
-		e.mu.Unlock()
-		return types.ApprovalResolveResponse{}, errStatus(http.StatusConflict, "approval_already_resolved", "approval is already resolved")
-	}
-
-	if !approval.ExpiresAt.After(now) {
-		approval.Status = types.ApprovalExpired
-		approval.ResolvedAt = &now
-		approval.OperatorID = req.OperatorID
-		approval.Channel = req.Channel
-		e.mu.Unlock()
-
-		if e.stateStore != nil {
-			if err := e.stateStore.SaveApproval(approvalStateToRecord(approval)); err != nil {
-				return types.ApprovalResolveResponse{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
-			}
-		}
-		e.mu.Lock()
-		e.approvals[approvalID] = approval
-		e.mu.Unlock()
-
-		if err := e.appendApprovalEvent(approval, "approval_expired", now); err != nil {
-			return types.ApprovalResolveResponse{}, errStatus(http.StatusInternalServerError, "event_store_write_failed", err.Error())
-		}
-		return types.ApprovalResolveResponse{}, errStatus(http.StatusConflict, "approval_expired", "approval has expired")
-	}
-
-	var grantKey string
-	var grant types.AttemptGrant
-	needsGrant := false
-
-	switch decision {
-	case "approve", "approved", "allow", "allow_once":
-		approval.Status = types.ApprovalApproved
-		approval.ResolvedAt = &now
-		approval.OperatorID = req.OperatorID
-		approval.Channel = req.Channel
-		grantKey = attemptKey(approval.SessionID, approval.TaskID, approval.AttemptID)
-		grant = types.AttemptGrant{ApprovalID: approvalID, ExpiresAt: approval.ExpiresAt}
-		needsGrant = true
-	case "deny", "denied", "reject", "rejected":
-		approval.Status = types.ApprovalDenied
-		approval.ResolvedAt = &now
-		approval.OperatorID = req.OperatorID
-		approval.Channel = req.Channel
-	default:
-		e.mu.Unlock()
-		return types.ApprovalResolveResponse{}, errBadRequest("invalid_approval_decision", "decision must be approve/allow_once or deny")
-	}
-	e.mu.Unlock()
-
-	// SQLite before memory.  Safe without lock: approvalID is unique and the
-	// Pending→Resolved transition is one-way — a concurrent resolver sees
-	// Status != Pending and gets Conflict.
-	if e.stateStore != nil {
-		if err := e.stateStore.SaveApproval(approvalStateToRecord(approval)); err != nil {
-			return types.ApprovalResolveResponse{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
-		}
-		if needsGrant {
-			if err := e.stateStore.SaveAttemptGrant(approval.SessionID, approval.TaskID, approval.AttemptID, approvalID, approval.ExpiresAt); err != nil {
-				return types.ApprovalResolveResponse{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
-			}
-		}
-	}
-
-	e.mu.Lock()
-	e.approvals[approvalID] = approval
-	if needsGrant {
-		e.attemptGrants[grantKey] = grant
-	}
-	e.mu.Unlock()
-
 	eventType := "approval_denied"
-	if approval.Status == types.ApprovalApproved {
+	if strings.Contains(strings.ToLower(strings.TrimSpace(req.Decision)), "allow") || strings.Contains(strings.ToLower(strings.TrimSpace(req.Decision)), "approve") {
 		eventType = "approval_granted"
 	}
-	if err := e.appendApprovalEvent(approval, eventType, now); err != nil {
-		return types.ApprovalResolveResponse{}, errStatus(http.StatusInternalServerError, "event_store_write_failed", err.Error())
-	}
-
-	return types.ApprovalResolveResponse{
-		ApprovalID: approvalID,
-		Status:     approval.Status,
-		ResolvedAt: now,
-	}, nil
-}
-
-func (e *Engine) appendApprovalEvent(approval approvalState, eventType string, now time.Time) error {
-	effect := types.EffectDeny
-	if approval.Status == types.ApprovalApproved {
-		effect = types.EffectAllowWithAudit
-	}
-	return e.appendEvent(types.EventEnvelope{
+	event := types.EventEnvelope{
 		EventID:   newID("evt_approval"),
 		EventType: eventType,
-		RequestID: approval.RequestID,
-		SessionID: approval.SessionID,
 		Surface:   types.SurfaceRuntime,
-		Effect:    effect,
-		Summary:   string(approval.Status),
+		Summary:   strings.ToLower(strings.TrimSpace(req.Decision)),
 		Metadata: map[string]interface{}{
-			"approval_id": approval.ApprovalID,
-			"task_id":     approval.TaskID,
-			"attempt_id":  approval.AttemptID,
-			"operator_id": approval.OperatorID,
-			"channel":     approval.Channel,
+			"approval_id": approvalID,
+			"operator_id": req.OperatorID,
+			"channel":     req.Channel,
 		},
 		OccurredAt: now,
-	})
-}
-
-func (e *Engine) appendApprovalExpiryEvents(approvals []approvalState, now time.Time) error {
-	for _, approval := range approvals {
-		if err := e.appendApprovalEvent(approval, "approval_expired", now); err != nil {
-			return err
-		}
 	}
-	return nil
+	result, err := e.approvals.Resolve(command, event)
+	if err != nil {
+		var coreErr *Error
+		if errors.As(err, &coreErr) {
+			return types.ApprovalResolveResponse{}, err
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			return types.ApprovalResolveResponse{}, errStatus(http.StatusNotFound, "approval_not_found", "approval was not found")
+		}
+		return types.ApprovalResolveResponse{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
+	}
+	return types.ApprovalResolveResponse{
+		ApprovalID: approvalID,
+		Status:     result.Approval.Status,
+		ResolvedAt: now,
+	}, nil
 }
 
 func (e *Engine) Events(limit int) ([]types.EventEnvelope, error) {
 	if e.eventStore != nil {
 		return e.eventStore.ListEvents(limit)
 	}
-	e.mu.RLock()
+	e.eventMu.RLock()
 	events := append([]types.EventEnvelope(nil), e.events...)
-	e.mu.RUnlock()
-	if len(events) > limit {
+	e.eventMu.RUnlock()
+	if limit > 0 && len(events) > limit {
 		events = events[len(events)-limit:]
 	}
 	return events, nil
 }
 
-// executeObligations processes each obligation type exactly once per decision.
-// Multiple rules at the same priority can contribute the same obligation type
-// (e.g., both bash and open_world rules declare approval_request). Deduplication
-// ensures one approval per decision — the policy declares intent, the executor
-// materializes it once.
 func (e *Engine) executeObligations(obligations []types.Obligation, req types.PolicyRequest, facts inputSecretFacts, reason string, now time.Time) ([]types.Obligation, *decisionPatch) {
 	capabilities, adapterFound := e.capabilitiesForRequest(req)
 	enriched := make([]types.Obligation, 0, len(obligations))
@@ -2125,53 +1207,15 @@ func (e *Engine) executeRewriteInput(req types.PolicyRequest, facts inputSecretF
 		return types.Obligation{Type: types.ObligationRewriteInput}, nil
 	}
 
-	handles := make([]types.SecretHandle, 0, len(facts.findings))
-	summaries := make([]types.SecretFindingSummary, 0, len(facts.findings))
-	rewritten := scanner.RewriteSecrets(facts.text, facts.findings, func(index int, finding scanner.SecretFinding) string {
-		placeholder := fmt.Sprintf("[SECRET_HANDLE:%d]", index+1)
-		hash := scanner.HashSecret(finding.Value)
-		handle := types.SecretHandle{
-			HandleID:    newID("sech"),
-			SessionID:   req.Session.SessionID,
-			TaskID:      req.Session.TaskID,
-			Kind:        finding.Kind,
-			Placeholder: placeholder,
-			SecretHash:  hash,
-			CreatedAt:   now,
-			ExpiresAt:   now.Add(secretHandleTTL),
-		}
-		handles = append(handles, handle)
-		summaries = append(summaries, types.SecretFindingSummary{
-			Kind:        finding.Kind,
-			Placeholder: placeholder,
-			HandleID:    handle.HandleID,
-			Hash:        hash,
-			Offset:      finding.Start,
-			Length:      finding.End - finding.Start,
-		})
-		return placeholder
-	})
-
-	if e.stateStore != nil {
-		for index, handle := range handles {
-			if err := e.stateStore.SaveSecretHandle(handle, facts.findings[index].Value); err != nil {
-				return types.Obligation{}, &decisionPatch{
-					effect:       types.EffectDeny,
-					reason:       "secret_handle_store_failed",
-					appliedRules: []string{"secret.handle.persist.fail_closed"},
-					obligations:  []types.Obligation{abortTaskObligation()},
-				}
-			}
+	rewritten, handles, summaries, err := e.vault.Rewrite(context.Background(), facts.text, req.Session.SessionID, req.Session.TaskID, now)
+	if err != nil {
+		return types.Obligation{}, &decisionPatch{
+			effect:       types.EffectDeny,
+			reason:       "secret_handle_store_failed",
+			appliedRules: []string{"secret.handle.persist.fail_closed"},
+			obligations:  []types.Obligation{abortTaskObligation()},
 		}
 	}
-	e.mu.Lock()
-	for _, handle := range handles {
-		e.secretHandles[handle.HandleID] = handle
-	}
-	for index, handle := range handles {
-		e.secretValues[handle.HandleID] = facts.findings[index].Value
-	}
-	e.mu.Unlock()
 
 	return types.Obligation{
 		Type: types.ObligationRewriteInput,
@@ -2186,59 +1230,37 @@ func (e *Engine) executeRewriteInput(req types.PolicyRequest, facts inputSecretF
 }
 
 func (e *Engine) executeResolveSecretHandle(req types.PolicyRequest, now time.Time) (types.Obligation, *decisionPatch) {
-	e.mu.RLock()
-	handle, ok := e.secretHandles[req.Target.Identifier]
-	value := e.secretValues[req.Target.Identifier]
-	e.mu.RUnlock()
-	if !ok && e.stateStore != nil {
-		storedHandle, storedValue, found, err := e.stateStore.GetSecretHandle(req.Target.Identifier)
-		if err != nil {
+	handle, value, err := e.vault.Resolve(context.Background(), req.Target.Identifier, req.Session.SessionID, req.Session.TaskID, now)
+	if err != nil {
+		var coreErr *Error
+		if errors.As(err, &coreErr) && coreErr.Code == "secret_handle_scope_mismatch" {
 			return types.Obligation{}, &decisionPatch{
 				effect:       types.EffectDeny,
-				reason:       "secret_handle_store_unavailable",
-				appliedRules: []string{"resource.secret_handle.lookup.fail_closed"},
-				obligations:  []types.Obligation{abortTaskObligation()},
+				reason:       "secret_handle_scope_mismatch",
+				appliedRules: []string{"resource.secret_handle.scope"},
+				obligations: []types.Obligation{
+					auditObligation("critical", map[string]interface{}{"handle_id": req.Target.Identifier}),
+					abortTaskObligation(),
+				},
 			}
 		}
-		if found {
-			handle = storedHandle
-			value = storedValue
-			ok = true
-			e.mu.Lock()
-			e.secretHandles[handle.HandleID] = handle
-			e.secretValues[handle.HandleID] = value
-			e.mu.Unlock()
+		if errors.As(err, &coreErr) && coreErr.Code == "secret_handle_expired" {
+			return types.Obligation{}, &decisionPatch{
+				effect:       types.EffectDeny,
+				reason:       "secret_handle_expired",
+				appliedRules: []string{"resource.secret_handle.expiry"},
+				obligations: []types.Obligation{
+					auditObligation("warning", map[string]interface{}{"handle_id": req.Target.Identifier}),
+					abortTaskObligation(),
+				},
+			}
 		}
-	}
-	if !ok {
 		return types.Obligation{}, &decisionPatch{
 			effect:       types.EffectDeny,
 			reason:       "secret_handle_not_found",
 			appliedRules: []string{"resource.secret_handle.lookup"},
 			obligations: []types.Obligation{
 				auditObligation("critical", map[string]interface{}{"handle_id": req.Target.Identifier}),
-				abortTaskObligation(),
-			},
-		}
-	}
-	if !handle.ExpiresAt.IsZero() && now.After(handle.ExpiresAt) {
-		return types.Obligation{}, &decisionPatch{
-			effect:       types.EffectDeny,
-			reason:       "secret_handle_expired",
-			appliedRules: []string{"resource.secret_handle.expiry"},
-			obligations: []types.Obligation{
-				auditObligation("warning", map[string]interface{}{"handle_id": handle.HandleID, "expired_at": handle.ExpiresAt}),
-				abortTaskObligation(),
-			},
-		}
-	}
-	if handle.SessionID != req.Session.SessionID || handle.TaskID != req.Session.TaskID {
-		return types.Obligation{}, &decisionPatch{
-			effect:       types.EffectDeny,
-			reason:       "secret_handle_scope_mismatch",
-			appliedRules: []string{"resource.secret_handle.scope"},
-			obligations: []types.Obligation{
-				auditObligation("critical", map[string]interface{}{"handle_id": handle.HandleID, "secret_hash": handle.SecretHash}),
 				abortTaskObligation(),
 			},
 		}
@@ -2256,115 +1278,64 @@ func (e *Engine) executeResolveSecretHandle(req types.PolicyRequest, now time.Ti
 
 func (e *Engine) executeApprovalRequest(req types.PolicyRequest, reason string, now time.Time) (types.Obligation, *decisionPatch) {
 	// Check for existing pending approval on the same attempt.
-	if existing := e.findPendingApproval(req.Session.SessionID, req.Session.TaskID, req.Session.AttemptID, now); existing != nil {
+	if existing, _ := e.approvals.FindPending(req.Session.SessionID, req.Session.TaskID, req.Session.AttemptID, now); existing != nil {
 		return types.Obligation{
 			Type: types.ObligationApprovalRequest,
 			Params: map[string]interface{}{
 				"approval_id": existing.ApprovalID,
-				"scope":       "attempt",
+				"scope":       fmt.Sprintf("session:%s task:%s attempt:%s", existing.SessionID, existing.TaskID, existing.AttemptID),
 				"channel":     existing.Channel,
-				"session_id":  existing.SessionID,
-				"task_id":     existing.TaskID,
-				"attempt_id":  existing.AttemptID,
-				"reason":      existing.Reason,
 				"expires_at":  existing.ExpiresAt,
+				"reason":      existing.Reason,
 			},
 		}, nil
 	}
 
 	timeout := 10 * time.Minute
-	if e.policyBundle.RuntimePolicy.ApprovalTimeout.Duration > 0 {
-		timeout = e.policyBundle.RuntimePolicy.ApprovalTimeout.Duration
+	active := e.policy.Active()
+	if active.bundle.RuntimePolicy.ApprovalTimeout.Duration > 0 {
+		timeout = active.bundle.RuntimePolicy.ApprovalTimeout.Duration
 	}
-	approvalID := newID("appr")
-	expiresAt := now.Add(timeout)
-	approvalChannel := e.approvalChannelForRequest(req)
+
 	approvalReason := reason
 	if approvalReason == "" {
 		approvalReason = "High-risk runtime attempt paused by AgentGate policy."
 	}
-	approval := approvalState{
-		ApprovalID: approvalID,
+
+	channel := e.approvalChannelForRequest(req)
+	approval := types.ApprovalRecord{
+		ApprovalID: newID("appr"),
 		RequestID:  req.RequestID,
 		SessionID:  req.Session.SessionID,
 		TaskID:     req.Session.TaskID,
 		AttemptID:  req.Session.AttemptID,
 		Status:     types.ApprovalPending,
 		Reason:     approvalReason,
-		Channel:    approvalChannel,
 		CreatedAt:  now,
-		ExpiresAt:  expiresAt,
+		ExpiresAt:  now.Add(timeout),
+		Channel:    channel,
 	}
-	if e.stateStore != nil {
-		if err := e.stateStore.SaveApproval(approvalStateToRecord(approval)); err != nil {
-			return types.Obligation{}, &decisionPatch{
-				effect:       types.EffectDeny,
-				reason:       "approval_store_failed",
-				appliedRules: []string{"runtime.approval.persist.fail_closed"},
-				obligations:  []types.Obligation{abortTaskObligation()},
-			}
+
+	if err := e.approvals.Create(approval); err != nil {
+		return types.Obligation{}, &decisionPatch{
+			effect:       types.EffectDeny,
+			reason:       "approval_store_failed",
+			appliedRules: []string{"core.approval.create.fail_closed"},
+			obligations:  []types.Obligation{abortTaskObligation()},
 		}
 	}
-	e.mu.Lock()
-	e.approvals[approvalID] = approval
-	e.mu.Unlock()
+
 	return types.Obligation{
 		Type: types.ObligationApprovalRequest,
 		Params: map[string]interface{}{
-			"approval_id": approvalID,
-			"scope":       "attempt",
-			"channel":     approvalChannel,
-			"session_id":  req.Session.SessionID,
-			"task_id":     req.Session.TaskID,
-			"attempt_id":  req.Session.AttemptID,
-			"reason":      approvalReason,
-			"expires_at":  expiresAt,
+			"approval_id": approval.ApprovalID,
+			"scope":       fmt.Sprintf("session:%s task:%s attempt:%s", approval.SessionID, approval.TaskID, approval.AttemptID),
+			"expires_at":  approval.ExpiresAt,
+			"channel":     approval.Channel,
+			"reason":      approval.Reason,
 		},
 	}, nil
 }
-
-func (e *Engine) findPendingApproval(sessionID, taskID, attemptID string, now time.Time) *approvalState {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	for _, approval := range e.approvals {
-		if approval.Status == types.ApprovalPending &&
-			approval.ExpiresAt.After(now) &&
-			approval.SessionID == sessionID &&
-			approval.TaskID == taskID &&
-			approval.AttemptID == attemptID {
-			a := approval
-			return &a
-		}
-	}
-	return nil
-}
-
-
-
-func (e *Engine) hasValidGrant(session types.SessionContext, now time.Time) (types.AttemptGrant, bool) {
-	key := attemptKey(session.SessionID, session.TaskID, session.AttemptID)
-	e.mu.RLock()
-	grant, granted := e.attemptGrants[key]
-	e.mu.RUnlock()
-	if !granted && e.stateStore != nil {
-		storedGrant, found, err := e.stateStore.GetAttemptGrant(session.SessionID, session.TaskID, session.AttemptID)
-		if err != nil {
-			return types.AttemptGrant{}, false
-		}
-		if found {
-			grant = storedGrant
-			granted = true
-			e.mu.Lock()
-			e.attemptGrants[key] = storedGrant
-			e.mu.Unlock()
-		}
-	}
-	if granted && grant.ExpiresAt.After(now) {
-		return grant, true
-	}
-	return types.AttemptGrant{}, false
-}
-
 
 func (e *Engine) approvalChannelForRequest(req types.PolicyRequest) string {
 	integrationID := strings.TrimSpace(mapStringValue(req.Policy, "integration_id"))
@@ -2378,7 +1349,10 @@ func (e *Engine) approvalChannelForRequest(req types.PolicyRequest) string {
 	if err != nil || !found || !definition.Enabled {
 		return ""
 	}
-	return definition.ApprovalChannel
+	if definition.ApprovalChannel != "" {
+		return definition.ApprovalChannel
+	}
+	return "default"
 }
 
 func (e *Engine) capabilitiesForRequest(req types.PolicyRequest) (types.AdapterCapabilities, bool) {
@@ -2389,8 +1363,8 @@ func (e *Engine) capabilitiesForRequest(req types.PolicyRequest) (types.AdapterC
 	if integrationID == "" {
 		return types.AdapterCapabilities{}, false
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	e.regMu.RLock()
+	defer e.regMu.RUnlock()
 	for _, state := range e.registrations {
 		if state.registration.IntegrationID == integrationID {
 			return state.registration.Capabilities, true
@@ -2414,8 +1388,8 @@ func (e *Engine) hasCoverage(surface types.Surface) bool {
 		}
 	}
 
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	e.regMu.RLock()
+	defer e.regMu.RUnlock()
 
 	for _, state := range e.registrations {
 		for _, registeredSurface := range state.registration.Surfaces {
@@ -2427,15 +1401,18 @@ func (e *Engine) hasCoverage(surface types.Surface) bool {
 	return false
 }
 
-func (e *Engine) sessionFactsForDecision(sessionID string) types.SessionFacts {
+func (e *Engine) sessionFactsForDecision(sessionID string) (types.SessionFacts, error) {
 	if sessionID == "" || e.stateStore == nil {
-		return types.SessionFacts{}
+		return types.SessionFacts{}, nil
 	}
 	record, found, err := e.stateStore.GetSessionFacts(sessionID)
-	if err != nil || !found {
-		return types.SessionFacts{}
+	if err != nil {
+		return types.SessionFacts{}, err
 	}
-	return normalizeSessionFacts(record.Facts)
+	if !found {
+		return types.SessionFacts{}, nil
+	}
+	return normalizeSessionFacts(record.Facts), nil
 }
 
 func (e *Engine) updateSessionFactsFromDecision(req types.PolicyRequest, decision types.PolicyDecision, newTaints []types.Taint, now time.Time) error {
@@ -2590,13 +1567,10 @@ func containsSideEffect(haystack []types.SideEffect, needle types.SideEffect) bo
 
 func (e *Engine) appendEvent(event types.EventEnvelope) error {
 	if e.eventStore != nil {
-		if err := e.eventStore.AppendEvent(event); err != nil {
-			return err
-		}
+		return e.eventStore.AppendEvent(event)
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
+	e.eventMu.Lock()
+	defer e.eventMu.Unlock()
 	e.events = append(e.events, event)
 	if len(e.events) > e.maxEvents {
 		e.events = e.events[len(e.events)-e.maxEvents:]
@@ -2745,48 +1719,33 @@ func requestValidationEvaluation(patch *decisionPatch) policy.Evaluation {
 	}
 }
 
-func (e *Engine) enrichPolicyFacts(req *types.PolicyRequest) inputSecretFacts {
-	text := e.extractScannableText(req)
+func (e *Engine) enrichPolicyFacts(req *types.PolicyRequest) (inputSecretFacts, error) {
+	text := extractScannableText(req)
 	if text == "" {
-		return inputSecretFacts{}
+		return inputSecretFacts{}, nil
 	}
 
-	// Secret detection (existing).
-	secretFindings, err := e.detector.DetectSecrets(text)
+	findings, injFindings, err := e.vault.Detect(text)
 	if err != nil {
-		log.Printf("secret detection error: %v", err)
-		secretFindings = nil
-	}
-
-	// Injection detection (new).
-	var injectionFindings []scanner.InjectionFinding
-	if e.injectionDetector != nil {
-		injectionFindings, err = e.injectionDetector.DetectInjections(text)
-		if err != nil {
-			log.Printf("injection detection error: %v", err)
-			injectionFindings = nil
-		}
+		return inputSecretFacts{}, err
 	}
 
 	// Map findings to taints via the mapping layer.
-	taints := scanner.FindingsToTaints(secretFindings, injectionFindings)
+	taints := scanner.FindingsToTaints(findings, injFindings)
 	for _, t := range taints {
 		req.Context.Taints = appendTaintOnce(req.Context.Taints, t)
 	}
 
 	// Set data classes for secret findings.
-	if len(secretFindings) > 0 {
+	if len(findings) > 0 {
 		req.Content.DataClasses = appendDataClassOnce(req.Content.DataClasses, types.DataClassSecret)
 		req.Content.DataClasses = appendDataClassOnce(req.Content.DataClasses, types.DataClassCredential)
 	}
 
-	return inputSecretFacts{text: text, findings: secretFindings}
+	return inputSecretFacts{text: text, findings: findings}, nil
 }
 
-// extractScannableText returns the text content to scan for secrets and
-// injections. For input surface it reads from context.Raw["text"/"body"],
-// for runtime surface it reads from content.summary or context.Raw["text"].
-func (e *Engine) extractScannableText(req *types.PolicyRequest) string {
+func extractScannableText(req *types.PolicyRequest) string {
 	switch req.Context.Surface {
 	case types.SurfaceInput:
 		text, ok := rawString(req.Context.Raw, "text")
@@ -2837,51 +1796,13 @@ func rawString(raw map[string]interface{}, key string) (string, bool) {
 	return text, true
 }
 
-func attemptKey(sessionID string, taskID string, attemptID string) string {
-	return sessionID + "\x00" + taskID + "\x00" + attemptID
-}
-
-func approvalStateToRecord(approval approvalState) types.ApprovalRecord {
-	return types.ApprovalRecord{
-		ApprovalID: approval.ApprovalID,
-		RequestID:  approval.RequestID,
-		SessionID:  approval.SessionID,
-		TaskID:     approval.TaskID,
-		AttemptID:  approval.AttemptID,
-		Status:     approval.Status,
-		Reason:     approval.Reason,
-		OperatorID: approval.OperatorID,
-		Channel:    approval.Channel,
-		CreatedAt:  approval.CreatedAt,
-		ExpiresAt:  approval.ExpiresAt,
-		ResolvedAt: approval.ResolvedAt,
+func hasObligation(obligations []types.Obligation, obligationType types.ObligationType) bool {
+	for _, ob := range obligations {
+		if ob.Type == obligationType {
+			return true
+		}
 	}
-}
-
-func approvalRecordToState(approval types.ApprovalRecord) approvalState {
-	return approvalState{
-		ApprovalID: approval.ApprovalID,
-		RequestID:  approval.RequestID,
-		SessionID:  approval.SessionID,
-		TaskID:     approval.TaskID,
-		AttemptID:  approval.AttemptID,
-		Status:     approval.Status,
-		Reason:     approval.Reason,
-		CreatedAt:  approval.CreatedAt,
-		ExpiresAt:  approval.ExpiresAt,
-		ResolvedAt: approval.ResolvedAt,
-		OperatorID: approval.OperatorID,
-		Channel:    approval.Channel,
-	}
-}
-
-func expireApprovalIfNeeded(approval types.ApprovalRecord, now time.Time) (types.ApprovalRecord, bool) {
-	if approval.Status != types.ApprovalPending || approval.ExpiresAt.After(now) {
-		return approval, false
-	}
-	approval.Status = types.ApprovalExpired
-	approval.ResolvedAt = &now
-	return approval, true
+	return false
 }
 
 func auditObligation(severity string, params map[string]interface{}) types.Obligation {
@@ -2892,8 +1813,6 @@ func auditObligation(severity string, params map[string]interface{}) types.Oblig
 	return types.Obligation{Type: types.ObligationAuditEvent, Params: copied}
 }
 
-// auditTrigger returns a human-readable description of why allow_with_audit was
-// triggered, derived from the obligation types present in the decision.
 func auditTrigger(obligations []types.Obligation, reason string) string {
 	triggers := make([]string, 0, len(obligations))
 	for _, ob := range obligations {
@@ -2904,8 +1823,6 @@ func auditTrigger(obligations []types.Obligation, reason string) string {
 			triggers = append(triggers, "secret_handle_access")
 		case types.ObligationApprovalRequest:
 			triggers = append(triggers, "approval_required")
-		case types.ObligationAuditEvent:
-			// Skip — auto-attached by the obligation executor, not a trigger reason.
 		case types.ObligationTaskControl:
 			triggers = append(triggers, "task_control")
 		}
@@ -2924,7 +1841,6 @@ func abortTaskObligation() types.Obligation {
 		},
 	}
 }
-
 
 func obligationTypes(obligations []types.Obligation) []types.ObligationType {
 	result := make([]types.ObligationType, 0, len(obligations))
@@ -3011,62 +1927,14 @@ func mapStringValue(values map[string]interface{}, key string) string {
 	return value
 }
 
-func redactAuditValue(value interface{}, det scanner.Detector) (interface{}, bool) {
+func mapString(value interface{}) string {
 	switch typed := value.(type) {
-	case map[string]interface{}:
-		result := make(map[string]interface{}, len(typed))
-		redacted := false
-		for key, item := range typed {
-			if isSensitiveAuditKey(key) {
-				result[key] = "[REDACTED]"
-				redacted = true
-				continue
-			}
-			next, changed := redactAuditValue(item, det)
-			result[key] = next
-			redacted = redacted || changed
-		}
-		return result, redacted
-	case []interface{}:
-		result := make([]interface{}, 0, len(typed))
-		redacted := false
-		for _, item := range typed {
-			next, changed := redactAuditValue(item, det)
-			result = append(result, next)
-			redacted = redacted || changed
-		}
-		return result, redacted
 	case string:
-		next := redactAuditString(typed, det)
-		return next, next != typed
+		return typed
+	case fmt.Stringer:
+		return typed.String()
 	default:
-		return value, false
-	}
-}
-
-func redactAuditString(value string, det scanner.Detector) string {
-	if value == "" {
-		return value
-	}
-	findings, err := det.DetectSecrets(value)
-	if err != nil {
-		log.Printf("secret detection error in redact: %v", err)
-		return value
-	}
-	if len(findings) == 0 {
-		return value
-	}
-	return scanner.RewriteSecrets(value, findings, func(index int, finding scanner.SecretFinding) string {
-		return "[REDACTED]"
-	})
-}
-
-func isSensitiveAuditKey(key string) bool {
-	switch strings.ToLower(strings.ReplaceAll(key, "-", "_")) {
-	case "secret", "secret_value", "value", "token", "api_key", "apikey", "password", "authorization", "access_token", "refresh_token":
-		return true
-	default:
-		return false
+		return fmt.Sprint(value)
 	}
 }
 
@@ -3134,4 +2002,163 @@ func inferSurface(kind types.RequestKind) types.Surface {
 
 func newID(prefix string) string {
 	return fmt.Sprintf("%s_%d_%d", prefix, time.Now().UTC().UnixNano(), idCounter.Add(1))
+}
+
+func runtimeHealthStatus(view *types.IntegrationRuntimeView) types.IntegrationHealthStatus {
+	if view == nil || !view.Managed {
+		return ""
+	}
+	switch view.Status {
+	case "starting":
+		return types.IntegrationHealthStarting
+	case "degraded", "error":
+		return types.IntegrationHealthDegraded
+	default:
+		return ""
+	}
+}
+
+func adapterHealthStatus(adapter types.AdapterCoverage, now time.Time) types.IntegrationHealthStatus {
+	if now.Sub(adapter.LastSeenAt) > integrationStaleAfter {
+		return types.IntegrationHealthStale
+	}
+	return types.IntegrationHealthConnected
+}
+
+func policyValidationSuccess(bundle policy.Bundle) PolicyValidationResponse {
+	surfaceRules := map[types.Surface]int{
+		types.SurfaceInput:    0,
+		types.SurfaceRuntime:  0,
+		types.SurfaceResource: 0,
+	}
+	for _, rule := range bundle.Rules {
+		surfaceRules[rule.Surface]++
+	}
+	warnings := make([]string, 0)
+	for _, surface := range []types.Surface{types.SurfaceInput, types.SurfaceRuntime, types.SurfaceResource} {
+		if surfaceRules[surface] == 0 {
+			warnings = append(warnings, fmt.Sprintf("policy has no rules for %s surface", surface))
+		}
+	}
+	return PolicyValidationResponse{
+		Valid:        true,
+		Warnings:     warnings,
+		Version:      bundle.Version,
+		RuleCount:    len(bundle.Rules),
+		SurfaceRules: surfaceRules,
+	}
+}
+
+func normalizeManagedBundle(bundle policy.Bundle, now time.Time) policy.Bundle {
+	bundle.BundleID = strings.TrimSpace(bundle.BundleID)
+	bundle.Name = strings.TrimSpace(bundle.Name)
+	bundle.Description = strings.TrimSpace(bundle.Description)
+	bundle.Status = strings.TrimSpace(bundle.Status)
+	if bundle.Status == "" {
+		bundle.Status = policy.BundleStatusInactive
+	}
+	if bundle.IssuedAt.IsZero() {
+		bundle.IssuedAt = now
+	}
+	return bundle
+}
+
+func validateManagedBundle(bundle policy.Bundle) error {
+	if bundle.Name == "" {
+		return errBadRequest("invalid_policy_bundle", "name is required")
+	}
+	switch bundle.Status {
+	case policy.BundleStatusActive, policy.BundleStatusInactive, policy.BundleStatusArchived:
+	default:
+		return errBadRequest("invalid_policy_bundle", "status must be active, inactive, or archived")
+	}
+	if bundle.Priority < 0 {
+		return errBadRequest("invalid_policy_bundle", "priority must be non-negative")
+	}
+	if err := bundle.Validate(); err != nil {
+		return errBadRequest("invalid_policy_bundle", err.Error())
+	}
+	return nil
+}
+
+func normalizeIntegrationDefinition(definition types.IntegrationDefinition) (types.IntegrationDefinition, error) {
+	definition.ID = strings.TrimSpace(definition.ID)
+	definition.Name = strings.TrimSpace(definition.Name)
+	definition.Kind = strings.TrimSpace(definition.Kind)
+	definition.ApprovalChannel = strings.TrimSpace(definition.ApprovalChannel)
+	definition.Health = types.IntegrationHealth{}
+	definition.MatchedAdapters = nil
+	if definition.ID == "" {
+		return types.IntegrationDefinition{}, fmt.Errorf("id is required")
+	}
+	if !isCompactToken(definition.ID) {
+		return types.IntegrationDefinition{}, fmt.Errorf("id must be a compact token")
+	}
+	if definition.Name == "" {
+		return types.IntegrationDefinition{}, fmt.Errorf("name is required")
+	}
+	if definition.Kind == "" {
+		return types.IntegrationDefinition{}, fmt.Errorf("kind is required")
+	}
+	if !isCompactToken(definition.Kind) {
+		return types.IntegrationDefinition{}, fmt.Errorf("kind must be a compact token")
+	}
+	if definition.ApprovalChannel != "" && !isCompactToken(definition.ApprovalChannel) {
+		return types.IntegrationDefinition{}, fmt.Errorf("approval_channel must be a compact token")
+	}
+	if definition.Runtime != nil {
+		if err := validateIntegrationRuntimeSpec(*definition.Runtime); err != nil {
+			return types.IntegrationDefinition{}, err
+		}
+	}
+	seenSurfaces := make(map[types.Surface]struct{}, len(definition.ExpectedSurfaces))
+	for _, surface := range definition.ExpectedSurfaces {
+		if !isValidSurface(surface) {
+			return types.IntegrationDefinition{}, fmt.Errorf("unsupported expected surface %q", surface)
+		}
+		if _, exists := seenSurfaces[surface]; exists {
+			return types.IntegrationDefinition{}, fmt.Errorf("duplicate expected surface %q", surface)
+		}
+		seenSurfaces[surface] = struct{}{}
+	}
+	return definition, nil
+}
+
+func validateIntegrationRuntimeSpec(spec types.IntegrationRuntimeSpec) error {
+	if spec.Managed && len(spec.Command) == 0 {
+		return fmt.Errorf("runtime.command is required")
+	}
+	for _, part := range spec.Command {
+		if strings.TrimSpace(part) == "" {
+			return fmt.Errorf("runtime.command entries must be non-empty")
+		}
+	}
+	if spec.Restart.MaxAttempts < 0 {
+		return fmt.Errorf("runtime.restart.max_attempts must be >= 0")
+	}
+	if spec.Restart.BackoffMs < 0 {
+		return fmt.Errorf("runtime.restart.backoff_ms must be >= 0")
+	}
+	return nil
+}
+
+func integrationStatusRank(status types.IntegrationHealthStatus) int {
+	switch status {
+	case types.IntegrationHealthConnected:
+		return 0
+	case types.IntegrationHealthStarting:
+		return 1
+	case types.IntegrationHealthDegraded:
+		return 2
+	case types.IntegrationHealthStale:
+		return 3
+	case types.IntegrationHealthMissing:
+		return 4
+	case types.IntegrationHealthUnmanaged:
+		return 5
+	case types.IntegrationHealthDisabled:
+		return 6
+	default:
+		return 7
+	}
 }

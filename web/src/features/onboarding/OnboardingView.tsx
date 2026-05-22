@@ -97,12 +97,10 @@ function ConnectModal({
   agent,
   open,
   onOpenChange,
-  onConnected,
 }: {
   agent: (typeof agentDefinitions)[number]
   open: boolean
   onOpenChange: (open: boolean) => void
-  onConnected: () => void
 }) {
   const [checking, setChecking] = React.useState(false)
   const [status, setStatus] = React.useState<"idle" | "success" | "error">("idle")
@@ -199,11 +197,9 @@ function ConnectModal({
 function AgentCard({
   agent,
   isConnected,
-  onConnected,
 }: {
   agent: (typeof agentDefinitions)[number]
   isConnected: boolean
-  onConnected: () => void
 }) {
   const Icon = agent.icon
   const [showConnect, setShowConnect] = React.useState(false)
@@ -247,7 +243,6 @@ function AgentCard({
         agent={agent}
         open={showConnect}
         onOpenChange={setShowConnect}
-        onConnected={onConnected}
       />
     </>
   )
@@ -257,12 +252,10 @@ function ChannelConnectModal({
   channel,
   open,
   onOpenChange,
-  onConnected,
 }: {
   channel: (typeof channelDefinitions)[number]
   open: boolean
   onOpenChange: (open: boolean) => void
-  onConnected: () => void
 }) {
   const [checking, setChecking] = React.useState(false)
   const [status, setStatus] = React.useState<"idle" | "success" | "error">("idle")
@@ -348,12 +341,10 @@ function ChannelCard({
   channel,
   isSelected,
   onSelect,
-  onConnected,
 }: {
   channel: (typeof channelDefinitions)[number]
   isSelected: boolean
   onSelect: () => void
-  onConnected: () => void
 }) {
   const Icon = channel.icon
   const [showConnect, setShowConnect] = React.useState(false)
@@ -397,12 +388,11 @@ function ChannelCard({
         </CardFooter>
       </Card>
       {!channel.isDefault && (
-        <ChannelConnectModal
-          channel={channel}
-          open={showConnect}
-          onOpenChange={setShowConnect}
-          onConnected={onConnected}
-        />
+      <ChannelConnectModal
+        channel={channel}
+        open={showConnect}
+        onOpenChange={setShowConnect}
+      />
       )}
     </>
   )
@@ -446,10 +436,6 @@ export function OnboardingView({
                   key={agent.id}
                   agent={agent}
                   isConnected={connectedAgents.includes(agent.id)}
-                  onConnected={() => {
-                    // Refetch coverage data
-                    onComplete()
-                  }}
                 />
               ))}
             </div>
@@ -470,10 +456,6 @@ export function OnboardingView({
                   channel={channel}
                   isSelected={selectedChannel === channel.id}
                   onSelect={() => setSelectedChannel(channel.id)}
-                  onConnected={() => {
-                    setSelectedChannel(channel.id)
-                    onComplete()
-                  }}
                 />
               ))}
             </div>

@@ -109,9 +109,9 @@ export type IntegrationDefinitionInput = {
 
 export type IntegrationRuntimeSpec = {
   managed: boolean
-  worker: string
+  command: string[]
   enabled: boolean
-  config?: Record<string, unknown>
+  env?: Record<string, unknown>
   restart?: {
     enabled: boolean
     max_attempts?: number
@@ -121,7 +121,7 @@ export type IntegrationRuntimeSpec = {
 
 export type IntegrationRuntimeView = {
   managed: boolean
-  worker?: string
+  command?: string[]
   status?: string
   restart_count?: number
   last_started_at?: string
@@ -344,8 +344,7 @@ export async function fetchConsoleData(
 export async function resolveApproval(
   baseUrl: string,
   approvalId: string,
-  decision: "allow_once" | "deny",
-  operatorId = "web-console"
+  decision: "allow_once" | "deny"
 ) {
   return fetchAgentGate<{ approval_id: string; status: string; resolved_at: string }>(
     baseUrl,
@@ -355,7 +354,6 @@ export async function resolveApproval(
       method: "POST",
       body: JSON.stringify({
         decision,
-        operator_id: operatorId,
         channel: "web_console",
       }),
     }
@@ -502,8 +500,7 @@ export async function publishPolicy(
   baseUrl: string,
   adminToken: string,
   bundle: PolicyBundle,
-  message: string,
-  operatorId = "web-console"
+  message: string
 ) {
   return fetchAgentGate<PolicyCurrentResponse>(
     baseUrl,
@@ -511,7 +508,7 @@ export async function publishPolicy(
     undefined,
     {
       method: "POST",
-      body: JSON.stringify({ bundle, message, operator_id: operatorId }),
+      body: JSON.stringify({ bundle, message }),
     },
     adminToken
   )
@@ -521,8 +518,7 @@ export async function rollbackPolicy(
   baseUrl: string,
   adminToken: string,
   version: number,
-  message: string,
-  operatorId = "web-console"
+  message: string
 ) {
   return fetchAgentGate<PolicyCurrentResponse>(
     baseUrl,
@@ -530,7 +526,7 @@ export async function rollbackPolicy(
     undefined,
     {
       method: "POST",
-      body: JSON.stringify({ version, message, operator_id: operatorId }),
+      body: JSON.stringify({ version, message }),
     },
     adminToken
   )
@@ -728,7 +724,9 @@ function normalizeIntegrationsResponse(
             runtime: definition.health?.runtime
               ? {
                   managed: Boolean(definition.health.runtime.managed),
-                  worker: definition.health.runtime.worker,
+                  command: Array.isArray(definition.health.runtime.command)
+                    ? definition.health.runtime.command
+                    : [],
                   status: definition.health.runtime.status,
                   restart_count: definition.health.runtime.restart_count,
                   last_started_at: definition.health.runtime.last_started_at,
