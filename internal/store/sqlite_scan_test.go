@@ -29,11 +29,11 @@ func TestScanApprovalPending(t *testing.T) {
 		CreatedAt:  testTime,
 		ExpiresAt:  testTime.Add(testExpiry),
 	}
-	if err := store.SaveApproval(approval); err != nil {
+	if err := store.SaveApproval(context.Background(), approval); err != nil {
 		t.Fatalf("save approval: %v", err)
 	}
 
-	found, foundOk, err := store.GetApproval("appr_scan")
+	found, foundOk, err := store.GetApproval(context.Background(), "appr_scan")
 	if err != nil {
 		t.Fatalf("get approval: %v", err)
 	}
@@ -58,11 +58,11 @@ func TestSaveAttemptGrantAndGet(t *testing.T) {
 	}
 	defer store.Close()
 
-	if err := store.SaveAttemptGrant("sess_g", "task_g", "att_g", "appr_g", testTime.Add(testExpiry)); err != nil {
+	if err := store.SaveAttemptGrant(context.Background(), "sess_g", "task_g", "att_g", "appr_g", testTime.Add(testExpiry)); err != nil {
 		t.Fatalf("save grant: %v", err)
 	}
 
-	grant, found, err := store.GetAttemptGrant("sess_g", "task_g", "att_g")
+	grant, found, err := store.GetAttemptGrant(context.Background(), "sess_g", "task_g", "att_g")
 	if err != nil {
 		t.Fatalf("get grant: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestSaveAttemptGrantAndGet(t *testing.T) {
 		t.Fatalf("expected appr_g, got %s", grant.ApprovalID)
 	}
 
-	_, found, err = store.GetAttemptGrant("sess_g", "task_g", "nonexistent")
+	_, found, err = store.GetAttemptGrant(context.Background(), "sess_g", "task_g", "nonexistent")
 	if err != nil {
 		t.Fatalf("get nonexistent grant: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestListApprovalsEmpty(t *testing.T) {
 	}
 	defer store.Close()
 
-	approvals, err := store.ListApprovals(10)
+	approvals, err := store.ListApprovals(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("list approvals: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestGetApprovalNotFound(t *testing.T) {
 	}
 	defer store.Close()
 
-	_, found, err := store.GetApproval("nonexistent")
+	_, found, err := store.GetApproval(context.Background(), "nonexistent")
 	if err != nil {
 		t.Fatalf("get nonexistent approval: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestGetIntegrationDefinitionNotFound(t *testing.T) {
 	}
 	defer store.Close()
 
-	_, found, err := store.GetIntegrationDefinition("nonexistent")
+	_, found, err := store.GetIntegrationDefinition(context.Background(), "nonexistent")
 	if err != nil {
 		t.Fatalf("get nonexistent integration: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestEmptyListIntegrationDefinitions(t *testing.T) {
 	}
 	defer store.Close()
 
-	definitions, err := store.ListIntegrationDefinitions()
+	definitions, err := store.ListIntegrationDefinitions(context.Background())
 	if err != nil {
 		t.Fatalf("list integrations: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestListPolicyBundlesEmpty(t *testing.T) {
 	}
 	defer store.Close()
 
-	bundles, err := store.ListPolicyBundles(false)
+	bundles, err := store.ListPolicyBundles(context.Background(), false)
 	if err != nil {
 		t.Fatalf("list bundles: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestListPolicyVersionsEmpty(t *testing.T) {
 	}
 	defer store.Close()
 
-	versions, err := store.ListPolicyVersions(10)
+	versions, err := store.ListPolicyVersions(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("list versions: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestListEventsEmpty(t *testing.T) {
 	}
 	defer store.Close()
 
-	events, err := store.ListEvents(10)
+	events, err := store.ListEvents(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestGetActivePolicyBundleEmpty(t *testing.T) {
 	}
 	defer store.Close()
 
-	_, _, found, err := store.GetActivePolicyBundle()
+	_, _, found, err := store.GetActivePolicyBundle(context.Background())
 	if err != nil {
 		t.Fatalf("get active policy: %v", err)
 	}

@@ -15,7 +15,7 @@ import (
 func TestReportRedactsSensitiveMetadata(t *testing.T) {
 	engine := NewEngine()
 
-	_, err := engine.Report(types.ReportRequest{
+	_, err := engine.Report(context.Background(), types.ReportRequest{
 		RequestID:  "req_report",
 		DecisionID: "dec_report",
 		AdapterID:  "resource-test",
@@ -41,7 +41,7 @@ func TestReportRedactsSensitiveMetadata(t *testing.T) {
 		t.Fatalf("report: %v", err)
 	}
 
-	events, err := engine.Events(10)
+	events, err := engine.Events(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("events: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestReportRedactsSensitiveMetadata(t *testing.T) {
 func TestResourceDecisionDoesNotPersistSecretValueInEvents(t *testing.T) {
 	engine := NewEngine()
 
-	decision, err := engine.Decide(types.PolicyRequest{
+	decision, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_input",
 		RequestKind: types.RequestKindInput,
 		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
@@ -80,7 +80,7 @@ func TestResourceDecisionDoesNotPersistSecretValueInEvents(t *testing.T) {
 	}
 	handleID := handleIDFromDecision(t, decision)
 
-	_, err = engine.Decide(types.PolicyRequest{
+	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_resource",
 		RequestKind: types.RequestKindResourceAccess,
 		Actor:       types.ActorContext{UserID: "u1", HostID: "resource"},
@@ -93,7 +93,7 @@ func TestResourceDecisionDoesNotPersistSecretValueInEvents(t *testing.T) {
 		t.Fatalf("resource decide: %v", err)
 	}
 
-	events, err := engine.Events(10)
+	events, err := engine.Events(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("events: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestResourceDecisionDoesNotPersistSecretValueInEvents(t *testing.T) {
 func TestDecisionWithoutSessionFailsClosedBeforeSecretHandleCreation(t *testing.T) {
 	engine := NewEngine()
 
-	decision, err := engine.Decide(types.PolicyRequest{
+	decision, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_missing_session",
 		RequestKind: types.RequestKindInput,
 		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
@@ -144,7 +144,7 @@ func TestInputSecretFailsClosedWithoutPolicyRule(t *testing.T) {
 	})
 	engine := NewEngine(WithPolicyBundle(bundle))
 
-	decision, err := engine.Decide(types.PolicyRequest{
+	decision, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_secret_without_policy",
 		RequestKind: types.RequestKindInput,
 		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
@@ -197,7 +197,7 @@ func TestHydrateSecretHandlesFromStore(t *testing.T) {
 	})
 
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(bundle))
-	inputDec, err := engine.Decide(types.PolicyRequest{
+	inputDec, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_hydrate_input",
 		RequestKind: types.RequestKindInput,
 		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
@@ -215,13 +215,13 @@ func TestHydrateSecretHandlesFromStore(t *testing.T) {
 	handleID := handleIDFromDecision(t, inputDec)
 
 	restartedEngine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(bundle))
-	handles, _ := testVault(restartedEngine).Snapshot()
+	handles, _ := testVault(restartedEngine).Snapshot(context.Background())
 	_, inMemory := handles[handleID]
 	if !inMemory {
 		t.Fatal("secret handle should be hydrated into memory after restart")
 	}
 
-	resourceDecision, err := restartedEngine.Decide(types.PolicyRequest{
+	resourceDecision, err := restartedEngine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_hydrate_resource",
 		RequestKind: types.RequestKindResourceAccess,
 		Actor:       types.ActorContext{UserID: "u1", HostID: "resource"},
@@ -263,7 +263,7 @@ func TestSecretHandleExpiresAt(t *testing.T) {
 	})
 	engine := NewEngine(WithPolicyBundle(bundle))
 
-	inputDec, err := engine.Decide(types.PolicyRequest{
+	inputDec, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_input_expire",
 		RequestKind: types.RequestKindInput,
 		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
@@ -280,12 +280,12 @@ func TestSecretHandleExpiresAt(t *testing.T) {
 	}
 	handleID := handleIDFromDecision(t, inputDec)
 
-	handles, values := testVault(engine).Snapshot()
+	handles, values := testVault(engine).Snapshot(context.Background())
 	expired := handles[handleID]
 	expired.ExpiresAt = time.Now().Add(-1 * time.Minute)
-	testVault(engine).OverrideHandle(expired, values[handleID])
+	testVault(engine).OverrideHandle(context.Background(), expired, values[handleID])
 
-	resolveDec, err := engine.Decide(types.PolicyRequest{
+	resolveDec, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_expire_resolve",
 		RequestKind: types.RequestKindResourceAccess,
 		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
@@ -331,7 +331,7 @@ func TestDecideInputPathWithoutSecrets(t *testing.T) {
 		},
 	}
 
-	dec, err := engine.Decide(req)
+	dec, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}

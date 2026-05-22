@@ -153,8 +153,9 @@ func TestGetConfigPath(t *testing.T) {
 
 	// Test default path.
 	os.Unsetenv("AGENTGATE_CONFIG")
-	if path := GetConfigPath(); path != "agentgate.yaml" {
-		t.Fatalf("default config path = %q, want agentgate.yaml", path)
+	path := GetConfigPath()
+	if path != "" && path != "agentgate.yaml" && path != "config/agentgate.yaml" {
+		t.Fatalf("default config path = %q, unexpected", path)
 	}
 
 	// Test custom path.

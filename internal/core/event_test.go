@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"log"
 	"testing"
 	"time"
@@ -12,14 +13,14 @@ func TestMaxEventsIsConfigurable(t *testing.T) {
 	engine := NewEngine(WithMaxEvents(3))
 
 	for i := 0; i < 5; i++ {
-		_ = engine.appendEvent(types.EventEnvelope{
+		_ = engine.appendEvent(context.Background(), types.EventEnvelope{
 			EventID:    newID("evt"),
 			EventType:  "test",
 			OccurredAt: time.Now().UTC(),
 		})
 	}
 
-	events, err := engine.Events(10)
+	events, err := engine.Events(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("events: %v", err)
 	}
@@ -47,12 +48,12 @@ type cleanupEventStore struct {
 	deletedCount int64
 }
 
-func (s *cleanupEventStore) AppendEvent(event types.EventEnvelope) error { return nil }
-func (s *cleanupEventStore) ListEvents(limit int) ([]types.EventEnvelope, error) { return nil, nil }
-func (s *cleanupEventStore) GetEventByDecisionID(id string) (types.EventEnvelope, bool, error) {
+func (s *cleanupEventStore) AppendEvent(ctx context.Context, event types.EventEnvelope) error { return nil }
+func (s *cleanupEventStore) ListEvents(ctx context.Context, limit int) ([]types.EventEnvelope, error) { return nil, nil }
+func (s *cleanupEventStore) GetEventByDecisionID(ctx context.Context, id string) (types.EventEnvelope, bool, error) {
 	return types.EventEnvelope{}, false, nil
 }
-func (s *cleanupEventStore) PruneEvents(before time.Time) (int64, error) {
+func (s *cleanupEventStore) PruneEvents(ctx context.Context, before time.Time) (int64, error) {
 	s.deletedCount++
 	return 1, nil
 }

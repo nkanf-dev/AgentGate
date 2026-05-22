@@ -42,14 +42,14 @@ func TestSQLiteStoreEventEnvelopeRoundTrip(t *testing.T) {
 		OccurredAt: time.Date(2026, 4, 29, 12, 1, 0, 0, time.UTC),
 	}
 
-	if err := store.AppendEvent(first); err != nil {
+	if err := store.AppendEvent(context.Background(), first); err != nil {
 		t.Fatalf("append first event: %v", err)
 	}
-	if err := store.AppendEvent(second); err != nil {
+	if err := store.AppendEvent(context.Background(), second); err != nil {
 		t.Fatalf("append second event: %v", err)
 	}
 
-	events, err := store.ListEvents(10)
+	events, err := store.ListEvents(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestSQLiteStoreEventEnvelopeRoundTrip(t *testing.T) {
 	if events[0].Surface != types.SurfaceInput || events[0].Effect != types.EffectAllowWithAudit {
 		t.Fatalf("surface/effect did not round trip: %#v", events[0])
 	}
-	decisionEvent, found, err := store.GetEventByDecisionID("dec_1")
+	decisionEvent, found, err := store.GetEventByDecisionID(context.Background(), "dec_1")
 	if err != nil {
 		t.Fatalf("get decision event: %v", err)
 	}
@@ -100,10 +100,10 @@ func TestSQLiteStoreSessionFactsRoundTrip(t *testing.T) {
 			FirstRequestAt:      &first,
 		},
 	}
-	if err := store.UpsertSessionFacts(record); err != nil {
+	if err := store.UpsertSessionFacts(context.Background(), record); err != nil {
 		t.Fatalf("upsert session facts: %v", err)
 	}
-	got, found, err := store.GetSessionFacts("sess_facts")
+	got, found, err := store.GetSessionFacts(context.Background(), "sess_facts")
 	if err != nil {
 		t.Fatalf("get session facts: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestSQLiteStoreSessionFactsRoundTrip(t *testing.T) {
 	if got.Facts.LastRequestAt == nil || !got.Facts.LastRequestAt.Equal(now) {
 		t.Fatalf("last_request_at did not round trip: %#v", got.Facts.LastRequestAt)
 	}
-	if err := store.UpdateSessionFacts("sess_facts", func(existing types.SessionFactsRecord, found bool) (types.SessionFactsRecord, error) {
+	if err := store.UpdateSessionFacts(context.Background(), "sess_facts", func(ctx context.Context, existing types.SessionFactsRecord, found bool) (types.SessionFactsRecord, error) {
 		if !found {
 			t.Fatal("expected existing session facts in update callback")
 		}
@@ -127,7 +127,7 @@ func TestSQLiteStoreSessionFactsRoundTrip(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("update session facts: %v", err)
 	}
-	updated, found, err := store.GetSessionFacts("sess_facts")
+	updated, found, err := store.GetSessionFacts(context.Background(), "sess_facts")
 	if err != nil {
 		t.Fatalf("get updated session facts: %v", err)
 	}
@@ -157,10 +157,10 @@ func TestSQLiteStoreStateRoundTrip(t *testing.T) {
 			CanPauseForApproval: true,
 		},
 	}
-	if err := store.UpsertAdapterRegistration(registration, now, now); err != nil {
+	if err := store.UpsertAdapterRegistration(context.Background(), registration, now, now); err != nil {
 		t.Fatalf("upsert adapter: %v", err)
 	}
-	adapters, err := store.ListAdapterRegistrations()
+	adapters, err := store.ListAdapterRegistrations(context.Background())
 	if err != nil {
 		t.Fatalf("list adapters: %v", err)
 	}
@@ -179,10 +179,10 @@ func TestSQLiteStoreStateRoundTrip(t *testing.T) {
 		ApprovalChannel:  "approval-local",
 		ExpectedSurfaces: []types.Surface{types.SurfaceInput, types.SurfaceRuntime},
 	}
-	if err := store.SaveIntegrationDefinition(definition, now); err != nil {
+	if err := store.SaveIntegrationDefinition(context.Background(), definition, now); err != nil {
 		t.Fatalf("save integration definition: %v", err)
 	}
-	foundDefinition, found, err := store.GetIntegrationDefinition("openclaw-main")
+	foundDefinition, found, err := store.GetIntegrationDefinition(context.Background(), "openclaw-main")
 	if err != nil {
 		t.Fatalf("get integration definition: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestSQLiteStoreStateRoundTrip(t *testing.T) {
 	if foundDefinition.ApprovalChannel != "approval-local" {
 		t.Fatalf("integration definition approval channel did not round trip: %#v", foundDefinition)
 	}
-	definitions, err := store.ListIntegrationDefinitions()
+	definitions, err := store.ListIntegrationDefinitions(context.Background())
 	if err != nil {
 		t.Fatalf("list integration definitions: %v", err)
 	}
@@ -211,17 +211,17 @@ func TestSQLiteStoreStateRoundTrip(t *testing.T) {
 		CreatedAt:  now,
 		ExpiresAt:  now.Add(10 * time.Minute),
 	}
-	if err := store.SaveApproval(approval); err != nil {
+	if err := store.SaveApproval(context.Background(), approval); err != nil {
 		t.Fatalf("save approval: %v", err)
 	}
-	foundApproval, found, err := store.GetApproval("appr_1")
+	foundApproval, found, err := store.GetApproval(context.Background(), "appr_1")
 	if err != nil {
 		t.Fatalf("get approval: %v", err)
 	}
 	if !found || foundApproval.AttemptID != approval.AttemptID {
 		t.Fatalf("approval did not round trip: found=%v approval=%#v", found, foundApproval)
 	}
-	approvals, err := store.ListApprovals(10)
+	approvals, err := store.ListApprovals(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("list approvals: %v", err)
 	}
@@ -229,10 +229,10 @@ func TestSQLiteStoreStateRoundTrip(t *testing.T) {
 		t.Fatalf("expected one approval, got %d", len(approvals))
 	}
 
-	if err := store.SaveAttemptGrant("sess_1", "task_1", "attempt_1", "appr_1", approval.ExpiresAt); err != nil {
+	if err := store.SaveAttemptGrant(context.Background(), "sess_1", "task_1", "attempt_1", "appr_1", approval.ExpiresAt); err != nil {
 		t.Fatalf("save grant: %v", err)
 	}
-	grant, found, err := store.GetAttemptGrant("sess_1", "task_1", "attempt_1")
+	grant, found, err := store.GetAttemptGrant(context.Background(), "sess_1", "task_1", "attempt_1")
 	if err != nil {
 		t.Fatalf("get grant: %v", err)
 	}
@@ -250,10 +250,10 @@ func TestSQLiteStoreStateRoundTrip(t *testing.T) {
 		CreatedAt:   now,
 		ExpiresAt:   now.Add(1 * time.Hour),
 	}
-	if err := store.SaveSecretHandle(handle, "sk-test-value"); err != nil {
+	if err := store.SaveSecretHandle(context.Background(), handle, "sk-test-value"); err != nil {
 		t.Fatalf("save secret handle: %v", err)
 	}
-	foundHandle, value, found, err := store.GetSecretHandle("sech_1")
+	foundHandle, value, found, err := store.GetSecretHandle(context.Background(), "sech_1")
 	if err != nil {
 		t.Fatalf("get secret handle: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestSQLiteStorePolicyVersionLifecycle(t *testing.T) {
 	first := policy.DefaultBundle()
 	first.Version = 1
 	first.IssuedAt = time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
-	if _, err := store.SavePolicyVersion(first, "bootstrap", "initial", 0, first.IssuedAt); err != nil {
+	if _, err := store.SavePolicyVersion(context.Background(), first, "bootstrap", "initial", 0, first.IssuedAt); err != nil {
 		t.Fatalf("save first policy: %v", err)
 	}
 
@@ -292,11 +292,11 @@ func TestSQLiteStorePolicyVersionLifecycle(t *testing.T) {
 		ReasonCode:   "runtime_bash_denied",
 		When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
 	})
-	if _, err := store.SavePolicyVersion(second, "admin", "deny bash", 0, second.IssuedAt); err != nil {
+	if _, err := store.SavePolicyVersion(context.Background(), second, "admin", "deny bash", 0, second.IssuedAt); err != nil {
 		t.Fatalf("save second policy: %v", err)
 	}
 
-	active, record, found, err := store.GetActivePolicyBundle()
+	active, record, found, err := store.GetActivePolicyBundle(context.Background())
 	if err != nil {
 		t.Fatalf("get active policy: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestSQLiteStorePolicyVersionLifecycle(t *testing.T) {
 		t.Fatalf("active policy did not round trip: found=%v bundle=%#v record=%#v", found, active, record)
 	}
 
-	versions, err := store.ListPolicyVersions(10)
+	versions, err := store.ListPolicyVersions(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("list versions: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestSQLiteStorePolicyVersionLifecycle(t *testing.T) {
 		t.Fatalf("unexpected versions: %#v", versions)
 	}
 
-	versionOne, _, found, err := store.GetPolicyBundleVersion(1)
+	versionOne, _, found, err := store.GetPolicyBundleVersion(context.Background(), 1)
 	if err != nil {
 		t.Fatalf("get version 1: %v", err)
 	}
@@ -341,15 +341,15 @@ func TestPruneEvents(t *testing.T) {
 		Summary:    "recent",
 		OccurredAt: now.Add(-1 * time.Hour),
 	}
-	if err := store.AppendEvent(old); err != nil {
+	if err := store.AppendEvent(context.Background(), old); err != nil {
 		t.Fatalf("append old: %v", err)
 	}
-	if err := store.AppendEvent(recent); err != nil {
+	if err := store.AppendEvent(context.Background(), recent); err != nil {
 		t.Fatalf("append recent: %v", err)
 	}
 
 	cutoff := now.Add(-7 * 24 * time.Hour)
-	deleted, err := store.PruneEvents(cutoff)
+	deleted, err := store.PruneEvents(context.Background(), cutoff)
 	if err != nil {
 		t.Fatalf("prune: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestPruneEvents(t *testing.T) {
 		t.Fatalf("expected 1 deleted, got %d", deleted)
 	}
 
-	events, err := store.ListEvents(10)
+	events, err := store.ListEvents(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestPruneEvents(t *testing.T) {
 		t.Fatalf("expected only recent event, got %#v", events)
 	}
 
-	deleted, err = store.PruneEvents(cutoff)
+	deleted, err = store.PruneEvents(context.Background(), cutoff)
 	if err != nil {
 		t.Fatalf("prune again: %v", err)
 	}

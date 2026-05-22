@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"sync/atomic"
@@ -41,15 +42,15 @@ func newPolicyManager(stateStore StateStore, bundle policy.Bundle, bundles []pol
 	return manager
 }
 
-func (m *PolicyManager) Active() policySnapshot {
+func (m *PolicyManager) Active(ctx context.Context) policySnapshot {
 	return *(m.active.Load().(*policySnapshot))
 }
 
-func (m *PolicyManager) Publish(bundle policy.Bundle, operatorID string, message string, sourceVersion int, now time.Time, event types.EventEnvelope) (PolicyCurrentResponse, error) {
+func (m *PolicyManager) Publish(ctx context.Context, bundle policy.Bundle, operatorID string, message string, sourceVersion int, now time.Time, event types.EventEnvelope) (PolicyCurrentResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	current := m.Active()
+	current := m.Active(ctx)
 	nextBundle := clonePolicyBundle(bundle)
 	nextBundle.Version = max(current.bundle.Version+1, nextBundle.Version)
 	nextBundle.Status = "active"
@@ -58,7 +59,7 @@ func (m *PolicyManager) Publish(bundle policy.Bundle, operatorID string, message
 	var record policy.VersionRecord
 	var err error
 	if m.stateStore != nil {
-		record, err = m.stateStore.SavePolicyVersionAtomic(nextBundle, operatorID, message, sourceVersion, now, event)
+		record, err = m.stateStore.SavePolicyVersionAtomic(ctx, nextBundle, operatorID, message, sourceVersion, now, event)
 		if err != nil {
 			return PolicyCurrentResponse{}, err
 		}
@@ -85,11 +86,11 @@ func (m *PolicyManager) Publish(bundle policy.Bundle, operatorID string, message
 	return PolicyCurrentResponse{Bundle: clonePolicyBundle(activeBundle), Record: record}, nil
 }
 
-func (m *PolicyManager) Rollback(version int, operatorID string, message string, now time.Time, event types.EventEnvelope) (PolicyCurrentResponse, error) {
+func (m *PolicyManager) Rollback(ctx context.Context, version int, operatorID string, message string, now time.Time, event types.EventEnvelope) (PolicyCurrentResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	sourceBundle, found, err := m.bundleForVersion(version)
+	sourceBundle, found, err := m.bundleForVersion(ctx, version)
 	if err != nil {
 		return PolicyCurrentResponse{}, err
 	}
@@ -97,7 +98,7 @@ func (m *PolicyManager) Rollback(version int, operatorID string, message string,
 		return PolicyCurrentResponse{}, errStatus(404, "policy_version_not_found", "policy version was not found")
 	}
 
-	current := m.Active()
+	current := m.Active(ctx)
 	nextBundle := clonePolicyBundle(sourceBundle)
 	nextBundle.Version = max(current.bundle.Version+1, nextBundle.Version)
 	nextBundle.Status = "active"
@@ -105,7 +106,7 @@ func (m *PolicyManager) Rollback(version int, operatorID string, message string,
 
 	var record policy.VersionRecord
 	if m.stateStore != nil {
-		record, err = m.stateStore.SavePolicyVersionAtomic(nextBundle, operatorID, message, version, now, event)
+		record, err = m.stateStore.SavePolicyVersionAtomic(ctx, nextBundle, operatorID, message, version, now, event)
 		if err != nil {
 			return PolicyCurrentResponse{}, err
 		}
@@ -132,31 +133,31 @@ func (m *PolicyManager) Rollback(version int, operatorID string, message string,
 	return PolicyCurrentResponse{Bundle: clonePolicyBundle(activeBundle), Record: record}, nil
 }
 
-func (m *PolicyManager) BundleForVersion(version int) (policy.Bundle, bool, error) {
-	return m.bundleForVersion(version)
+func (m *PolicyManager) BundleForVersion(ctx context.Context, version int) (policy.Bundle, bool, error) {
+	return m.bundleForVersion(ctx, version)
 }
 
-func (m *PolicyManager) bundleForVersion(version int) (policy.Bundle, bool, error) {
+func (m *PolicyManager) bundleForVersion(ctx context.Context, version int) (policy.Bundle, bool, error) {
 	if m.stateStore == nil {
 		// In-memory fallback
-		current := m.Active()
+		current := m.Active(ctx)
 		if current.bundle.Version == version {
 			return clonePolicyBundle(current.bundle), true, nil
 		}
 		return policy.Bundle{}, false, nil
 	}
-	bundle, _, found, err := m.stateStore.GetPolicyBundleVersion(version)
+	bundle, _, found, err := m.stateStore.GetPolicyBundleVersion(ctx, version)
 	if err != nil {
 		return policy.Bundle{}, false, err
 	}
 	return bundle, found, nil
 }
 
-func (m *PolicyManager) Hydrate() error {
+func (m *PolicyManager) Hydrate(ctx context.Context) error {
 	if m.stateStore == nil {
 		return nil
 	}
-	bundle, record, found, err := m.stateStore.GetActivePolicyBundle()
+	bundle, record, found, err := m.stateStore.GetActivePolicyBundle(ctx)
 	if err != nil {
 		return err
 	}

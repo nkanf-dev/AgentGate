@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,12 +12,12 @@ import (
 )
 
 type ApprovalStore interface {
-	Create(approval types.ApprovalRecord) error
-	Resolve(command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error)
-	FindPending(sessionID, taskID, attemptID string, now time.Time) (*types.ApprovalRecord, error)
-	ValidGrant(session types.SessionContext, now time.Time) (types.AttemptGrant, bool, error)
-	Hydrate() error
-	List(limit int) ([]types.ApprovalRecord, error)
+	Create(ctx context.Context, approval types.ApprovalRecord) error
+	Resolve(ctx context.Context, command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error)
+	FindPending(ctx context.Context, sessionID, taskID, attemptID string, now time.Time) (*types.ApprovalRecord, error)
+	ValidGrant(ctx context.Context, session types.SessionContext, now time.Time) (types.AttemptGrant, bool, error)
+	Hydrate(ctx context.Context) error
+	List(ctx context.Context, limit int) ([]types.ApprovalRecord, error)
 }
 
 type sqliteApprovalStore struct {
@@ -35,16 +36,16 @@ func newApprovalStore(stateStore StateStore) ApprovalStore {
 	}
 }
 
-func (s *sqliteApprovalStore) Hydrate() error {
+func (s *sqliteApprovalStore) Hydrate(ctx context.Context) error {
 	if s.stateStore == nil {
 		return nil
 	}
 	const limit = 1000000
-	records, err := s.stateStore.ListApprovals(limit)
+	records, err := s.stateStore.ListApprovals(ctx, limit)
 	if err != nil {
 		return err
 	}
-	grants, err := s.stateStore.ListAttemptGrants()
+	grants, err := s.stateStore.ListAttemptGrants(ctx)
 	if err != nil {
 		return err
 	}
@@ -61,9 +62,9 @@ func (s *sqliteApprovalStore) Hydrate() error {
 	return nil
 }
 
-func (s *sqliteApprovalStore) Create(approval types.ApprovalRecord) error {
+func (s *sqliteApprovalStore) Create(ctx context.Context, approval types.ApprovalRecord) error {
 	if s.stateStore != nil {
-		if err := s.stateStore.SaveApproval(approval); err != nil {
+		if err := s.stateStore.SaveApproval(ctx, approval); err != nil {
 			return err
 		}
 	}
@@ -73,9 +74,9 @@ func (s *sqliteApprovalStore) Create(approval types.ApprovalRecord) error {
 	return nil
 }
 
-func (s *sqliteApprovalStore) Resolve(command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error) {
+func (s *sqliteApprovalStore) Resolve(ctx context.Context, command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error) {
 	if s.stateStore != nil {
-		result, err := s.stateStore.ResolveApprovalAtomic(command, event)
+		result, err := s.stateStore.ResolveApprovalAtomic(ctx, command, event)
 		if err != nil {
 			return types.ApprovalResolveResult{}, err
 		}
@@ -127,7 +128,7 @@ func (s *sqliteApprovalStore) Resolve(command types.ApprovalResolveCommand, even
 	return result, nil
 }
 
-func (s *sqliteApprovalStore) FindPending(sessionID, taskID, attemptID string, now time.Time) (*types.ApprovalRecord, error) {
+func (s *sqliteApprovalStore) FindPending(ctx context.Context, sessionID, taskID, attemptID string, now time.Time) (*types.ApprovalRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, approval := range s.approvals {
@@ -145,7 +146,7 @@ func (s *sqliteApprovalStore) FindPending(sessionID, taskID, attemptID string, n
 	return nil, nil
 }
 
-func (s *sqliteApprovalStore) ValidGrant(session types.SessionContext, now time.Time) (types.AttemptGrant, bool, error) {
+func (s *sqliteApprovalStore) ValidGrant(ctx context.Context, session types.SessionContext, now time.Time) (types.AttemptGrant, bool, error) {
 	key := attemptKey(session.SessionID, session.TaskID, session.AttemptID)
 	s.mu.Lock()
 	grant, ok := s.grants[key]
@@ -155,7 +156,7 @@ func (s *sqliteApprovalStore) ValidGrant(session types.SessionContext, now time.
 	}
 	s.mu.Unlock()
 	if !ok && s.stateStore != nil {
-		stored, found, err := s.stateStore.GetAttemptGrant(session.SessionID, session.TaskID, session.AttemptID)
+		stored, found, err := s.stateStore.GetAttemptGrant(ctx, session.SessionID, session.TaskID, session.AttemptID)
 		if err != nil {
 			return types.AttemptGrant{}, false, err
 		}
@@ -176,11 +177,11 @@ func (s *sqliteApprovalStore) ValidGrant(session types.SessionContext, now time.
 	return types.AttemptGrant{}, false, nil
 }
 
-func (s *sqliteApprovalStore) List(limit int) ([]types.ApprovalRecord, error) {
+func (s *sqliteApprovalStore) List(ctx context.Context, limit int) ([]types.ApprovalRecord, error) {
 	if s.stateStore != nil {
 		// Note: we don't auto-expire in DB during List for performance,
 		// but the UI/API should handle display.
-		return s.stateStore.ListApprovals(limit)
+		return s.stateStore.ListApprovals(ctx, limit)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -195,7 +196,7 @@ func (s *sqliteApprovalStore) List(limit int) ([]types.ApprovalRecord, error) {
 	return results, nil
 }
 
-func (s *sqliteApprovalStore) OverrideApproval(approval types.ApprovalRecord) {
+func (s *sqliteApprovalStore) OverrideApproval(ctx context.Context, approval types.ApprovalRecord) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if approval.Status == types.ApprovalPending {
@@ -205,7 +206,7 @@ func (s *sqliteApprovalStore) OverrideApproval(approval types.ApprovalRecord) {
 	}
 }
 
-func (s *sqliteApprovalStore) SnapshotApprovals() map[string]types.ApprovalRecord {
+func (s *sqliteApprovalStore) SnapshotApprovals(ctx context.Context) map[string]types.ApprovalRecord {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	copy := make(map[string]types.ApprovalRecord, len(s.approvals))
@@ -215,7 +216,7 @@ func (s *sqliteApprovalStore) SnapshotApprovals() map[string]types.ApprovalRecor
 	return copy
 }
 
-func (s *sqliteApprovalStore) SnapshotGrants() map[string]types.AttemptGrant {
+func (s *sqliteApprovalStore) SnapshotGrants(ctx context.Context) map[string]types.AttemptGrant {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	copy := make(map[string]types.AttemptGrant, len(s.grants))

@@ -17,8 +17,8 @@ type SecretVault interface {
 	Resolve(ctx context.Context, handleID, sessionID, taskID string, now time.Time) (types.SecretHandle, string, error)
 	RedactValue(ctx context.Context, value interface{}) (interface{}, bool, error)
 	RedactString(ctx context.Context, text string) (string, error)
-	Detect(text string) ([]scanner.SecretFinding, []scanner.InjectionFinding, error)
-	Hydrate() error
+	Detect(ctx context.Context, text string) ([]scanner.SecretFinding, []scanner.InjectionFinding, error)
+	Hydrate(ctx context.Context) error
 }
 
 type secretVault struct {
@@ -41,11 +41,11 @@ func newSecretVault(stateStore StateStore, detector scanner.Detector, injectionD
 	}
 }
 
-func (v *secretVault) Hydrate() error {
+func (v *secretVault) Hydrate(ctx context.Context) error {
 	if v.stateStore == nil {
 		return nil
 	}
-	handles, err := v.stateStore.ListSecretHandles()
+	handles, err := v.stateStore.ListSecretHandles(ctx)
 	if err != nil {
 		return err
 	}
@@ -58,18 +58,18 @@ func (v *secretVault) Hydrate() error {
 	return nil
 }
 
-func (v *secretVault) Detect(text string) ([]scanner.SecretFinding, []scanner.InjectionFinding, error) {
+func (v *secretVault) Detect(ctx context.Context, text string) ([]scanner.SecretFinding, []scanner.InjectionFinding, error) {
 	if text == "" {
 		return nil, nil, nil
 	}
-	findings, err := v.detector.DetectSecrets(text)
+	findings, err := v.detector.DetectSecrets(ctx, text)
 	if err != nil {
 		return nil, nil, err
 	}
 	var injFindings []scanner.InjectionFinding
 	if v.injectionDetector != nil {
 		var err error
-		injFindings, err = v.injectionDetector.DetectInjections(text)
+		injFindings, err = v.injectionDetector.DetectInjections(ctx, text)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -81,7 +81,7 @@ func (v *secretVault) Rewrite(ctx context.Context, text, sessionID, taskID strin
 	if strings.TrimSpace(text) == "" {
 		return text, nil, nil, nil
 	}
-	findings, err := v.detector.DetectSecrets(text)
+	findings, err := v.detector.DetectSecrets(ctx, text)
 	if err != nil {
 		return "", nil, nil, err // Fail-closed (C1)
 	}
@@ -116,7 +116,7 @@ func (v *secretVault) Rewrite(ctx context.Context, text, sessionID, taskID strin
 	})
 	for index, handle := range handles {
 		if v.stateStore != nil {
-			if err := v.stateStore.SaveSecretHandle(handle, findings[index].Value); err != nil {
+			if err := v.stateStore.SaveSecretHandle(ctx, handle, findings[index].Value); err != nil {
 				return "", nil, nil, err // Fail-closed
 			}
 		}
@@ -136,7 +136,7 @@ func (v *secretVault) Resolve(ctx context.Context, handleID, sessionID, taskID s
 	value := v.values[handleID]
 	v.mu.RUnlock()
 	if !ok && v.stateStore != nil {
-		storedHandle, storedValue, found, err := v.stateStore.GetSecretHandle(handleID)
+		storedHandle, storedValue, found, err := v.stateStore.GetSecretHandle(ctx, handleID)
 		if err != nil {
 			return types.SecretHandle{}, "", err
 		}
@@ -205,7 +205,7 @@ func (v *secretVault) RedactString(ctx context.Context, text string) (string, er
 	if text == "" {
 		return text, nil
 	}
-	findings, err := v.detector.DetectSecrets(text)
+	findings, err := v.detector.DetectSecrets(ctx, text)
 	if err != nil {
 		return "[REDACTED:error]", err // Fail-closed (C2)
 	}
@@ -217,7 +217,7 @@ func (v *secretVault) RedactString(ctx context.Context, text string) (string, er
 	}), nil
 }
 
-func (v *secretVault) Snapshot() (map[string]types.SecretHandle, map[string]string) {
+func (v *secretVault) Snapshot(ctx context.Context) (map[string]types.SecretHandle, map[string]string) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	handles := make(map[string]types.SecretHandle, len(v.handles))
@@ -231,7 +231,7 @@ func (v *secretVault) Snapshot() (map[string]types.SecretHandle, map[string]stri
 	return handles, values
 }
 
-func (v *secretVault) OverrideHandle(handle types.SecretHandle, value string) {
+func (v *secretVault) OverrideHandle(ctx context.Context, handle types.SecretHandle, value string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.handles[handle.HandleID] = handle

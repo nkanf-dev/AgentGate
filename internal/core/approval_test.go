@@ -28,7 +28,7 @@ func TestExpiredApprovalCannotBeApproved(t *testing.T) {
 		Context: types.DecisionContext{Surface: types.SurfaceRuntime},
 	}
 
-	decision, err := engine.Decide(req)
+	decision, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
@@ -38,12 +38,12 @@ func TestExpiredApprovalCannotBeApproved(t *testing.T) {
 	}
 
 	// Expire the approval manually.
-	approvalsSnap := testApprovals(engine).SnapshotApprovals()
+	approvalsSnap := testApprovals(engine).SnapshotApprovals(context.Background())
 	approval := approvalsSnap[approvalID]
 	approval.ExpiresAt = time.Now().UTC().Add(-time.Minute)
-	testApprovals(engine).OverrideApproval(approval)
+	testApprovals(engine).OverrideApproval(context.Background(), approval)
 
-	_, err = engine.ResolveApproval(approvalID, types.ApprovalResolveRequest{
+	_, err = engine.ResolveApproval(context.Background(), approvalID, types.ApprovalResolveRequest{
 		Decision:   "allow_once",
 		OperatorID: "operator_1",
 		Channel:    "test",
@@ -57,7 +57,7 @@ func TestExpiredApprovalCannotBeApproved(t *testing.T) {
 	}
 	// Note: in the new architecture, we might not auto-expire pending approvals when listing
 	// unless specifically implemented. Let's see how e.Approvals is implemented.
-	// Current e.Approvals: return e.approvals.List(limit)
+	// Current e.Approvals: return e.approvals.List(context.Background(), limit)
 	// sqliteApprovalStore.List: returns s.approvals (pending) or s.stateStore.ListApprovals
 	// The test expectation might need adjustment or the implementation should match.
 	// ADR says ApprovalStore cleans up expired entries.
@@ -66,7 +66,7 @@ func TestExpiredApprovalCannotBeApproved(t *testing.T) {
 func TestApprovalsReadExpiresPendingRecords(t *testing.T) {
 	engine := NewEngine()
 	now := time.Now().UTC()
-	testApprovals(engine).OverrideApproval(types.ApprovalRecord{
+	testApprovals(engine).OverrideApproval(context.Background(), types.ApprovalRecord{
 		ApprovalID: "appr_expired",
 		RequestID:  "req_1",
 		SessionID:  "sess_1",
@@ -78,7 +78,7 @@ func TestApprovalsReadExpiresPendingRecords(t *testing.T) {
 		ExpiresAt:  now.Add(-time.Minute),
 	})
 
-	approvals, err := engine.Approvals(10)
+	approvals, err := engine.Approvals(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("approvals: %v", err)
 	}
@@ -116,12 +116,12 @@ func TestApprovalsReadExpiresPendingRecordsFromStateStore(t *testing.T) {
 		CreatedAt:  now.Add(-2 * time.Minute),
 		ExpiresAt:  now.Add(-time.Minute),
 	}
-	if err := stateStore.SaveApproval(approval); err != nil {
+	if err := stateStore.SaveApproval(context.Background(), approval); err != nil {
 		t.Fatalf("save approval: %v", err)
 	}
 
 	engine := NewEngine(WithStateStore(stateStore))
-	approvals, err := engine.Approvals(10)
+	approvals, err := engine.Approvals(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("approvals: %v", err)
 	}
@@ -145,14 +145,14 @@ func TestHydrateAttemptGrantsFromStore(t *testing.T) {
 	defer stateStore.Close()
 
 	now := time.Now().UTC()
-	if err := stateStore.SaveAttemptGrant("sess_g", "task_g", "attempt_g", "appr_g", now.Add(10*time.Minute)); err != nil {
+	if err := stateStore.SaveAttemptGrant(context.Background(), "sess_g", "task_g", "attempt_g", "appr_g", now.Add(10*time.Minute)); err != nil {
 		t.Fatalf("save grant: %v", err)
 	}
 
 	// Create engine — hydration should load the grant.
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
 	key := "sess_g:task_g:attempt_g"
-	grants := testApprovals(engine).SnapshotGrants()
+	grants := testApprovals(engine).SnapshotGrants(context.Background())
 	grant, inMemory := grants[key]
 	if !inMemory {
 		t.Fatal("attempt grant should be hydrated into memory")
@@ -162,7 +162,7 @@ func TestHydrateAttemptGrantsFromStore(t *testing.T) {
 	}
 
 	// Verify Decide uses the hydrated grant.
-	dec, err := engine.Decide(types.PolicyRequest{
+	dec, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_g",
 		RequestKind: types.RequestKindToolAttempt,
 		Session:     types.SessionContext{SessionID: "sess_g", TaskID: "task_g", AttemptID: "attempt_g"},
@@ -199,13 +199,13 @@ func TestResolveApprovalWriteOrderSQLiteFirst(t *testing.T) {
 		CreatedAt:  now,
 		ExpiresAt:  now.Add(10 * time.Minute),
 	}
-	if err := stateStore.SaveApproval(approval); err != nil {
+	if err := stateStore.SaveApproval(context.Background(), approval); err != nil {
 		t.Fatalf("save approval: %v", err)
 	}
 
 	engine := NewEngine(WithEventStore(failing), WithStateStore(failing))
 
-	_, err = engine.ResolveApproval("appr_order", types.ApprovalResolveRequest{
+	_, err = engine.ResolveApproval(context.Background(), "appr_order", types.ApprovalResolveRequest{
 		Decision:   "approve",
 		OperatorID: "op_1",
 	})
@@ -214,14 +214,14 @@ func TestResolveApprovalWriteOrderSQLiteFirst(t *testing.T) {
 	}
 
 	// The in-memory approval should still be Pending (not ghost-approved).
-	approvals := testApprovals(engine).SnapshotApprovals()
+	approvals := testApprovals(engine).SnapshotApprovals(context.Background())
 	stored := approvals["appr_order"]
 	if stored.Status != types.ApprovalPending {
 		t.Fatalf("memory approval status = %q, want pending (no ghost state)", stored.Status)
 	}
 
 	// No ghost grant should exist.
-	grants := testApprovals(engine).SnapshotGrants()
+	grants := testApprovals(engine).SnapshotGrants(context.Background())
 	grantCount := len(grants)
 	if grantCount != 0 {
 		t.Fatalf("memory should have no ghost grants: count=%d", grantCount)
@@ -247,20 +247,20 @@ func TestHydrateApprovalsFromStore(t *testing.T) {
 		CreatedAt:  now,
 		ExpiresAt:  now.Add(10 * time.Minute),
 	}
-	if err := stateStore.SaveApproval(approval); err != nil {
+	if err := stateStore.SaveApproval(context.Background(), approval); err != nil {
 		t.Fatalf("save approval: %v", err)
 	}
 
 	// Create engine — hydration should load the approval into memory.
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
-	approvals := testApprovals(engine).SnapshotApprovals()
+	approvals := testApprovals(engine).SnapshotApprovals(context.Background())
 	_, inMemory := approvals["appr_hydrate"]
 	if !inMemory {
 		t.Fatal("approval should be hydrated into memory")
 	}
 
 	// Verify it can be resolved (which reads from memory).
-	resp, err := engine.ResolveApproval("appr_hydrate", types.ApprovalResolveRequest{
+	resp, err := engine.ResolveApproval(context.Background(), "appr_hydrate", types.ApprovalResolveRequest{
 		Decision:   "approve",
 		OperatorID: "op_1",
 	})
@@ -297,7 +297,7 @@ func TestApprovalWriteOrderSQLiteFirst(t *testing.T) {
 
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(failing), WithPolicyBundle(bundle))
 
-	decision, err := engine.Decide(types.PolicyRequest{
+	decision, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_appr_order",
 		RequestKind: types.RequestKindToolAttempt,
 		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
@@ -319,7 +319,7 @@ func TestApprovalWriteOrderSQLiteFirst(t *testing.T) {
 	}
 
 	// Memory must not contain any ghost approvals.
-	approvals := testApprovals(engine).SnapshotApprovals()
+	approvals := testApprovals(engine).SnapshotApprovals(context.Background())
 	if len(approvals) != 0 {
 		t.Fatalf("memory should have no ghost approvals: count=%d", len(approvals))
 	}
@@ -330,11 +330,11 @@ type failingApprovalStateStore struct {
 	failSave bool
 }
 
-func (s *failingApprovalStateStore) SaveApproval(approval types.ApprovalRecord) error {
+func (s *failingApprovalStateStore) SaveApproval(ctx context.Context, approval types.ApprovalRecord) error {
 	if s.failSave {
 		return fmt.Errorf("simulated db failure")
 	}
-	return s.StateStore.SaveApproval(approval)
+	return s.StateStore.SaveApproval(ctx, approval)
 }
 
 func TestRuntimeApprovalGrantIsAttemptScoped(t *testing.T) {
@@ -361,14 +361,14 @@ func TestRuntimeApprovalGrantIsAttemptScoped(t *testing.T) {
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	}
 
-	firstDec, err := engine.Decide(req)
+	firstDec, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("first decide: %v", err)
 	}
 	approvalID := approvalIDFromDecision(t, firstDec)
 
 	// Approve it.
-	_, err = engine.ResolveApproval(approvalID, types.ApprovalResolveRequest{
+	_, err = engine.ResolveApproval(context.Background(), approvalID, types.ApprovalResolveRequest{
 		Decision:   "approve",
 		OperatorID: "op_1",
 	})
@@ -377,7 +377,7 @@ func TestRuntimeApprovalGrantIsAttemptScoped(t *testing.T) {
 	}
 
 	// Same attempt should be allowed now.
-	secondDec, err := engine.Decide(req)
+	secondDec, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("second decide: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestRuntimeApprovalGrantIsAttemptScoped(t *testing.T) {
 	reqDiffAttempt := req
 	reqDiffAttempt.RequestID = "req_2"
 	reqDiffAttempt.Session.AttemptID = "att_2"
-	thirdDec, err := engine.Decide(reqDiffAttempt)
+	thirdDec, err := engine.Decide(context.Background(), reqDiffAttempt)
 	if err != nil {
 		t.Fatalf("third decide: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestGrantPreCheckBypassesPolicy(t *testing.T) {
 	}
 
 	// Should be denied by policy.
-	dec1, err := engine.Decide(req)
+	dec1, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("decide 1: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestGrantPreCheckBypassesPolicy(t *testing.T) {
 	}
 
 	// Manually inject a grant for this attempt.
-	testApprovals(engine).Create(types.ApprovalRecord{
+	testApprovals(engine).Create(context.Background(), types.ApprovalRecord{
 		ApprovalID: "appr_bypass",
 		Status:     types.ApprovalPending,
 		SessionID:  "sess_1",
@@ -440,14 +440,14 @@ func TestGrantPreCheckBypassesPolicy(t *testing.T) {
 		AttemptID:  "att_1",
 		ExpiresAt:  time.Now().Add(1 * time.Hour),
 	})
-	testApprovals(engine).Resolve(types.ApprovalResolveCommand{
+	testApprovals(engine).Resolve(context.Background(), types.ApprovalResolveCommand{
 		ApprovalID: "appr_bypass",
 		Decision:   "approve",
 		ResolvedAt: time.Now(),
 	}, types.EventEnvelope{})
 
 	// Now it should be allowed by grant PRE-CHECK, bypassing the DENY policy.
-	dec2, err := engine.Decide(req)
+	dec2, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("decide 2: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestGrantPreCheckOnlyForRuntimeSurface(t *testing.T) {
 	}
 
 	// Manually inject a grant.
-	testApprovals(engine).Create(types.ApprovalRecord{
+	testApprovals(engine).Create(context.Background(), types.ApprovalRecord{
 		ApprovalID: "appr_input",
 		Status:     types.ApprovalPending,
 		SessionID:  "sess_1",
@@ -488,14 +488,14 @@ func TestGrantPreCheckOnlyForRuntimeSurface(t *testing.T) {
 		AttemptID:  "att_1",
 		ExpiresAt:  time.Now().Add(1 * time.Hour),
 	})
-	testApprovals(engine).Resolve(types.ApprovalResolveCommand{
+	testApprovals(engine).Resolve(context.Background(), types.ApprovalResolveCommand{
 		ApprovalID: "appr_input",
 		Decision:   "approve",
 		ResolvedAt: time.Now(),
 	}, types.EventEnvelope{})
 
 	// Grant pre-check should NOT trigger for Input surface.
-	dec, err := engine.Decide(req)
+	dec, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
@@ -528,7 +528,7 @@ func TestDuplicateApprovalPrevention(t *testing.T) {
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	}
 
-	first, err := engine.Decide(req)
+	first, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("first decide: %v", err)
 	}
@@ -536,7 +536,7 @@ func TestDuplicateApprovalPrevention(t *testing.T) {
 
 	// Second call for same attempt should return SAME approval ID.
 	req.RequestID = "req_dup_2"
-	second, err := engine.Decide(req)
+	second, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("second decide: %v", err)
 	}
@@ -547,7 +547,7 @@ func TestDuplicateApprovalPrevention(t *testing.T) {
 	}
 
 	// Verify only one approval exists in memory.
-	approvals := testApprovals(engine).SnapshotApprovals()
+	approvals := testApprovals(engine).SnapshotApprovals(context.Background())
 	if len(approvals) != 1 {
 		t.Fatalf("expected 1 approval in memory, got %d", len(approvals))
 	}
@@ -577,22 +577,22 @@ func TestDuplicateApprovalExpiredCreatesNew(t *testing.T) {
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	}
 
-	first, err := engine.Decide(req)
+	first, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("first decide: %v", err)
 	}
 	firstApprovalID := approvalIDFromDecision(t, first)
 
 	// Expire the approval manually.
-	for _, a := range testApprovals(engine).SnapshotApprovals() {
+	for _, a := range testApprovals(engine).SnapshotApprovals(context.Background()) {
 		if a.ApprovalID == firstApprovalID {
 			a.ExpiresAt = time.Now().Add(-1 * time.Minute)
-			testApprovals(engine).OverrideApproval(a)
+			testApprovals(engine).OverrideApproval(context.Background(), a)
 		}
 	}
 
 	// Second call should create a NEW approval (not reuse the expired one).
-	second, err := engine.Decide(types.PolicyRequest{
+	second, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_exp_dup_2",
 		RequestKind: types.RequestKindToolAttempt,
 		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
@@ -611,7 +611,7 @@ func TestDuplicateApprovalExpiredCreatesNew(t *testing.T) {
 	}
 
 	// Original expired one is gone from pending, new one is there.
-	approvals := testApprovals(engine).SnapshotApprovals()
+	approvals := testApprovals(engine).SnapshotApprovals(context.Background())
 	if len(approvals) != 1 {
 		t.Fatalf("expected 1 active approval in memory, got %d", len(approvals))
 	}
@@ -634,7 +634,7 @@ func TestApprovalTimeoutFromRuntimePolicy(t *testing.T) {
 
 	engine := NewEngine(WithPolicyBundle(bundle))
 	now := time.Now().UTC()
-	decision, err := engine.Decide(types.PolicyRequest{
+	decision, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_timeout",
 		RequestKind: types.RequestKindToolAttempt,
 		Actor:       types.ActorContext{UserID: "u1"},
@@ -675,7 +675,7 @@ func TestApprovalReasonFromPolicy(t *testing.T) {
 	})
 
 	engine := NewEngine(WithPolicyBundle(bundle))
-	decision, err := engine.Decide(types.PolicyRequest{
+	decision, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_reason",
 		RequestKind: types.RequestKindToolAttempt,
 		Actor:       types.ActorContext{UserID: "u1"},
@@ -708,23 +708,23 @@ type failingStateStore struct {
 	failEvents bool
 }
 
-func (s *failingStateStore) AppendEvent(event types.EventEnvelope) error {
+func (s *failingStateStore) AppendEvent(ctx context.Context, event types.EventEnvelope) error {
 	if s.failEvents {
 		return fmt.Errorf("simulated db failure")
 	}
 	return nil
 }
 
-func (s *failingStateStore) ListEvents(limit int) ([]types.EventEnvelope, error) { return nil, nil }
-func (s *failingStateStore) GetEventByDecisionID(id string) (types.EventEnvelope, bool, error) {
+func (s *failingStateStore) ListEvents(ctx context.Context, limit int) ([]types.EventEnvelope, error) { return nil, nil }
+func (s *failingStateStore) GetEventByDecisionID(ctx context.Context, id string) (types.EventEnvelope, bool, error) {
 	return types.EventEnvelope{}, false, nil
 }
-func (s *failingStateStore) PruneEvents(before time.Time) (int64, error) { return 0, nil }
+func (s *failingStateStore) PruneEvents(ctx context.Context, before time.Time) (int64, error) { return 0, nil }
 
-func (s *failingStateStore) ResolveApprovalAtomic(command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error) {
+func (s *failingStateStore) ResolveApprovalAtomic(ctx context.Context, command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error) {
 	if s.failEvents {
 		return types.ApprovalResolveResult{}, fmt.Errorf("simulated db failure")
 	}
-	return s.StateStore.ResolveApprovalAtomic(command, event)
+	return s.StateStore.ResolveApprovalAtomic(ctx, command, event)
 }
 

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"testing"
 
 	"github.com/agentgate/agentgate/internal/types"
@@ -9,7 +10,7 @@ import (
 func TestIntegrationHealthMatchesByIntegrationIDOnly(t *testing.T) {
 	engine := NewEngine(WithStateStore(newMemoryStateStore()))
 
-	definition, err := engine.SaveIntegration(types.IntegrationDefinition{
+	definition, err := engine.SaveIntegration(context.Background(), types.IntegrationDefinition{
 		ID:               "openclaw-main",
 		Name:             "OpenClaw main adapter",
 		Kind:             "adapter",
@@ -23,7 +24,7 @@ func TestIntegrationHealthMatchesByIntegrationIDOnly(t *testing.T) {
 		t.Fatalf("new integration status = %q, want missing", definition.Health.Status)
 	}
 
-	_, err = engine.RegisterAdapter(types.AdapterRegistration{
+	_, err = engine.RegisterAdapter(context.Background(), types.AdapterRegistration{
 		AdapterID:   "openclaw-main",
 		AdapterKind: "host_plugin",
 		Host:        types.HostDescriptor{Kind: "openclaw"},
@@ -37,7 +38,7 @@ func TestIntegrationHealthMatchesByIntegrationIDOnly(t *testing.T) {
 		t.Fatalf("register adapter without integration_id: %v", err)
 	}
 
-	result, err := engine.GetIntegration("openclaw-main")
+	result, err := engine.GetIntegration(context.Background(), "openclaw-main")
 	if err != nil {
 		t.Fatalf("get integration: %v", err)
 	}
@@ -48,7 +49,7 @@ func TestIntegrationHealthMatchesByIntegrationIDOnly(t *testing.T) {
 		t.Fatalf("expected no fallback matches, got %#v", result.MatchedAdapters)
 	}
 
-	_, err = engine.RegisterAdapter(types.AdapterRegistration{
+	_, err = engine.RegisterAdapter(context.Background(), types.AdapterRegistration{
 		AdapterID:     "openclaw-main-01",
 		IntegrationID: "openclaw-main",
 		AdapterKind:   "host_plugin",
@@ -65,7 +66,7 @@ func TestIntegrationHealthMatchesByIntegrationIDOnly(t *testing.T) {
 		t.Fatalf("register matching adapter: %v", err)
 	}
 
-	result, err = engine.GetIntegration("openclaw-main")
+	result, err = engine.GetIntegration(context.Background(), "openclaw-main")
 	if err != nil {
 		t.Fatalf("get integration again: %v", err)
 	}
@@ -80,7 +81,7 @@ func TestIntegrationHealthMatchesByIntegrationIDOnly(t *testing.T) {
 func TestIntegrationHealthDisabledAndMissing(t *testing.T) {
 	engine := NewEngine(WithStateStore(newMemoryStateStore()))
 
-	_, err := engine.SaveIntegration(types.IntegrationDefinition{
+	_, err := engine.SaveIntegration(context.Background(), types.IntegrationDefinition{
 		ID:      "disabled-int",
 		Name:    "Disabled",
 		Kind:    "adapter",
@@ -90,7 +91,7 @@ func TestIntegrationHealthDisabledAndMissing(t *testing.T) {
 		t.Fatalf("save disabled: %v", err)
 	}
 
-	disabled, err := engine.GetIntegration("disabled-int")
+	disabled, err := engine.GetIntegration(context.Background(), "disabled-int")
 	if err != nil {
 		t.Fatalf("get disabled: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestIntegrationHealthDisabledAndMissing(t *testing.T) {
 		t.Fatalf("disabled status = %q, want disabled", disabled.Health.Status)
 	}
 
-	_, err = engine.SaveIntegration(types.IntegrationDefinition{
+	_, err = engine.SaveIntegration(context.Background(), types.IntegrationDefinition{
 		ID:      "enabled-int",
 		Name:    "Enabled",
 		Kind:    "adapter",
@@ -107,7 +108,7 @@ func TestIntegrationHealthDisabledAndMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("save enabled: %v", err)
 	}
-	enabled, err := engine.GetIntegration("enabled-int")
+	enabled, err := engine.GetIntegration(context.Background(), "enabled-int")
 	if err != nil {
 		t.Fatalf("get enabled: %v", err)
 	}
@@ -119,7 +120,7 @@ func TestIntegrationHealthDisabledAndMissing(t *testing.T) {
 func TestRuntimeApprovalUsesIntegrationApprovalChannel(t *testing.T) {
 	engine := NewEngine(WithStateStore(newMemoryStateStore()))
 
-	_, err := engine.SaveIntegration(types.IntegrationDefinition{
+	_, err := engine.SaveIntegration(context.Background(), types.IntegrationDefinition{
 		ID:               "openclaw-main",
 		Name:             "OpenClaw main adapter",
 		Kind:             "adapter",
@@ -132,7 +133,7 @@ func TestRuntimeApprovalUsesIntegrationApprovalChannel(t *testing.T) {
 	}
 
 	// Register adapter
-	_, err = engine.RegisterAdapter(types.AdapterRegistration{
+	_, err = engine.RegisterAdapter(context.Background(), types.AdapterRegistration{
 		AdapterID:     "openclaw-main-01",
 		IntegrationID: "openclaw-main",
 		AdapterKind:   "host_plugin",
@@ -149,7 +150,7 @@ func TestRuntimeApprovalUsesIntegrationApprovalChannel(t *testing.T) {
 		t.Fatalf("register adapter: %v", err)
 	}
 
-	dec, err := engine.Decide(types.PolicyRequest{
+	dec, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_approval_channel",
 		RequestKind: types.RequestKindToolAttempt,
 		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},

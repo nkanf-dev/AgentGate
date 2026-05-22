@@ -28,7 +28,7 @@ type runtimeState struct {
 	cancel        context.CancelFunc
 }
 
-func (s *runtimeState) snapshot() *types.IntegrationRuntimeView {
+func (s *runtimeState) snapshot(ctx context.Context) *types.IntegrationRuntimeView {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	view := &types.IntegrationRuntimeView{
@@ -63,34 +63,34 @@ func newRuntimeSupervisor() *RuntimeSupervisor {
 	return &RuntimeSupervisor{runtimes: make(map[string]*runtimeState)}
 }
 
-func (s *RuntimeSupervisor) View(integrationID string) *types.IntegrationRuntimeView {
+func (s *RuntimeSupervisor) View(ctx context.Context, integrationID string) *types.IntegrationRuntimeView {
 	s.mu.RLock()
 	state := s.runtimes[integrationID]
 	s.mu.RUnlock()
 	if state == nil {
 		return nil
 	}
-	return state.snapshot()
+	return state.snapshot(ctx)
 }
 
-func (s *RuntimeSupervisor) Ensure(definition types.IntegrationDefinition) error {
+func (s *RuntimeSupervisor) Ensure(ctx context.Context, definition types.IntegrationDefinition) error {
 	if definition.Runtime == nil || !definition.Runtime.Managed || !definition.Runtime.Enabled || !definition.Enabled {
-		s.Stop(definition.ID)
+		s.Stop(ctx, definition.ID)
 		return nil
 	}
 	s.mu.RLock()
 	current := s.runtimes[definition.ID]
 	s.mu.RUnlock()
 	if current != nil {
-		snap := current.snapshot()
+		snap := current.snapshot(ctx)
 		if snap.Status == "starting" || snap.Status == "running" {
 			return nil
 		}
 	}
-	return s.Start(definition)
+	return s.Start(ctx, definition)
 }
 
-func (s *RuntimeSupervisor) Start(definition types.IntegrationDefinition) error {
+func (s *RuntimeSupervisor) Start(ctx context.Context, definition types.IntegrationDefinition) error {
 	if definition.Runtime == nil {
 		return nil
 	}
@@ -98,8 +98,9 @@ func (s *RuntimeSupervisor) Start(definition types.IntegrationDefinition) error 
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	// Background task should use background context but with a timeout for start
+	startCtx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(startCtx, command[0], command[1:]...)
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Dir = resolveRepoRoot()
 
@@ -117,7 +118,7 @@ func (s *RuntimeSupervisor) Start(definition types.IntegrationDefinition) error 
 
 	if err := cmd.Start(); err != nil {
 		cancel()
-		s.setError(definition.ID, "start_failed", err)
+		s.setError(ctx, definition.ID, "start_failed", err)
 		return err
 	}
 
@@ -128,11 +129,11 @@ func (s *RuntimeSupervisor) Start(definition types.IntegrationDefinition) error 
 	state.LastHealthyAt = &started
 	state.mu.Unlock()
 
-	go s.watch(definition, state, cmd)
+	go s.watch(context.Background(), definition, state, cmd)
 	return nil
 }
 
-func (s *RuntimeSupervisor) watch(definition types.IntegrationDefinition, state *runtimeState, cmd *exec.Cmd) {
+func (s *RuntimeSupervisor) watch(ctx context.Context, definition types.IntegrationDefinition, state *runtimeState, cmd *exec.Cmd) {
 	err := cmd.Wait()
 	exitedAt := time.Now().UTC()
 
@@ -163,10 +164,10 @@ func (s *RuntimeSupervisor) watch(definition types.IntegrationDefinition, state 
 	state.mu.Lock()
 	state.RestartCount++
 	state.mu.Unlock()
-	_ = s.Start(definition)
+	_ = s.Start(ctx, definition)
 }
 
-func (s *RuntimeSupervisor) Stop(integrationID string) {
+func (s *RuntimeSupervisor) Stop(ctx context.Context, integrationID string) {
 	s.mu.Lock()
 	state := s.runtimes[integrationID]
 	if state != nil {
@@ -178,7 +179,7 @@ func (s *RuntimeSupervisor) Stop(integrationID string) {
 	}
 }
 
-func (s *RuntimeSupervisor) setError(integrationID string, status string, err error) {
+func (s *RuntimeSupervisor) setError(ctx context.Context, integrationID string, status string, err error) {
 	now := time.Now().UTC()
 	s.mu.Lock()
 	state := s.runtimes[integrationID]

@@ -34,17 +34,17 @@ func NewMLScanner(scriptPath string, timeout time.Duration) *MLScanner {
 
 // DetectSecrets sends text to the ML subprocess and returns findings.
 // If the subprocess is not running it will be started (cold start on first call).
-func (m *MLScanner) DetectSecrets(text string) ([]SecretFinding, error) {
+func (m *MLScanner) DetectSecrets(ctx context.Context, text string) ([]SecretFinding, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if err := m.ensureRunning(); err != nil {
+	if err := m.ensureRunning(ctx); err != nil {
 		return nil, fmt.Errorf("ml scanner start: %w", err)
 	}
 
 	// Send one line.
 	if _, err := fmt.Fprintln(m.stdin, text); err != nil {
-		m.kill()
+		m.kill(ctx)
 		return nil, fmt.Errorf("ml scanner write: %w", err)
 	}
 
@@ -64,11 +64,11 @@ func (m *MLScanner) DetectSecrets(text string) ([]SecretFinding, error) {
 
 	select {
 	case <-time.After(m.timeout):
-		m.kill()
+		m.kill(ctx)
 		return nil, fmt.Errorf("ml scanner timeout after %s", m.timeout)
 	case r := <-ch:
 		if r.err != nil {
-			m.kill()
+			m.kill(ctx)
 			return nil, fmt.Errorf("ml scanner read: %w", r.err)
 		}
 		return parseMLFindings(r.line)
@@ -76,18 +76,18 @@ func (m *MLScanner) DetectSecrets(text string) ([]SecretFinding, error) {
 }
 
 // Close shuts down the subprocess.
-func (m *MLScanner) Close() {
+func (m *MLScanner) Close(ctx context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.kill()
+	m.kill(ctx)
 }
 
-func (m *MLScanner) ensureRunning() error {
+func (m *MLScanner) ensureRunning(ctx context.Context) error {
 	if m.ready {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
 	m.cmd = exec.CommandContext(ctx, "bun", "run", m.cmdPath)
@@ -117,7 +117,7 @@ func (m *MLScanner) ensureRunning() error {
 	return nil
 }
 
-func (m *MLScanner) kill() {
+func (m *MLScanner) kill(ctx context.Context) {
 	if m.cmd != nil && m.cmd.Process != nil {
 		_ = m.cmd.Process.Kill()
 		_ = m.cmd.Wait()

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sync"
@@ -36,21 +37,21 @@ func newMemoryStateStore() *memoryStateStore {
 	}
 }
 
-func (m *memoryStateStore) SaveIntegrationDefinition(definition types.IntegrationDefinition, now time.Time) error {
+func (m *memoryStateStore) SaveIntegrationDefinition(ctx context.Context, definition types.IntegrationDefinition, now time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.integrations[definition.ID] = definition
 	return nil
 }
 
-func (m *memoryStateStore) GetIntegrationDefinition(integrationID string) (types.IntegrationDefinition, bool, error) {
+func (m *memoryStateStore) GetIntegrationDefinition(ctx context.Context, integrationID string) (types.IntegrationDefinition, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	def, ok := m.integrations[integrationID]
 	return def, ok, nil
 }
 
-func (m *memoryStateStore) ListIntegrationDefinitions() ([]types.IntegrationDefinition, error) {
+func (m *memoryStateStore) ListIntegrationDefinitions(ctx context.Context) ([]types.IntegrationDefinition, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var defs []types.IntegrationDefinition
@@ -60,7 +61,7 @@ func (m *memoryStateStore) ListIntegrationDefinitions() ([]types.IntegrationDefi
 	return defs, nil
 }
 
-func (m *memoryStateStore) DeleteIntegrationDefinition(integrationID string) error {
+func (m *memoryStateStore) DeleteIntegrationDefinition(ctx context.Context, integrationID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.integrations[integrationID]; !ok {
@@ -70,7 +71,7 @@ func (m *memoryStateStore) DeleteIntegrationDefinition(integrationID string) err
 	return nil
 }
 
-func (m *memoryStateStore) SavePolicyVersionAtomic(bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time, event types.EventEnvelope) (policy.VersionRecord, error) {
+func (m *memoryStateStore) SavePolicyVersionAtomic(ctx context.Context, bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time, event types.EventEnvelope) (policy.VersionRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i := range m.policyRecords {
@@ -91,7 +92,7 @@ func (m *memoryStateStore) SavePolicyVersionAtomic(bundle policy.Bundle, publish
 	return record, nil
 }
 
-func (m *memoryStateStore) GetPolicyBundleVersion(version int) (policy.Bundle, policy.VersionRecord, bool, error) {
+func (m *memoryStateStore) GetPolicyBundleVersion(ctx context.Context, version int) (policy.Bundle, policy.VersionRecord, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	bundle, ok := m.policyHistory[version]
@@ -106,7 +107,7 @@ func (m *memoryStateStore) GetPolicyBundleVersion(version int) (policy.Bundle, p
 	return bundle, policy.VersionRecord{}, true, nil
 }
 
-func (m *memoryStateStore) ListPolicyVersions(limit int) ([]policy.VersionRecord, error) {
+func (m *memoryStateStore) ListPolicyVersions(ctx context.Context, limit int) ([]policy.VersionRecord, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	result := make([]policy.VersionRecord, len(m.policyRecords))
@@ -120,7 +121,7 @@ func (m *memoryStateStore) ListPolicyVersions(limit int) ([]policy.VersionRecord
 	return result, nil
 }
 
-func (m *memoryStateStore) UpsertAdapterRegistration(registration types.AdapterRegistration, registeredAt time.Time, lastSeenAt time.Time) error {
+func (m *memoryStateStore) UpsertAdapterRegistration(ctx context.Context, registration types.AdapterRegistration, registeredAt time.Time, lastSeenAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.registrations[registration.AdapterID] = types.AdapterCoverage{
@@ -136,7 +137,7 @@ func (m *memoryStateStore) UpsertAdapterRegistration(registration types.AdapterR
 	return nil
 }
 
-func (m *memoryStateStore) ListAdapterRegistrations() ([]types.AdapterCoverage, error) {
+func (m *memoryStateStore) ListAdapterRegistrations(ctx context.Context) ([]types.AdapterCoverage, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var result []types.AdapterCoverage
@@ -146,14 +147,14 @@ func (m *memoryStateStore) ListAdapterRegistrations() ([]types.AdapterCoverage, 
 	return result, nil
 }
 
-func (m *memoryStateStore) SaveApproval(approval types.ApprovalRecord) error {
+func (m *memoryStateStore) SaveApproval(ctx context.Context, approval types.ApprovalRecord) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.approvals[approval.ApprovalID] = approval
 	return nil
 }
 
-func (m *memoryStateStore) ResolveApprovalAtomic(command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error) {
+func (m *memoryStateStore) ResolveApprovalAtomic(ctx context.Context, command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	record, ok := m.approvals[command.ApprovalID]
@@ -188,14 +189,14 @@ func (m *memoryStateStore) ResolveApprovalAtomic(command types.ApprovalResolveCo
 	return types.ApprovalResolveResult{Approval: record, Grant: grant}, nil
 }
 
-func (m *memoryStateStore) GetApproval(approvalID string) (types.ApprovalRecord, bool, error) {
+func (m *memoryStateStore) GetApproval(ctx context.Context, approvalID string) (types.ApprovalRecord, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	a, ok := m.approvals[approvalID]
 	return a, ok, nil
 }
 
-func (m *memoryStateStore) ListApprovals(limit int) ([]types.ApprovalRecord, error) {
+func (m *memoryStateStore) ListApprovals(ctx context.Context, limit int) ([]types.ApprovalRecord, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var result []types.ApprovalRecord
@@ -205,7 +206,7 @@ func (m *memoryStateStore) ListApprovals(limit int) ([]types.ApprovalRecord, err
 	return result, nil
 }
 
-func (m *memoryStateStore) SaveAttemptGrant(sessionID string, taskID string, attemptID string, approvalID string, expiresAt time.Time) error {
+func (m *memoryStateStore) SaveAttemptGrant(ctx context.Context, sessionID string, taskID string, attemptID string, approvalID string, expiresAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := fmt.Sprintf("%s:%s:%s", sessionID, taskID, attemptID)
@@ -213,7 +214,7 @@ func (m *memoryStateStore) SaveAttemptGrant(sessionID string, taskID string, att
 	return nil
 }
 
-func (m *memoryStateStore) GetAttemptGrant(sessionID string, taskID string, attemptID string) (types.AttemptGrant, bool, error) {
+func (m *memoryStateStore) GetAttemptGrant(ctx context.Context, sessionID string, taskID string, attemptID string) (types.AttemptGrant, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	key := fmt.Sprintf("%s:%s:%s", sessionID, taskID, attemptID)
@@ -221,7 +222,7 @@ func (m *memoryStateStore) GetAttemptGrant(sessionID string, taskID string, atte
 	return g, ok, nil
 }
 
-func (m *memoryStateStore) SaveSecretHandle(handle types.SecretHandle, value string) error {
+func (m *memoryStateStore) SaveSecretHandle(ctx context.Context, handle types.SecretHandle, value string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.secrets[handle.HandleID] = handle
@@ -229,7 +230,7 @@ func (m *memoryStateStore) SaveSecretHandle(handle types.SecretHandle, value str
 	return nil
 }
 
-func (m *memoryStateStore) GetSecretHandle(handleID string) (types.SecretHandle, string, bool, error) {
+func (m *memoryStateStore) GetSecretHandle(ctx context.Context, handleID string) (types.SecretHandle, string, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	h, ok := m.secrets[handleID]
@@ -237,7 +238,7 @@ func (m *memoryStateStore) GetSecretHandle(handleID string) (types.SecretHandle,
 	return h, v, ok, nil
 }
 
-func (m *memoryStateStore) ListSecretHandles() ([]types.SecretHandleHydration, error) {
+func (m *memoryStateStore) ListSecretHandles(ctx context.Context) ([]types.SecretHandleHydration, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var result []types.SecretHandleHydration
@@ -247,15 +248,15 @@ func (m *memoryStateStore) ListSecretHandles() ([]types.SecretHandleHydration, e
 	return result, nil
 }
 
-func (m *memoryStateStore) ListAttemptGrants() ([]types.AttemptGrantHydration, error) {
+func (m *memoryStateStore) ListAttemptGrants(ctx context.Context) ([]types.AttemptGrantHydration, error) {
 	return nil, nil
 }
 
-func (m *memoryStateStore) SavePolicyVersion(bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time) (policy.VersionRecord, error) {
-	return m.SavePolicyVersionAtomic(bundle, publishedBy, message, sourceVersion, publishedAt, types.EventEnvelope{})
+func (m *memoryStateStore) SavePolicyVersion(ctx context.Context, bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time) (policy.VersionRecord, error) {
+	return m.SavePolicyVersionAtomic(ctx, bundle, publishedBy, message, sourceVersion, publishedAt, types.EventEnvelope{})
 }
 
-func (m *memoryStateStore) GetActivePolicyBundle() (policy.Bundle, policy.VersionRecord, bool, error) {
+func (m *memoryStateStore) GetActivePolicyBundle(ctx context.Context) (policy.Bundle, policy.VersionRecord, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, rec := range m.policyRecords {
@@ -266,43 +267,43 @@ func (m *memoryStateStore) GetActivePolicyBundle() (policy.Bundle, policy.Versio
 	return policy.Bundle{}, policy.VersionRecord{}, false, nil
 }
 
-func (m *memoryStateStore) SavePolicyBundle(bundle policy.Bundle) error {
+func (m *memoryStateStore) SavePolicyBundle(ctx context.Context, bundle policy.Bundle) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// Mock: we'll just store it in history for simplicity or another map if needed.
 	return nil
 }
 
-func (m *memoryStateStore) GetPolicyBundle(bundleID string) (policy.Bundle, bool, error) {
-	// Mock
+func (m *memoryStateStore) GetPolicyBundle(ctx context.Context, bundleID string) (policy.Bundle, bool, error) {
 	return policy.Bundle{}, false, nil
 }
 
-func (m *memoryStateStore) ListPolicyBundles(includeArchived bool) ([]policy.Bundle, error) {
+func (m *memoryStateStore) ListPolicyBundles(ctx context.Context, includeArchived bool) ([]policy.Bundle, error) {
 	return nil, nil
 }
 
-func (m *memoryStateStore) ArchivePolicyBundle(bundleID string, updatedAt time.Time) error { return nil }
+func (m *memoryStateStore) ArchivePolicyBundle(ctx context.Context, bundleID string, updatedAt time.Time) error {
+	return nil
+}
 
-func (m *memoryStateStore) GetSessionFacts(sessionID string) (types.SessionFactsRecord, bool, error) {
+func (m *memoryStateStore) GetSessionFacts(ctx context.Context, sessionID string) (types.SessionFactsRecord, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	f, ok := m.sessionFacts[sessionID]
 	return f, ok, nil
 }
 
-func (m *memoryStateStore) UpsertSessionFacts(record types.SessionFactsRecord) error {
+func (m *memoryStateStore) UpsertSessionFacts(ctx context.Context, record types.SessionFactsRecord) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sessionFacts[record.SessionID] = record
 	return nil
 }
 
-func (m *memoryStateStore) UpdateSessionFacts(sessionID string, update func(types.SessionFactsRecord, bool) (types.SessionFactsRecord, error)) error {
+func (m *memoryStateStore) UpdateSessionFacts(ctx context.Context, sessionID string, update func(ctx context.Context, record types.SessionFactsRecord, found bool) (types.SessionFactsRecord, error)) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	record, ok := m.sessionFacts[sessionID]
-	newRecord, err := update(record, ok)
+	newRecord, err := update(ctx, record, ok)
 	if err != nil {
 		return err
 	}

@@ -47,16 +47,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if activeBundle, _, found, err := db.GetActivePolicyBundle(); err != nil {
+	if activeBundle, _, found, err := db.GetActivePolicyBundle(ctx); err != nil {
 		return err
 	} else if found {
 		policyBundle = activeBundle
 	} else {
-		if _, err := db.SavePolicyVersion(policyBundle, "bootstrap", "initial policy from config", 0, policyBundle.IssuedAt); err != nil {
+		if _, err := db.SavePolicyVersion(ctx, policyBundle, "bootstrap", "initial policy from config", 0, policyBundle.IssuedAt); err != nil {
 			return err
 		}
 	}
-	bundles, err := db.ListPolicyBundles(false)
+	bundles, err := db.ListPolicyBundles(ctx, false)
 	if err != nil {
 		return err
 	}
@@ -69,7 +69,7 @@ func run() error {
 		bootstrap.Status = policy.BundleStatusActive
 		bootstrap.CreatedAt = policyBundle.IssuedAt
 		bootstrap.UpdatedAt = policyBundle.IssuedAt
-		if err := db.SavePolicyBundle(bootstrap); err != nil {
+		if err := db.SavePolicyBundle(ctx, bootstrap); err != nil {
 			return err
 		}
 		bundles = []policy.Bundle{bootstrap}

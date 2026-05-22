@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/agentgate/agentgate/internal/authz"
 	"github.com/agentgate/agentgate/internal/core"
+	"github.com/agentgate/agentgate/internal/store"
 )
 
 func TestRouterRejectsUnknownJSONFields(t *testing.T) {
@@ -299,7 +301,9 @@ func TestCORSRespectsConfiguredOrigins(t *testing.T) {
 }
 
 func testRouter() http.Handler {
-	return NewServer(core.NewEngine(), authz.New(authz.Config{
+	db, _ := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	engine := core.NewEngine(core.WithStateStore(db), core.WithEventStore(db))
+	return NewServer(engine, authz.New(authz.Config{
 		AdapterTokens:  []string{"adapter-token"},
 		OperatorTokens: []string{"operator-token"},
 		AdminTokens:    []string{"admin-token"},

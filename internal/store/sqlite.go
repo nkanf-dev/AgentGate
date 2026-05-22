@@ -196,12 +196,12 @@ CREATE TABLE IF NOT EXISTS policy_bundles (
 	return nil
 }
 
-func (s *SQLiteStore) UpsertAdapterRegistration(registration types.AdapterRegistration, registeredAt time.Time, lastSeenAt time.Time) error {
+func (s *SQLiteStore) UpsertAdapterRegistration(ctx context.Context, registration types.AdapterRegistration, registeredAt time.Time, lastSeenAt time.Time) error {
 	registrationJSON, err := json.Marshal(registration)
 	if err != nil {
 		return fmt.Errorf("marshal adapter registration: %w", err)
 	}
-	_, err = s.db.ExecContext(context.Background(), `
+	_, err = s.db.ExecContext(ctx, `
 INSERT INTO adapter_registrations (
 	adapter_id,
 	registration_json,
@@ -223,8 +223,8 @@ ON CONFLICT(adapter_id) DO UPDATE SET
 	return nil
 }
 
-func (s *SQLiteStore) ListAdapterRegistrations() ([]types.AdapterCoverage, error) {
-	rows, err := s.db.QueryContext(context.Background(), `
+func (s *SQLiteStore) ListAdapterRegistrations(ctx context.Context) ([]types.AdapterCoverage, error) {
+	rows, err := s.db.QueryContext(ctx, `
 SELECT registration_json, registered_at, last_seen_at
 FROM adapter_registrations
 ORDER BY last_seen_at DESC, adapter_id ASC
@@ -271,12 +271,12 @@ ORDER BY last_seen_at DESC, adapter_id ASC
 	return adapters, nil
 }
 
-func (s *SQLiteStore) SaveIntegrationDefinition(definition types.IntegrationDefinition, now time.Time) error {
+func (s *SQLiteStore) SaveIntegrationDefinition(ctx context.Context, definition types.IntegrationDefinition, now time.Time) error {
 	definitionJSON, err := json.Marshal(definition)
 	if err != nil {
 		return fmt.Errorf("marshal integration definition: %w", err)
 	}
-	_, err = s.db.ExecContext(context.Background(), `
+	_, err = s.db.ExecContext(ctx, `
 INSERT INTO integration_definitions (
 	integration_id,
 	definition_json,
@@ -298,9 +298,9 @@ ON CONFLICT(integration_id) DO UPDATE SET
 	return nil
 }
 
-func (s *SQLiteStore) GetIntegrationDefinition(integrationID string) (types.IntegrationDefinition, bool, error) {
+func (s *SQLiteStore) GetIntegrationDefinition(ctx context.Context, integrationID string) (types.IntegrationDefinition, bool, error) {
 	var definitionJSON string
-	err := s.db.QueryRowContext(context.Background(), `
+	err := s.db.QueryRowContext(ctx, `
 SELECT definition_json
 FROM integration_definitions
 WHERE integration_id = ?
@@ -318,8 +318,8 @@ WHERE integration_id = ?
 	return definition, true, nil
 }
 
-func (s *SQLiteStore) ListIntegrationDefinitions() ([]types.IntegrationDefinition, error) {
-	rows, err := s.db.QueryContext(context.Background(), `
+func (s *SQLiteStore) ListIntegrationDefinitions(ctx context.Context) ([]types.IntegrationDefinition, error) {
+	rows, err := s.db.QueryContext(ctx, `
 SELECT definition_json
 FROM integration_definitions
 ORDER BY integration_id ASC
@@ -347,8 +347,8 @@ ORDER BY integration_id ASC
 	return definitions, nil
 }
 
-func (s *SQLiteStore) DeleteIntegrationDefinition(integrationID string) error {
-	result, err := s.db.ExecContext(context.Background(), `
+func (s *SQLiteStore) DeleteIntegrationDefinition(ctx context.Context, integrationID string) error {
+	result, err := s.db.ExecContext(ctx, `
 DELETE FROM integration_definitions
 WHERE integration_id = ?
 `, integrationID)
@@ -365,8 +365,8 @@ WHERE integration_id = ?
 	return nil
 }
 
-func (s *SQLiteStore) AppendEvent(event types.EventEnvelope) error {
-	return appendEventExec(context.Background(), s.db, event)
+func (s *SQLiteStore) AppendEvent(ctx context.Context, event types.EventEnvelope) error {
+	return appendEventExec(ctx, s.db, event)
 }
 
 func appendEventExec(ctx context.Context, exec interface {
@@ -420,10 +420,10 @@ ON CONFLICT(event_id) DO UPDATE SET
 	return nil
 }
 
-func (s *SQLiteStore) PruneEvents(before time.Time) (int64, error) {
+func (s *SQLiteStore) PruneEvents(ctx context.Context, before time.Time) (int64, error) {
 	ts := before.Format(time.RFC3339Nano)
 
-	tx, err := s.db.BeginTx(context.Background(), nil)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("prune events begin tx: %w", err)
 	}
@@ -432,7 +432,7 @@ func (s *SQLiteStore) PruneEvents(before time.Time) (int64, error) {
 	var total int64
 
 	// evidence_records FK-references security_events — delete children first.
-	result, err := tx.ExecContext(context.Background(),
+	result, err := tx.ExecContext(ctx,
 		`DELETE FROM evidence_records WHERE created_at < ?`, ts,
 	)
 	if err != nil {
@@ -442,7 +442,7 @@ func (s *SQLiteStore) PruneEvents(before time.Time) (int64, error) {
 		total += n
 	}
 
-	result, err = tx.ExecContext(context.Background(),
+	result, err = tx.ExecContext(ctx,
 		`DELETE FROM security_events WHERE occurred_at < ?`, ts,
 	)
 	if err != nil {
@@ -452,7 +452,7 @@ func (s *SQLiteStore) PruneEvents(before time.Time) (int64, error) {
 		total += n
 	}
 
-	result, err = tx.ExecContext(context.Background(),
+	result, err = tx.ExecContext(ctx,
 		`DELETE FROM event_envelopes WHERE occurred_at < ?`, ts,
 	)
 	if err != nil {
@@ -468,11 +468,11 @@ func (s *SQLiteStore) PruneEvents(before time.Time) (int64, error) {
 	return total, nil
 }
 
-func (s *SQLiteStore) ListEvents(limit int) ([]types.EventEnvelope, error) {
+func (s *SQLiteStore) ListEvents(ctx context.Context, limit int) ([]types.EventEnvelope, error) {
 	if limit < 1 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(context.Background(), `
+	rows, err := s.db.QueryContext(ctx, `
 SELECT
 	event_id,
 	event_type,
@@ -537,8 +537,8 @@ LIMIT ?
 	return events, nil
 }
 
-func (s *SQLiteStore) GetEventByDecisionID(decisionID string) (types.EventEnvelope, bool, error) {
-	row := s.db.QueryRowContext(context.Background(), `
+func (s *SQLiteStore) GetEventByDecisionID(ctx context.Context, decisionID string) (types.EventEnvelope, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
 SELECT
 	event_id,
 	event_type,
@@ -604,8 +604,8 @@ func scanEvent(scanner eventScanner) (types.EventEnvelope, error) {
 	return event, nil
 }
 
-func (s *SQLiteStore) SaveApproval(approval types.ApprovalRecord) error {
-	return saveApprovalExec(context.Background(), s.db, approval)
+func (s *SQLiteStore) SaveApproval(ctx context.Context, approval types.ApprovalRecord) error {
+	return saveApprovalExec(ctx, s.db, approval)
 }
 
 func saveApprovalExec(ctx context.Context, exec interface {
@@ -661,8 +661,8 @@ ON CONFLICT(approval_id) DO UPDATE SET
 	return nil
 }
 
-func (s *SQLiteStore) GetApproval(approvalID string) (types.ApprovalRecord, bool, error) {
-	row := s.db.QueryRowContext(context.Background(), `
+func (s *SQLiteStore) GetApproval(ctx context.Context, approvalID string) (types.ApprovalRecord, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
 SELECT
 	approval_id,
 	COALESCE(request_id, ''),
@@ -689,11 +689,11 @@ WHERE approval_id = ?
 	return approval, true, nil
 }
 
-func (s *SQLiteStore) ListApprovals(limit int) ([]types.ApprovalRecord, error) {
+func (s *SQLiteStore) ListApprovals(ctx context.Context, limit int) ([]types.ApprovalRecord, error) {
 	if limit < 1 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(context.Background(), `
+	rows, err := s.db.QueryContext(ctx, `
 SELECT
 	approval_id,
 	COALESCE(request_id, ''),
@@ -730,8 +730,8 @@ LIMIT ?
 	return approvals, nil
 }
 
-func (s *SQLiteStore) SaveAttemptGrant(sessionID string, taskID string, attemptID string, approvalID string, expiresAt time.Time) error {
-	return saveAttemptGrantExec(context.Background(), s.db, sessionID, taskID, attemptID, approvalID, expiresAt)
+func (s *SQLiteStore) SaveAttemptGrant(ctx context.Context, sessionID string, taskID string, attemptID string, approvalID string, expiresAt time.Time) error {
+	return saveAttemptGrantExec(ctx, s.db, sessionID, taskID, attemptID, approvalID, expiresAt)
 }
 
 func saveAttemptGrantExec(ctx context.Context, exec interface {
@@ -761,8 +761,8 @@ ON CONFLICT(session_id, task_id, attempt_id) DO UPDATE SET
 	return nil
 }
 
-func (s *SQLiteStore) GetAttemptGrant(sessionID string, taskID string, attemptID string) (types.AttemptGrant, bool, error) {
-	row := s.db.QueryRowContext(context.Background(), `
+func (s *SQLiteStore) GetAttemptGrant(ctx context.Context, sessionID string, taskID string, attemptID string) (types.AttemptGrant, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
 SELECT approval_id, expires_at
 FROM attempt_grants
 WHERE session_id = ? AND task_id = ? AND attempt_id = ?
@@ -784,8 +784,8 @@ WHERE session_id = ? AND task_id = ? AND attempt_id = ?
 	return grant, true, nil
 }
 
-func (s *SQLiteStore) GetSessionFacts(sessionID string) (types.SessionFactsRecord, bool, error) {
-	row := s.db.QueryRowContext(context.Background(), `
+func (s *SQLiteStore) GetSessionFacts(ctx context.Context, sessionID string) (types.SessionFactsRecord, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
 SELECT
 	session_id,
 	adapter_id,
@@ -814,12 +814,12 @@ WHERE session_id = ?
 	return record, true, nil
 }
 
-func (s *SQLiteStore) UpsertSessionFacts(record types.SessionFactsRecord) error {
+func (s *SQLiteStore) UpsertSessionFacts(ctx context.Context, record types.SessionFactsRecord) error {
 	factsJSON, err := json.Marshal(record.Facts)
 	if err != nil {
 		return fmt.Errorf("marshal session facts: %w", err)
 	}
-	_, err = s.db.ExecContext(context.Background(), `
+	_, err = s.db.ExecContext(ctx, `
 INSERT INTO session_facts (
 	session_id,
 	adapter_id,
@@ -836,30 +836,30 @@ ON CONFLICT(session_id) DO UPDATE SET
 	}
 	return nil
 }
-
-func (s *SQLiteStore) UpdateSessionFacts(sessionID string, update func(types.SessionFactsRecord, bool) (types.SessionFactsRecord, error)) error {
-	tx, err := s.db.BeginTx(context.Background(), nil)
+func (s *SQLiteStore) UpdateSessionFacts(ctx context.Context, sessionID string, update func(ctx context.Context, record types.SessionFactsRecord, found bool) (types.SessionFactsRecord, error)) error {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin session facts update: %w", err)
+		return fmt.Errorf("begin update session facts transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	record, found, err := getSessionFactsTx(tx, sessionID)
+	record, found, err := getSessionFactsTx(ctx, tx, sessionID)
 	if err != nil {
 		return err
 	}
-	next, err := update(record, found)
+
+	newRecord, err := update(ctx, record, found)
 	if err != nil {
 		return err
 	}
-	if next.SessionID == "" {
-		next.SessionID = sessionID
+	if newRecord.SessionID == "" {
+		newRecord.SessionID = sessionID
 	}
-	factsJSON, err := json.Marshal(next.Facts)
+	factsJSON, err := json.Marshal(newRecord.Facts)
 	if err != nil {
 		return fmt.Errorf("marshal session facts: %w", err)
 	}
-	if _, err := tx.ExecContext(context.Background(), `
+	if _, err := tx.ExecContext(ctx, `
 INSERT INTO session_facts (
 	session_id,
 	adapter_id,
@@ -870,7 +870,7 @@ ON CONFLICT(session_id) DO UPDATE SET
 	adapter_id = excluded.adapter_id,
 	updated_at = excluded.updated_at,
 	facts = excluded.facts
-`, next.SessionID, next.AdapterID, next.UpdatedAt.Format(time.RFC3339Nano), string(factsJSON)); err != nil {
+`, newRecord.SessionID, newRecord.AdapterID, newRecord.UpdatedAt.Format(time.RFC3339Nano), string(factsJSON)); err != nil {
 		return fmt.Errorf("upsert session facts: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -879,8 +879,8 @@ ON CONFLICT(session_id) DO UPDATE SET
 	return nil
 }
 
-func getSessionFactsTx(tx *sql.Tx, sessionID string) (types.SessionFactsRecord, bool, error) {
-	row := tx.QueryRowContext(context.Background(), `
+func getSessionFactsTx(ctx context.Context, tx *sql.Tx, sessionID string) (types.SessionFactsRecord, bool, error) {
+	row := tx.QueryRowContext(ctx, `
 SELECT
 	session_id,
 	adapter_id,
@@ -909,8 +909,8 @@ WHERE session_id = ?
 	return record, true, nil
 }
 
-func (s *SQLiteStore) SaveSecretHandle(handle types.SecretHandle, value string) error {
-	_, err := s.db.ExecContext(context.Background(), `
+func (s *SQLiteStore) SaveSecretHandle(ctx context.Context, handle types.SecretHandle, value string) error {
+	_, err := s.db.ExecContext(ctx, `
 INSERT INTO secret_handles (
 	handle_id,
 	session_id,
@@ -948,8 +948,8 @@ ON CONFLICT(handle_id) DO UPDATE SET
 	return nil
 }
 
-func (s *SQLiteStore) GetSecretHandle(handleID string) (types.SecretHandle, string, bool, error) {
-	row := s.db.QueryRowContext(context.Background(), `
+func (s *SQLiteStore) GetSecretHandle(ctx context.Context, handleID string) (types.SecretHandle, string, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
 SELECT
 	handle_id,
 	session_id,
@@ -999,8 +999,8 @@ WHERE handle_id = ?
 	return handle, string(value), true, nil
 }
 
-func (s *SQLiteStore) SavePolicyVersion(bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time) (policy.VersionRecord, error) {
-	return s.savePolicyVersion(context.Background(), s.db, bundle, publishedBy, message, sourceVersion, publishedAt)
+func (s *SQLiteStore) SavePolicyVersion(ctx context.Context, bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time) (policy.VersionRecord, error) {
+	return s.savePolicyVersion(ctx, s.db, bundle, publishedBy, message, sourceVersion, publishedAt)
 }
 
 func (s *SQLiteStore) savePolicyVersion(ctx context.Context, txLike interface {
@@ -1059,14 +1059,14 @@ INSERT INTO policy_versions (
 	}, nil
 }
 
-func (s *SQLiteStore) ResolveApprovalAtomic(command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error) {
-	tx, err := s.db.BeginTx(context.Background(), nil)
+func (s *SQLiteStore) ResolveApprovalAtomic(ctx context.Context, command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return types.ApprovalResolveResult{}, fmt.Errorf("begin resolve approval transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	record, found, err := getApprovalTx(tx, command.ApprovalID)
+	record, found, err := getApprovalTx(ctx, tx, command.ApprovalID)
 	if err != nil {
 		return types.ApprovalResolveResult{}, err
 	}
@@ -1094,7 +1094,7 @@ func (s *SQLiteStore) ResolveApprovalAtomic(command types.ApprovalResolveCommand
 		record.Status = types.ApprovalExpired
 	}
 
-	if err := saveApprovalExec(context.Background(), tx, record); err != nil {
+	if err := saveApprovalExec(ctx, tx, record); err != nil {
 		return types.ApprovalResolveResult{}, err
 	}
 
@@ -1104,13 +1104,13 @@ func (s *SQLiteStore) ResolveApprovalAtomic(command types.ApprovalResolveCommand
 			ApprovalID: record.ApprovalID,
 			ExpiresAt:  record.ExpiresAt,
 		}
-		if err := saveAttemptGrantExec(context.Background(), tx, record.SessionID, record.TaskID, record.AttemptID, record.ApprovalID, record.ExpiresAt); err != nil {
+		if err := saveAttemptGrantExec(ctx, tx, record.SessionID, record.TaskID, record.AttemptID, record.ApprovalID, record.ExpiresAt); err != nil {
 			return types.ApprovalResolveResult{}, err
 		}
 		grant = &nextGrant
 	}
 
-	if err := appendEventExec(context.Background(), tx, event); err != nil {
+	if err := appendEventExec(ctx, tx, event); err != nil {
 		return types.ApprovalResolveResult{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1119,18 +1119,18 @@ func (s *SQLiteStore) ResolveApprovalAtomic(command types.ApprovalResolveCommand
 	return types.ApprovalResolveResult{Approval: record, Grant: grant}, nil
 }
 
-func (s *SQLiteStore) SavePolicyVersionAtomic(bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time, event types.EventEnvelope) (policy.VersionRecord, error) {
-	tx, err := s.db.BeginTx(context.Background(), nil)
+func (s *SQLiteStore) SavePolicyVersionAtomic(ctx context.Context, bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time, event types.EventEnvelope) (policy.VersionRecord, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return policy.VersionRecord{}, fmt.Errorf("begin policy version atomic transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	record, err := s.savePolicyVersion(context.Background(), tx, bundle, publishedBy, message, sourceVersion, publishedAt)
+	record, err := s.savePolicyVersion(ctx, tx, bundle, publishedBy, message, sourceVersion, publishedAt)
 	if err != nil {
 		return policy.VersionRecord{}, err
 	}
-	if err := appendEventExec(context.Background(), tx, event); err != nil {
+	if err := appendEventExec(ctx, tx, event); err != nil {
 		return policy.VersionRecord{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1139,8 +1139,8 @@ func (s *SQLiteStore) SavePolicyVersionAtomic(bundle policy.Bundle, publishedBy 
 	return record, nil
 }
 
-func (s *SQLiteStore) GetActivePolicyBundle() (policy.Bundle, policy.VersionRecord, bool, error) {
-	row := s.db.QueryRowContext(context.Background(), `
+func (s *SQLiteStore) GetActivePolicyBundle(ctx context.Context) (policy.Bundle, policy.VersionRecord, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
 SELECT version, bundle_json, status, active, rule_count, published_at, COALESCE(published_by, ''), COALESCE(message, ''), source_version
 FROM policy_versions
 WHERE active = 1
@@ -1157,8 +1157,8 @@ LIMIT 1
 	return bundle, record, true, nil
 }
 
-func (s *SQLiteStore) GetPolicyBundleVersion(version int) (policy.Bundle, policy.VersionRecord, bool, error) {
-	row := s.db.QueryRowContext(context.Background(), `
+func (s *SQLiteStore) GetPolicyBundleVersion(ctx context.Context, version int) (policy.Bundle, policy.VersionRecord, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
 SELECT version, bundle_json, status, active, rule_count, published_at, COALESCE(published_by, ''), COALESCE(message, ''), source_version
 FROM policy_versions
 WHERE version = ?
@@ -1173,11 +1173,11 @@ WHERE version = ?
 	return bundle, record, true, nil
 }
 
-func (s *SQLiteStore) ListPolicyVersions(limit int) ([]policy.VersionRecord, error) {
+func (s *SQLiteStore) ListPolicyVersions(ctx context.Context, limit int) ([]policy.VersionRecord, error) {
 	if limit < 1 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(context.Background(), `
+	rows, err := s.db.QueryContext(ctx, `
 SELECT version, status, active, rule_count, published_at, COALESCE(published_by, ''), COALESCE(message, ''), source_version
 FROM policy_versions
 ORDER BY version DESC
@@ -1202,7 +1202,7 @@ LIMIT ?
 	return records, nil
 }
 
-func (s *SQLiteStore) SavePolicyBundle(bundle policy.Bundle) error {
+func (s *SQLiteStore) SavePolicyBundle(ctx context.Context, bundle policy.Bundle) error {
 	if err := bundle.Validate(); err != nil {
 		return fmt.Errorf("validate policy bundle: %w", err)
 	}
@@ -1210,7 +1210,7 @@ func (s *SQLiteStore) SavePolicyBundle(bundle policy.Bundle) error {
 	if err != nil {
 		return fmt.Errorf("marshal policy bundle: %w", err)
 	}
-	_, err = s.db.ExecContext(context.Background(), `
+	_, err = s.db.ExecContext(ctx, `
 INSERT INTO policy_bundles (
 	bundle_id,
 	name,
@@ -1244,8 +1244,8 @@ ON CONFLICT(bundle_id) DO UPDATE SET
 	return nil
 }
 
-func (s *SQLiteStore) GetPolicyBundle(bundleID string) (policy.Bundle, bool, error) {
-	row := s.db.QueryRowContext(context.Background(), `
+func (s *SQLiteStore) GetPolicyBundle(ctx context.Context, bundleID string) (policy.Bundle, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
 SELECT bundle_id, name, description, priority, status, bundle_json, created_at, updated_at
 FROM policy_bundles
 WHERE bundle_id = ?
@@ -1260,7 +1260,7 @@ WHERE bundle_id = ?
 	return bundle, true, nil
 }
 
-func (s *SQLiteStore) ListPolicyBundles(includeArchived bool) ([]policy.Bundle, error) {
+func (s *SQLiteStore) ListPolicyBundles(ctx context.Context, includeArchived bool) ([]policy.Bundle, error) {
 	query := `
 SELECT bundle_id, name, description, priority, status, bundle_json, created_at, updated_at
 FROM policy_bundles
@@ -1270,7 +1270,7 @@ FROM policy_bundles
 `
 	}
 	query += `ORDER BY priority DESC, updated_at DESC, bundle_id ASC`
-	rows, err := s.db.QueryContext(context.Background(), query)
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("list policy bundles: %w", err)
 	}
@@ -1290,8 +1290,8 @@ FROM policy_bundles
 	return bundles, nil
 }
 
-func (s *SQLiteStore) ArchivePolicyBundle(bundleID string, updatedAt time.Time) error {
-	result, err := s.db.ExecContext(context.Background(), `
+func (s *SQLiteStore) ArchivePolicyBundle(ctx context.Context, bundleID string, updatedAt time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
 UPDATE policy_bundles
 SET status = 'archived',
 	updated_at = ?
@@ -1376,8 +1376,8 @@ func scanApproval(scanner approvalScanner) (types.ApprovalRecord, error) {
 	return approval, nil
 }
 
-func getApprovalTx(tx *sql.Tx, approvalID string) (types.ApprovalRecord, bool, error) {
-	row := tx.QueryRowContext(context.Background(), `
+func getApprovalTx(ctx context.Context, tx *sql.Tx, approvalID string) (types.ApprovalRecord, bool, error) {
+	row := tx.QueryRowContext(ctx, `
 SELECT
 	approval_id,
 	COALESCE(request_id, ''),
@@ -1520,8 +1520,8 @@ func scanPolicyBundle(scanner policyVersionScanner) (policy.Bundle, error) {
 	return bundle, nil
 }
 
-func (s *SQLiteStore) ListSecretHandles() ([]types.SecretHandleHydration, error) {
-	rows, err := s.db.QueryContext(context.Background(), `
+func (s *SQLiteStore) ListSecretHandles(ctx context.Context) ([]types.SecretHandleHydration, error) {
+	rows, err := s.db.QueryContext(ctx, `
 SELECT
 	handle_id,
 	session_id,
@@ -1579,8 +1579,8 @@ FROM secret_handles
 	return results, nil
 }
 
-func (s *SQLiteStore) ListAttemptGrants() ([]types.AttemptGrantHydration, error) {
-	rows, err := s.db.QueryContext(context.Background(), `
+func (s *SQLiteStore) ListAttemptGrants(ctx context.Context) ([]types.AttemptGrantHydration, error) {
+	rows, err := s.db.QueryContext(ctx, `
 SELECT session_id, task_id, attempt_id, approval_id, expires_at
 FROM attempt_grants
 `)

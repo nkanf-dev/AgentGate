@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -15,7 +16,7 @@ import (
 func TestAllowWithAuditEventMetadata(t *testing.T) {
 	engine := NewEngine()
 
-	_, err := engine.Decide(types.PolicyRequest{
+	_, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_audit",
 		RequestKind: types.RequestKindInput,
 		Actor:       types.ActorContext{UserID: "u1"},
@@ -31,7 +32,7 @@ func TestAllowWithAuditEventMetadata(t *testing.T) {
 		t.Fatalf("decide: %v", err)
 	}
 
-	events, err := engine.Events(10)
+	events, err := engine.Events(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("events: %v", err)
 	}
@@ -69,7 +70,7 @@ func TestRuntimeOpenWorldEndToEnd(t *testing.T) {
 		Context: types.DecisionContext{Surface: types.SurfaceRuntime},
 	}
 
-	dec, err := engine.Decide(req)
+	dec, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
@@ -107,7 +108,7 @@ func TestInjectionDetectionEndToEnd(t *testing.T) {
 		},
 	}
 
-	dec, err := engine.Decide(req)
+	dec, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
@@ -135,7 +136,7 @@ func TestInjectionDetectorNilGuard(t *testing.T) {
 		},
 	}
 
-	_, err := engine.Decide(req)
+	_, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
@@ -161,7 +162,7 @@ func TestCorePolicyDenyAllMatchesWhenNoRulesMatch(t *testing.T) {
 		Context:     types.DecisionContext{Surface: types.SurfaceInput, Raw: map[string]interface{}{"text": "hi"}},
 	}
 
-	dec, err := engine.Decide(req)
+	dec, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
@@ -198,7 +199,7 @@ func TestCorePolicyDenyAllHasLowestPriority(t *testing.T) {
 		Context:     types.DecisionContext{Surface: types.SurfaceInput, Raw: map[string]interface{}{"text": "hi"}},
 	}
 
-	dec, err := engine.Decide(req)
+	dec, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
@@ -221,7 +222,7 @@ func TestCorePolicyResourceUnsupportedTarget(t *testing.T) {
 		Context:     types.DecisionContext{Surface: types.SurfaceResource},
 	}
 
-	dec, err := engine.Decide(req)
+	dec, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
@@ -248,7 +249,7 @@ func TestObligationExecutorRewriteInputWithFindings(t *testing.T) {
 	}
 
 	obligations := []types.Obligation{{Type: types.ObligationRewriteInput}}
-	enriched, patch := engine.executeObligations(obligations, req, facts, "reason", now)
+	enriched, patch := engine.executeObligations(context.Background(), obligations, req, facts, "reason", now)
 
 	if patch != nil {
 		t.Fatalf("unexpected patch: %v", patch)
@@ -280,7 +281,7 @@ func TestObligationExecutorResolveSecretHandle(t *testing.T) {
 		Placeholder: "[SECRET_HANDLE:1]",
 		ExpiresAt:   now.Add(1 * time.Hour),
 	}
-	testVault(engine).OverrideHandle(handle, "secret-value")
+	testVault(engine).OverrideHandle(context.Background(), handle, "secret-value")
 
 	req := types.PolicyRequest{
 		Session: types.SessionContext{SessionID: "sess_1", TaskID: "task_1"},
@@ -288,7 +289,7 @@ func TestObligationExecutorResolveSecretHandle(t *testing.T) {
 	}
 
 	obligations := []types.Obligation{{Type: types.ObligationResolveSecretHandle}}
-	enriched, patch := engine.executeObligations(obligations, req, inputSecretFacts{}, "reason", now)
+	enriched, patch := engine.executeObligations(context.Background(), obligations, req, inputSecretFacts{}, "reason", now)
 
 	if patch != nil {
 		t.Fatalf("unexpected patch: %v", patch)
@@ -318,7 +319,7 @@ func TestObligationExecutorResolveSecretHandleNotFound(t *testing.T) {
 	}
 
 	obligations := []types.Obligation{{Type: types.ObligationResolveSecretHandle}}
-	_, patch := engine.executeObligations(obligations, req, inputSecretFacts{}, "reason", now)
+	_, patch := engine.executeObligations(context.Background(), obligations, req, inputSecretFacts{}, "reason", now)
 
 	if patch == nil {
 		t.Fatal("expected denial patch")
@@ -337,7 +338,7 @@ func TestObligationExecutorApprovalRequest(t *testing.T) {
 	}
 
 	obligations := []types.Obligation{{Type: types.ObligationApprovalRequest}}
-	enriched, patch := engine.executeObligations(obligations, req, inputSecretFacts{}, "reason", now)
+	enriched, patch := engine.executeObligations(context.Background(), obligations, req, inputSecretFacts{}, "reason", now)
 
 	if patch != nil {
 		t.Fatalf("unexpected patch: %v", patch)
@@ -369,7 +370,7 @@ func TestObligationDeduplicationMultipleRulesSameType(t *testing.T) {
 		{Type: types.ObligationApprovalRequest},
 		{Type: types.ObligationApprovalRequest},
 	}
-	enriched, patch := engine.executeObligations(obligations, req, inputSecretFacts{}, "reason", now)
+	enriched, patch := engine.executeObligations(context.Background(), obligations, req, inputSecretFacts{}, "reason", now)
 
 	if patch != nil {
 		t.Fatalf("unexpected patch: %v", patch)
@@ -409,7 +410,7 @@ func TestExecutionOrderValidationSkipsPolicy(t *testing.T) {
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	}
 
-	dec, err := engine.Decide(req)
+	dec, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
@@ -445,7 +446,7 @@ func TestMigrationBundleWithoutObligationsGetsDenyFallback(t *testing.T) {
 		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	}
 
-	dec, err := engine.Decide(req)
+	dec, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
@@ -467,7 +468,7 @@ func TestConcurrentDecideDoesNotCorruptState(t *testing.T) {
 		go func(workerID int) {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
-				_, _ = engine.Decide(types.PolicyRequest{
+				_, _ = engine.Decide(context.Background(), types.PolicyRequest{
 					RequestID:   fmt.Sprintf("req_%d_%d", workerID, j),
 					RequestKind: types.RequestKindInput,
 					Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1"},
@@ -497,12 +498,12 @@ func TestSourceTrackingTaintUntrustedExternal(t *testing.T) {
 		Context: types.DecisionContext{Surface: types.SurfaceRuntime},
 	}
 
-	_, err := engine.Decide(req)
+	_, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
 
-	facts, _ := engine.sessionFactsForDecision("sess_1")
+	facts, _ := engine.sessionFactsForDecision(context.Background(), "sess_1")
 	found := false
 	for _, t := range facts.Taints {
 		if t == types.TaintUntrustedExternal {

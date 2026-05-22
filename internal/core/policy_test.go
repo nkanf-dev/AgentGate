@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -23,7 +24,7 @@ func TestPublishPolicyValidatesAndAffectsDecisions(t *testing.T) {
 	})
 	engine := NewEngine(WithPolicyBundle(bundle))
 
-	dec, err := engine.Decide(types.PolicyRequest{
+	dec, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_1",
 		RequestKind: types.RequestKindToolAttempt,
 		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
@@ -52,7 +53,7 @@ func TestPublishPolicyValidatesAndAffectsDecisions(t *testing.T) {
 		},
 	})
 
-	publishResp, err := engine.PublishPolicy(PolicyPublishRequest{
+	publishResp, err := engine.PublishPolicy(context.Background(), PolicyPublishRequest{
 		Bundle:     bundle2,
 		OperatorID: "admin",
 		Message:    "auditing bash",
@@ -61,7 +62,7 @@ func TestPublishPolicyValidatesAndAffectsDecisions(t *testing.T) {
 		t.Fatalf("publish policy: %v", err)
 	}
 
-	dec2, err := engine.Decide(types.PolicyRequest{
+	dec2, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_2",
 		RequestKind: types.RequestKindToolAttempt,
 		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
@@ -98,7 +99,7 @@ func TestRollbackPolicyCreatesNewActiveVersion(t *testing.T) {
 		},
 	})
 	v1.Version = 1
-	stateStore.SavePolicyVersionAtomic(v1, "admin", "v1", 0, time.Now(), types.EventEnvelope{})
+	stateStore.SavePolicyVersionAtomic(context.Background(), v1, "admin", "v1", 0, time.Now(), types.EventEnvelope{})
 
 	// Publish version 2.
 	v2 := coreTestBundle([]policy.Rule{
@@ -112,11 +113,11 @@ func TestRollbackPolicyCreatesNewActiveVersion(t *testing.T) {
 			When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
 		},
 	})
-	if _, err := engine.PublishPolicy(PolicyPublishRequest{Bundle: v2, OperatorID: "admin"}); err != nil {
+	if _, err := engine.PublishPolicy(context.Background(), PolicyPublishRequest{Bundle: v2, OperatorID: "admin"}); err != nil {
 		t.Fatalf("publish policy: %v", err)
 	}
 
-	rolledBack, err := engine.RollbackPolicy(PolicyRollbackRequest{
+	rolledBack, err := engine.RollbackPolicy(context.Background(), PolicyRollbackRequest{
 		Version:    1,
 		OperatorID: "admin",
 	})
@@ -128,7 +129,7 @@ func TestRollbackPolicyCreatesNewActiveVersion(t *testing.T) {
 		t.Fatalf("unexpected rollback record: %#v", rolledBack.Record)
 	}
 
-	decision, err := engine.Decide(types.PolicyRequest{
+	decision, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_after_rollback",
 		RequestKind: types.RequestKindToolAttempt,
 		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
@@ -150,7 +151,7 @@ func TestRollbackPolicyCreatesNewActiveVersion(t *testing.T) {
 func TestPolicyDecisionEventIncludesPolicyTraceMetadata(t *testing.T) {
 	engine := NewEngine()
 
-	_, err := engine.Decide(types.PolicyRequest{
+	_, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_trace",
 		RequestKind: types.RequestKindToolAttempt,
 		Actor:       types.ActorContext{UserID: "u1"},
@@ -163,7 +164,7 @@ func TestPolicyDecisionEventIncludesPolicyTraceMetadata(t *testing.T) {
 		t.Fatalf("decide: %v", err)
 	}
 
-	events, err := engine.Events(10)
+	events, err := engine.Events(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("events: %v", err)
 	}

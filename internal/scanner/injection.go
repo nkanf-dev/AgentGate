@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"encoding/base64"
 	"regexp"
 	"strings"
@@ -16,7 +17,7 @@ type InjectionFinding struct {
 }
 
 type InjectionDetector interface {
-	DetectInjections(text string) ([]InjectionFinding, error)
+	DetectInjections(ctx context.Context, text string) ([]InjectionFinding, error)
 }
 
 type injectionPattern struct {
@@ -75,7 +76,7 @@ const base64MinLength = 60
 // RegexInjectionDetector implements InjectionDetector using regex patterns.
 type RegexInjectionDetector struct{}
 
-func (RegexInjectionDetector) DetectInjections(text string) ([]InjectionFinding, error) {
+func (RegexInjectionDetector) DetectInjections(ctx context.Context, text string) ([]InjectionFinding, error) {
 	return DetectInjections(text), nil
 }
 

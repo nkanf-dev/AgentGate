@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -10,7 +11,7 @@ import (
 func TestRegisterAdapterRejectsDuplicateSurfaces(t *testing.T) {
 	engine := NewEngine()
 
-	_, err := engine.RegisterAdapter(types.AdapterRegistration{
+	_, err := engine.RegisterAdapter(context.Background(), types.AdapterRegistration{
 		AdapterID:   "dup-surface",
 		AdapterKind: "host_plugin",
 		Host:        types.HostDescriptor{Kind: "openclaw"},
@@ -34,7 +35,7 @@ func TestRegisterAdapterRejectsDuplicateSurfaces(t *testing.T) {
 func TestRegisterAdapterRejectsSurfaceCapabilityMismatch(t *testing.T) {
 	engine := NewEngine()
 
-	_, err := engine.RegisterAdapter(types.AdapterRegistration{
+	_, err := engine.RegisterAdapter(context.Background(), types.AdapterRegistration{
 		AdapterID:   "input-without-rewrite",
 		AdapterKind: "host_plugin",
 		Host:        types.HostDescriptor{Kind: "openclaw"},
@@ -55,7 +56,7 @@ func TestRegisterAdapterRejectsSurfaceCapabilityMismatch(t *testing.T) {
 func TestRegisterAdapterRejectsDuplicateSupportingChannels(t *testing.T) {
 	engine := NewEngine()
 
-	_, err := engine.RegisterAdapter(types.AdapterRegistration{
+	_, err := engine.RegisterAdapter(context.Background(), types.AdapterRegistration{
 		AdapterID:          "feishu-transport",
 		AdapterKind:        "approval_transport",
 		Host:               types.HostDescriptor{Kind: "feishu"},

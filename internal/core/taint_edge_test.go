@@ -22,7 +22,7 @@ func TestEdgeSourceTrackingPreExistingTaint(t *testing.T) {
 
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
 
-	_, err = engine.Decide(types.PolicyRequest{
+	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_pre_taint",
 		RequestKind: types.RequestKindToolAttempt,
 		Session:     types.SessionContext{SessionID: "sess_pre_taint", TaskID: "task_1", AttemptID: "att_1"},
@@ -37,7 +37,7 @@ func TestEdgeSourceTrackingPreExistingTaint(t *testing.T) {
 		t.Fatalf("decide: %v", err)
 	}
 
-	record, found, err := stateStore.GetSessionFacts("sess_pre_taint")
+	record, found, err := stateStore.GetSessionFacts(context.Background(), "sess_pre_taint")
 	if err != nil {
 		t.Fatalf("get facts: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestEdgeAdapterPreSetCustomTaint(t *testing.T) {
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
 
 	// Adapter pre-sets TaintSecretBearing (not in session facts).
-	_, err = engine.Decide(types.PolicyRequest{
+	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_custom_taint",
 		RequestKind: types.RequestKindInput,
 		Session:     types.SessionContext{SessionID: "sess_custom_taint", TaskID: "task_1"},
@@ -84,7 +84,7 @@ func TestEdgeAdapterPreSetCustomTaint(t *testing.T) {
 		t.Fatalf("decide: %v", err)
 	}
 
-	record, found, err := stateStore.GetSessionFacts("sess_custom_taint")
+	record, found, err := stateStore.GetSessionFacts(context.Background(), "sess_custom_taint")
 	if err != nil {
 		t.Fatalf("get facts: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestEdgeGrantPreCheckSkipsTaintAccumulation(t *testing.T) {
 	session := types.SessionContext{SessionID: "sess_grant_taint", TaskID: "task_1", AttemptID: "att_1"}
 
 	// Step 1: create an approval.
-	approvalDec, err := engine.Decide(types.PolicyRequest{
+	approvalDec, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_approval",
 		RequestKind: types.RequestKindToolAttempt,
 		Session:     session,
@@ -131,7 +131,7 @@ func TestEdgeGrantPreCheckSkipsTaintAccumulation(t *testing.T) {
 	approvalID := approvalIDFromDecision(t, approvalDec)
 
 	// Step 2: approve it.
-	_, err = engine.ResolveApproval(approvalID, types.ApprovalResolveRequest{
+	_, err = engine.ResolveApproval(context.Background(), approvalID, types.ApprovalResolveRequest{
 		Decision: "allow_once", OperatorID: "op_1", Channel: "test",
 	})
 	if err != nil {
@@ -141,7 +141,7 @@ func TestEdgeGrantPreCheckSkipsTaintAccumulation(t *testing.T) {
 	// Step 3: retry same attempt. Grant pre-check should fire.
 	// The request has OpenWorld=true, which should trigger TaintUntrustedExternal.
 	// But grant pre-check skips enrichPolicyFacts AND source tracking.
-	_, err = engine.Decide(types.PolicyRequest{
+	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_grant_retry",
 		RequestKind: types.RequestKindToolAttempt,
 		Session:     session,
@@ -153,7 +153,7 @@ func TestEdgeGrantPreCheckSkipsTaintAccumulation(t *testing.T) {
 		t.Fatalf("grant decide: %v", err)
 	}
 
-	record, found, err := stateStore.GetSessionFacts("sess_grant_taint")
+	record, found, err := stateStore.GetSessionFacts(context.Background(), "sess_grant_taint")
 	if err != nil {
 		t.Fatalf("get facts: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestEdgeValidationFailureSkipsTaintAccumulation(t *testing.T) {
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
 
 	// Invalid request (missing request_id triggers validation failure).
-	_, err = engine.Decide(types.PolicyRequest{
+	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "", // invalid
 		RequestKind: types.RequestKindInput,
 		Session:     types.SessionContext{SessionID: "sess_invalid", TaskID: "task_1"},
@@ -202,7 +202,7 @@ func TestEdgeValidationFailureSkipsTaintAccumulation(t *testing.T) {
 	}
 
 	// Session should NOT have taints (validation failure skips enrichment).
-	record, found, err := stateStore.GetSessionFacts("sess_invalid")
+	record, found, err := stateStore.GetSessionFacts(context.Background(), "sess_invalid")
 	if err != nil {
 		t.Fatalf("get facts: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestEdgeCrossSurfaceTaintInheritance(t *testing.T) {
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(bundle))
 
 	// Request 1: input surface with injection.
-	_, err = engine.Decide(types.PolicyRequest{
+	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_cross_1",
 		RequestKind: types.RequestKindInput,
 		Session:     types.SessionContext{SessionID: "sess_cross", TaskID: "task_1"},
@@ -254,7 +254,7 @@ func TestEdgeCrossSurfaceTaintInheritance(t *testing.T) {
 	}
 
 	// Request 2: runtime surface, clean. Should inherit injection taint.
-	dec2, err := engine.Decide(types.PolicyRequest{
+	dec2, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_cross_2",
 		RequestKind: types.RequestKindToolAttempt,
 		Session:     types.SessionContext{SessionID: "sess_cross", TaskID: "task_1", AttemptID: "att_1"},
@@ -287,7 +287,7 @@ func TestEdgeBothContentAndSourceTaints(t *testing.T) {
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
 
 	// Runtime request with injection in content.summary AND OpenWorld.
-	_, err = engine.Decide(types.PolicyRequest{
+	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_both_taints",
 		RequestKind: types.RequestKindToolAttempt,
 		Session:     types.SessionContext{SessionID: "sess_both", TaskID: "task_1", AttemptID: "att_1"},
@@ -300,7 +300,7 @@ func TestEdgeBothContentAndSourceTaints(t *testing.T) {
 		t.Fatalf("decide: %v", err)
 	}
 
-	record, found, err := stateStore.GetSessionFacts("sess_both")
+	record, found, err := stateStore.GetSessionFacts(context.Background(), "sess_both")
 	if err != nil {
 		t.Fatalf("get facts: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestEdgeSourceTrackingDoubleSignal(t *testing.T) {
 
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
 
-	_, err = engine.Decide(types.PolicyRequest{
+	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_double_signal",
 		RequestKind: types.RequestKindToolAttempt,
 		Session:     types.SessionContext{SessionID: "sess_double", TaskID: "task_1", AttemptID: "att_1"},
@@ -343,7 +343,7 @@ func TestEdgeSourceTrackingDoubleSignal(t *testing.T) {
 		t.Fatalf("decide: %v", err)
 	}
 
-	record, found, err := stateStore.GetSessionFacts("sess_double")
+	record, found, err := stateStore.GetSessionFacts(context.Background(), "sess_double")
 	if err != nil {
 		t.Fatalf("get facts: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestEdgeInputInjectionPlusSecretSameText(t *testing.T) {
 
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
 
-	_, err = engine.Decide(types.PolicyRequest{
+	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_inj_sec",
 		RequestKind: types.RequestKindInput,
 		Session:     types.SessionContext{SessionID: "sess_inj_sec", TaskID: "task_1"},
@@ -386,7 +386,7 @@ func TestEdgeInputInjectionPlusSecretSameText(t *testing.T) {
 		t.Fatalf("decide: %v", err)
 	}
 
-	record, found, err := stateStore.GetSessionFacts("sess_inj_sec")
+	record, found, err := stateStore.GetSessionFacts(context.Background(), "sess_inj_sec")
 	if err != nil {
 		t.Fatalf("get facts: %v", err)
 	}
@@ -417,7 +417,7 @@ func TestEdgeTaintAccumulationAcrossRequests(t *testing.T) {
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
 
 	// Request 1: injection.
-	_, err = engine.Decide(types.PolicyRequest{
+	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_accum_1",
 		RequestKind: types.RequestKindInput,
 		Session:     types.SessionContext{SessionID: "sess_accum", TaskID: "task_1"},
@@ -433,7 +433,7 @@ func TestEdgeTaintAccumulationAcrossRequests(t *testing.T) {
 	}
 
 	// Request 2: secret, same session.
-	_, err = engine.Decide(types.PolicyRequest{
+	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_accum_2",
 		RequestKind: types.RequestKindInput,
 		Session:     types.SessionContext{SessionID: "sess_accum", TaskID: "task_1"},
@@ -448,7 +448,7 @@ func TestEdgeTaintAccumulationAcrossRequests(t *testing.T) {
 		t.Fatalf("decide 2: %v", err)
 	}
 
-	record, found, err := stateStore.GetSessionFacts("sess_accum")
+	record, found, err := stateStore.GetSessionFacts(context.Background(), "sess_accum")
 	if err != nil {
 		t.Fatalf("get facts: %v", err)
 	}
@@ -522,7 +522,7 @@ func TestEdgeSourceTrackingNetworkEgressOnly(t *testing.T) {
 
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
 
-	_, err = engine.Decide(types.PolicyRequest{
+	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_ne_only",
 		RequestKind: types.RequestKindToolAttempt,
 		Session:     types.SessionContext{SessionID: "sess_ne_only", TaskID: "task_1", AttemptID: "att_1"},
@@ -534,7 +534,7 @@ func TestEdgeSourceTrackingNetworkEgressOnly(t *testing.T) {
 		t.Fatalf("decide: %v", err)
 	}
 
-	record, found, err := stateStore.GetSessionFacts("sess_ne_only")
+	record, found, err := stateStore.GetSessionFacts(context.Background(), "sess_ne_only")
 	if err != nil {
 		t.Fatalf("get facts: %v", err)
 	}
@@ -563,7 +563,7 @@ func TestEdgeSourceTrackingNonNetworkSideEffects(t *testing.T) {
 
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
 
-	_, err = engine.Decide(types.PolicyRequest{
+	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_non_net",
 		RequestKind: types.RequestKindToolAttempt,
 		Session:     types.SessionContext{SessionID: "sess_non_net", TaskID: "task_1", AttemptID: "att_1"},
@@ -575,7 +575,7 @@ func TestEdgeSourceTrackingNonNetworkSideEffects(t *testing.T) {
 		t.Fatalf("decide: %v", err)
 	}
 
-	record, found, err := stateStore.GetSessionFacts("sess_non_net")
+	record, found, err := stateStore.GetSessionFacts(context.Background(), "sess_non_net")
 	if err != nil {
 		t.Fatalf("get facts: %v", err)
 	}
@@ -600,7 +600,7 @@ func TestEdgeInjectionInContentSummary(t *testing.T) {
 
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
 
-	_, err = engine.Decide(types.PolicyRequest{
+	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_summary_inj",
 		RequestKind: types.RequestKindToolAttempt,
 		Session:     types.SessionContext{SessionID: "sess_summary_inj", TaskID: "task_1", AttemptID: "att_1"},
@@ -613,7 +613,7 @@ func TestEdgeInjectionInContentSummary(t *testing.T) {
 		t.Fatalf("decide: %v", err)
 	}
 
-	record, found, err := stateStore.GetSessionFacts("sess_summary_inj")
+	record, found, err := stateStore.GetSessionFacts(context.Background(), "sess_summary_inj")
 	if err != nil {
 		t.Fatalf("get facts: %v", err)
 	}
@@ -648,7 +648,7 @@ func TestEdgeVeryLongInputManyPatterns(t *testing.T) {
 	}
 	text += "sk-1234567890abcdef1234567890abcdef"
 
-	dec, err := engine.Decide(types.PolicyRequest{
+	dec, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_long",
 		RequestKind: types.RequestKindInput,
 		Session:     types.SessionContext{SessionID: "sess_long", TaskID: "task_1"},
@@ -690,7 +690,7 @@ func TestEdgeTaintVisibleToCELRuleOnNextRequest(t *testing.T) {
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(bundle))
 
 	// Request 1: injection.
-	_, err = engine.Decide(types.PolicyRequest{
+	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_taint_cel_1",
 		RequestKind: types.RequestKindInput,
 		Session:     types.SessionContext{SessionID: "sess_taint_cel", TaskID: "task_1"},
@@ -706,7 +706,7 @@ func TestEdgeTaintVisibleToCELRuleOnNextRequest(t *testing.T) {
 	}
 
 	// Request 2: clean, same session. Should be denied by inherited taint.
-	dec2, err := engine.Decide(types.PolicyRequest{
+	dec2, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_taint_cel_2",
 		RequestKind: types.RequestKindInput,
 		Session:     types.SessionContext{SessionID: "sess_taint_cel", TaskID: "task_1"},
@@ -741,7 +741,7 @@ func TestEdgeOverlappingSecretAndInjection(t *testing.T) {
 		},
 	}
 
-	facts, err := engine.enrichPolicyFacts(req)
+	facts, err := engine.enrichPolicyFacts(context.Background(), req)
 	if err != nil {
 		t.Fatalf("enrichPolicyFacts: %v", err)
 	}
@@ -781,7 +781,7 @@ func TestEdgeSecretInContentSummary(t *testing.T) {
 		},
 	}
 
-	facts, err := engine.enrichPolicyFacts(req)
+	facts, err := engine.enrichPolicyFacts(context.Background(), req)
 	if err != nil {
 		t.Fatalf("enrichPolicyFacts: %v", err)
 	}

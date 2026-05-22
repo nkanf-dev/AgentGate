@@ -282,15 +282,15 @@ func coreTestBundle(rules []policy.Rule) policy.Bundle {
 
 type testableApprovalStore interface {
 	ApprovalStore
-	OverrideApproval(approval types.ApprovalRecord)
-	SnapshotApprovals() map[string]types.ApprovalRecord
-	SnapshotGrants() map[string]types.AttemptGrant
+	OverrideApproval(ctx context.Context, approval types.ApprovalRecord)
+	SnapshotApprovals(ctx context.Context) map[string]types.ApprovalRecord
+	SnapshotGrants(ctx context.Context) map[string]types.AttemptGrant
 }
 
 type testableSecretVault interface {
 	SecretVault
-	Snapshot() (map[string]types.SecretHandle, map[string]string)
-	OverrideHandle(handle types.SecretHandle, value string)
+	Snapshot(ctx context.Context) (map[string]types.SecretHandle, map[string]string)
+	OverrideHandle(ctx context.Context, handle types.SecretHandle, value string)
 }
 
 func testApprovals(e *Engine) testableApprovalStore {

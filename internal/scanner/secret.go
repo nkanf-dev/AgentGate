@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"log"
@@ -18,7 +19,7 @@ type SecretFinding struct {
 
 // Detector is the common interface for secret detection backends.
 type Detector interface {
-	DetectSecrets(text string) ([]SecretFinding, error)
+	DetectSecrets(ctx context.Context, text string) ([]SecretFinding, error)
 }
 
 type regexPattern struct {
@@ -63,7 +64,7 @@ var secretDetectors = []regexPattern{
 // RegexDetector implements Detector using regex patterns.
 type RegexDetector struct{}
 
-func (RegexDetector) DetectSecrets(text string) ([]SecretFinding, error) {
+func (RegexDetector) DetectSecrets(ctx context.Context, text string) ([]SecretFinding, error) {
 	return DetectSecrets(text), nil
 }
 
@@ -74,14 +75,14 @@ type CompositeDetector struct {
 	Regex Detector
 }
 
-func (c *CompositeDetector) DetectSecrets(text string) ([]SecretFinding, error) {
-	mlFindings, mlErr := c.ML.DetectSecrets(text)
+func (c *CompositeDetector) DetectSecrets(ctx context.Context, text string) ([]SecretFinding, error) {
+	mlFindings, mlErr := c.ML.DetectSecrets(ctx, text)
 	if mlErr != nil {
 		log.Printf("ml scanner error, falling back to regex: %v", mlErr)
-		return c.Regex.DetectSecrets(text)
+		return c.Regex.DetectSecrets(ctx, text)
 	}
 
-	regexFindings, regexErr := c.Regex.DetectSecrets(text)
+	regexFindings, regexErr := c.Regex.DetectSecrets(ctx, text)
 	if regexErr != nil {
 		return mlFindings, nil
 	}
