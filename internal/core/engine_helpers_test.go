@@ -1,9 +1,10 @@
 package core
-
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/agentgate/agentgate/internal/policy"
 	"github.com/agentgate/agentgate/internal/scanner"
 	"github.com/agentgate/agentgate/internal/types"
 )
@@ -194,13 +195,15 @@ func TestUpdateSessionFactsApproval(t *testing.T) {
 
 func TestRedactAuditString(t *testing.T) {
 	det := scanner.RegexDetector{}
-	if result := redactAuditString("", det); result != "" {
+	vault := newSecretVault(nil, det, nil)
+	ctx := context.Background()
+	if result, _ := vault.RedactString(ctx, ""); result != "" {
 		t.Fatalf("empty string should stay empty, got %q", result)
 	}
-	if result := redactAuditString("hello world", det); result != "hello world" {
+	if result, _ := vault.RedactString(ctx, "hello world"); result != "hello world" {
 		t.Fatalf("clean string should not be redacted, got %q", result)
 	}
-	if result := redactAuditString("sk-1234567890abcdef1234567890abcdef1234567890abcdef", det); result == "sk-1234567890abcdef1234567890abcdef1234567890abcdef" {
+	if result, _ := vault.RedactString(ctx, "sk-1234567890abcdef1234567890abcdef1234567890abcdef"); result == "sk-1234567890abcdef1234567890abcdef1234567890abcdef" {
 		t.Fatal("expected secret-like string to be redacted")
 	}
 }
@@ -220,51 +223,17 @@ func TestIsSensitiveAuditKey(t *testing.T) {
 	}
 }
 
-func TestDecisionSummary(t *testing.T) {
-	tests := map[string]string{
-		"input_secret_rewritten_to_handles":   "Input contained secret-like material",
-		"policy_allow_with_audit":             "Policy allowed the request with audit.",
-		"secret_handle_resolve_allowed":       "SecretHandle scope matched",
-		"secret_handle_not_found":             "SecretHandle was not found.",
-		"secret_handle_scope_mismatch":        "SecretHandle exists",
-		"missing_task_id":                     "task_id is required",
-		"runtime_high_risk_requires_approval": "requires an attempt-scoped approval",
-		"unknown_reason_code":                 "unknown_reason_code",
-	}
-	for code, expectedSubstring := range tests {
-		summary := decisionSummary(code)
-		if !containsSubstring(summary, expectedSubstring) {
-			t.Fatalf("decisionSummary(%q) = %q, unexpected", code, summary)
-		}
-	}
-}
-
-func TestInferSurface(t *testing.T) {
-	tests := map[types.RequestKind]types.Surface{
-		types.RequestKindInput:             types.SurfaceInput,
-		types.RequestKindInitialEnvelope:   types.SurfaceInput,
-		types.RequestKindToolAttempt:       types.SurfaceRuntime,
-		types.RequestKindEnvelopeAmendment: types.SurfaceRuntime,
-		types.RequestKindResourceEgress:    types.SurfaceResource,
-		types.RequestKindResourceAccess:    types.SurfaceResource,
-	}
-	for kind, expected := range tests {
-		if result := inferSurface(kind); result != expected {
-			t.Fatalf("inferSurface(%q) = %q, expected %q", kind, result, expected)
-		}
-	}
-
-	if result := inferSurface("unknown"); result != "" {
-		t.Fatalf("inferSurface(unknown) = %q, expected empty", result)
-	}
-}
-
 func TestRedactAuditValue(t *testing.T) {
 	det := scanner.RegexDetector{}
-	result, changed := redactAuditValue(map[string]interface{}{
+	vault := newSecretVault(nil, det, nil)
+	ctx := context.Background()
+	result, changed, err := vault.RedactValue(ctx, map[string]interface{}{
 		"name":   "test",
 		"secret": "sk-sensitive",
-	}, det)
+	})
+	if err != nil {
+		t.Fatalf("RedactValue failed: %v", err)
+	}
 	if !changed {
 		t.Fatal("expected redaction")
 	}
@@ -282,13 +251,54 @@ func TestRedactAuditValue(t *testing.T) {
 
 func TestRedactAuditValueNoChange(t *testing.T) {
 	det := scanner.RegexDetector{}
-	_, changed := redactAuditValue(map[string]interface{}{
+	vault := newSecretVault(nil, det, nil)
+	ctx := context.Background()
+	_, changed, _ := vault.RedactValue(ctx, map[string]interface{}{
 		"name": "test",
 		"id":   "123",
-	}, det)
+	})
 	if changed {
 		t.Fatal("expected no redaction")
 	}
+}
+
+func coreTestBundle(rules []policy.Rule) policy.Bundle {
+	return policy.Bundle{
+		Version:  1,
+		Status:   "active",
+		IssuedAt: time.Date(2026, 4, 24, 0, 0, 0, 0, time.UTC),
+		Rules:    rules,
+		InputPolicy: policy.InputPolicy{
+			SecretMode: "secret_handle",
+		},
+		ResourcePolicy: policy.ResourcePolicy{
+			SecretHandleScope: "session_task",
+		},
+		RuntimePolicy: policy.RuntimePolicy{
+			RequireApprovalTools: []string{"bash", "exec"},
+		},
+	}
+}
+
+type testableApprovalStore interface {
+	ApprovalStore
+	OverrideApproval(approval types.ApprovalRecord)
+	SnapshotApprovals() map[string]types.ApprovalRecord
+	SnapshotGrants() map[string]types.AttemptGrant
+}
+
+type testableSecretVault interface {
+	SecretVault
+	Snapshot() (map[string]types.SecretHandle, map[string]string)
+	OverrideHandle(handle types.SecretHandle, value string)
+}
+
+func testApprovals(e *Engine) testableApprovalStore {
+	return e.approvals.(testableApprovalStore)
+}
+
+func testVault(e *Engine) testableSecretVault {
+	return e.vault.(testableSecretVault)
 }
 
 func containsSubstring(s, substr string) bool {
@@ -296,6 +306,32 @@ func containsSubstring(s, substr string) bool {
 		return true
 	}
 	return len(s) >= len(substr) && searchSubstring(s, substr)
+}
+
+func handleIDFromDecision(t *testing.T, decision types.PolicyDecision) string {
+	for _, ob := range decision.Obligations {
+		if ob.Type == types.ObligationRewriteInput {
+			handles, ok := ob.Params["secret_handles"].([]types.SecretHandle)
+			if ok && len(handles) > 0 {
+				return handles[0].HandleID
+			}
+		}
+	}
+	t.Fatal("decision missing secret handle obligation")
+	return ""
+}
+
+func approvalIDFromDecision(t *testing.T, decision types.PolicyDecision) string {
+	for _, ob := range decision.Obligations {
+		if ob.Type == types.ObligationApprovalRequest {
+			id, ok := ob.Params["approval_id"].(string)
+			if ok {
+				return id
+			}
+		}
+	}
+	t.Fatal("missing approval_id in obligations")
+	return ""
 }
 
 func searchSubstring(s, substr string) bool {

@@ -210,7 +210,6 @@ func TestPolicyValidateAndPublish(t *testing.T) {
 	}
 
 	publish := httptest.NewRequest(http.MethodPost, "/internal/policy/publish", strings.NewReader(`{
-		"operator_id": "admin-test",
 		"message": "deny bash",
 		"bundle": {
 			"version": 1,

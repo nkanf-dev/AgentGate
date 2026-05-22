@@ -470,8 +470,7 @@ func TestEdgeTaintAccumulationAcrossRequests(t *testing.T) {
 
 // Edge cases for extractScannableText.
 func TestEdgeExtractScannableTextNilRaw(t *testing.T) {
-	engine := NewEngine()
-	text := engine.extractScannableText(&types.PolicyRequest{
+	text := extractScannableText(&types.PolicyRequest{
 		Context: types.DecisionContext{Surface: types.SurfaceInput, Raw: nil},
 	})
 	if text != "" {
@@ -480,14 +479,13 @@ func TestEdgeExtractScannableTextNilRaw(t *testing.T) {
 }
 
 func TestEdgeExtractScannableTextEmptyValues(t *testing.T) {
-	engine := NewEngine()
-	text := engine.extractScannableText(&types.PolicyRequest{
+	text := extractScannableText(&types.PolicyRequest{
 		Context: types.DecisionContext{Surface: types.SurfaceInput, Raw: map[string]interface{}{"text": ""}},
 	})
 	if text != "" {
 		t.Fatalf("expected empty text for empty string, got %q", text)
 	}
-	text = engine.extractScannableText(&types.PolicyRequest{
+	text = extractScannableText(&types.PolicyRequest{
 		Context: types.DecisionContext{Surface: types.SurfaceInput, Raw: map[string]interface{}{"body": ""}},
 	})
 	if text != "" {
@@ -496,8 +494,7 @@ func TestEdgeExtractScannableTextEmptyValues(t *testing.T) {
 }
 
 func TestEdgeExtractScannableTextRuntimeEmpty(t *testing.T) {
-	engine := NewEngine()
-	text := engine.extractScannableText(&types.PolicyRequest{
+	text := extractScannableText(&types.PolicyRequest{
 		Context: types.DecisionContext{Surface: types.SurfaceRuntime, Raw: nil},
 		Content: types.ContentContext{Summary: ""},
 	})
@@ -507,8 +504,7 @@ func TestEdgeExtractScannableTextRuntimeEmpty(t *testing.T) {
 }
 
 func TestEdgeExtractScannableTextResourceSurface(t *testing.T) {
-	engine := NewEngine()
-	text := engine.extractScannableText(&types.PolicyRequest{
+	text := extractScannableText(&types.PolicyRequest{
 		Context: types.DecisionContext{Surface: types.SurfaceResource},
 	})
 	if text != "" {
@@ -745,7 +741,10 @@ func TestEdgeOverlappingSecretAndInjection(t *testing.T) {
 		},
 	}
 
-	facts := engine.enrichPolicyFacts(req)
+	facts, err := engine.enrichPolicyFacts(req)
+	if err != nil {
+		t.Fatalf("enrichPolicyFacts: %v", err)
+	}
 
 	hasInjection := false
 	hasSecret := false
@@ -782,7 +781,10 @@ func TestEdgeSecretInContentSummary(t *testing.T) {
 		},
 	}
 
-	facts := engine.enrichPolicyFacts(req)
+	facts, err := engine.enrichPolicyFacts(req)
+	if err != nil {
+		t.Fatalf("enrichPolicyFacts: %v", err)
+	}
 
 	if len(facts.findings) == 0 {
 		t.Fatal("expected secret findings from content.summary")
