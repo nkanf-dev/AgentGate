@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/agentgate-logo-horizontal.svg" alt="AgentGate" width="400">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/agentgate-logo-horizontal-dark.svg">
+    <img src="docs/agentgate-logo-horizontal.svg" alt="AgentGate" width="400">
+  </picture>
 </p>
 
 **Policy decision and control plane for agent input, runtime action, and resource boundaries.**

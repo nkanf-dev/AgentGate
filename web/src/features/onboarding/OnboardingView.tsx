@@ -424,7 +424,7 @@ export function OnboardingView({
   return (
     <div className="flex min-h-screen flex-col items-center justify-center p-4">
       <div className="mb-6">
-        <img src="/agentgate-logo-horizontal.svg" alt="AgentGate" className="h-16" />
+        <img src="/agentgate-logo-horizontal.svg" alt="AgentGate" className="h-16 dark:invert" />
       </div>
       <p className="mb-8 max-w-md text-center text-muted-foreground">
         Security admission controller for AI agent input, runtime action, and
