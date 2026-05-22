@@ -169,7 +169,7 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 // @Success      200  {object}  policy.Bundle
 // @Router       /internal/policy/current [get]
 func (s *Server) currentPolicy(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.engine.CurrentPolicy())
+	writeJSON(w, http.StatusOK, s.engine.CurrentPolicy(r.Context()))
 }
 
 // @Summary      List policy versions
@@ -192,7 +192,7 @@ func (s *Server) policyVersions(w http.ResponseWriter, r *http.Request) {
 		limit = parsed
 	}
 
-	versions, err := s.engine.PolicyVersions(limit)
+	versions, err := s.engine.PolicyVersions(r.Context(), limit)
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -215,7 +215,7 @@ func (s *Server) validatePolicy(w http.ResponseWriter, r *http.Request) {
 	if !decodeOrError(w, r, &req) {
 		return
 	}
-	writeJSON(w, http.StatusOK, s.engine.ValidatePolicy(req.Bundle))
+	writeJSON(w, http.StatusOK, s.engine.ValidatePolicy(r.Context(), req.Bundle))
 }
 
 // @Summary      Publish a new policy version
@@ -234,7 +234,7 @@ func (s *Server) publishPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.OperatorID = principalID(r)
-	result, err := s.engine.PublishPolicy(req)
+	result, err := s.engine.PublishPolicy(r.Context(), req)
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -258,7 +258,7 @@ func (s *Server) rollbackPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.OperatorID = principalID(r)
-	result, err := s.engine.RollbackPolicy(req)
+	result, err := s.engine.RollbackPolicy(r.Context(), req)
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -276,7 +276,7 @@ func (s *Server) rollbackPolicy(w http.ResponseWriter, r *http.Request) {
 // @Router       /internal/policy/bundles [get]
 func (s *Server) policyBundles(w http.ResponseWriter, r *http.Request) {
 	includeArchived := r.URL.Query().Get("include_archived") == "true"
-	result, err := s.engine.PolicyBundles(includeArchived)
+	result, err := s.engine.PolicyBundles(r.Context(), includeArchived)
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -299,7 +299,7 @@ func (s *Server) createPolicyBundle(w http.ResponseWriter, r *http.Request) {
 	if !decodeOrError(w, r, &req) {
 		return
 	}
-	result, err := s.engine.CreatePolicyBundle(req)
+	result, err := s.engine.CreatePolicyBundle(r.Context(), req)
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -316,7 +316,7 @@ func (s *Server) createPolicyBundle(w http.ResponseWriter, r *http.Request) {
 // @Success      200        {object}  policy.Bundle
 // @Router       /internal/policy/bundles/{bundle_id} [get]
 func (s *Server) getPolicyBundle(w http.ResponseWriter, r *http.Request) {
-	result, err := s.engine.GetPolicyBundle(chi.URLParam(r, "bundle_id"))
+	result, err := s.engine.GetPolicyBundle(r.Context(), chi.URLParam(r, "bundle_id"))
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -340,7 +340,7 @@ func (s *Server) updatePolicyBundle(w http.ResponseWriter, r *http.Request) {
 	if !decodeOrError(w, r, &req) {
 		return
 	}
-	result, err := s.engine.UpdatePolicyBundle(chi.URLParam(r, "bundle_id"), req)
+	result, err := s.engine.UpdatePolicyBundle(r.Context(), chi.URLParam(r, "bundle_id"), req)
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -357,7 +357,7 @@ func (s *Server) updatePolicyBundle(w http.ResponseWriter, r *http.Request) {
 // @Success      204
 // @Router       /internal/policy/bundles/{bundle_id} [delete]
 func (s *Server) deletePolicyBundle(w http.ResponseWriter, r *http.Request) {
-	if err := s.engine.DeletePolicyBundle(chi.URLParam(r, "bundle_id")); err != nil {
+	if err := s.engine.DeletePolicyBundle(r.Context(), chi.URLParam(r, "bundle_id")); err != nil {
 		writeCoreError(w, err)
 		return
 	}
@@ -373,7 +373,7 @@ func (s *Server) deletePolicyBundle(w http.ResponseWriter, r *http.Request) {
 // @Success      200        {object}  map[string]interface{}
 // @Router       /internal/policy/bundles/{bundle_id}/validate [post]
 func (s *Server) validatePolicyBundle(w http.ResponseWriter, r *http.Request) {
-	result, err := s.engine.ValidatePolicyBundle(chi.URLParam(r, "bundle_id"))
+	result, err := s.engine.ValidatePolicyBundle(r.Context(), chi.URLParam(r, "bundle_id"))
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -390,7 +390,7 @@ func (s *Server) validatePolicyBundle(w http.ResponseWriter, r *http.Request) {
 // @Success      200        {object}  map[string]interface{}
 // @Router       /internal/policy/bundles/{bundle_id}/publish [post]
 func (s *Server) publishPolicyBundle(w http.ResponseWriter, r *http.Request) {
-	result, err := s.engine.PublishPolicyBundle(chi.URLParam(r, "bundle_id"))
+	result, err := s.engine.PublishPolicyBundle(r.Context(), chi.URLParam(r, "bundle_id"))
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -406,7 +406,7 @@ func (s *Server) publishPolicyBundle(w http.ResponseWriter, r *http.Request) {
 // @Success      200  {array}  types.IntegrationDefinition
 // @Router       /internal/integrations [get]
 func (s *Server) integrationDefinitions(w http.ResponseWriter, r *http.Request) {
-	result, err := s.engine.Integrations()
+	result, err := s.engine.Integrations(r.Context())
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -429,7 +429,7 @@ func (s *Server) createIntegrationDefinition(w http.ResponseWriter, r *http.Requ
 	if !decodeOrError(w, r, &req) {
 		return
 	}
-	result, err := s.engine.SaveIntegration(req)
+	result, err := s.engine.SaveIntegration(r.Context(), req)
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -446,7 +446,7 @@ func (s *Server) createIntegrationDefinition(w http.ResponseWriter, r *http.Requ
 // @Success      200             {object}  types.IntegrationDefinition
 // @Router       /internal/integrations/{integration_id} [get]
 func (s *Server) getIntegrationDefinition(w http.ResponseWriter, r *http.Request) {
-	result, err := s.engine.GetIntegration(chi.URLParam(r, "integration_id"))
+	result, err := s.engine.GetIntegration(r.Context(), chi.URLParam(r, "integration_id"))
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -471,7 +471,7 @@ func (s *Server) updateIntegrationDefinition(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	req.ID = chi.URLParam(r, "integration_id")
-	result, err := s.engine.SaveIntegration(req)
+	result, err := s.engine.SaveIntegration(r.Context(), req)
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -488,7 +488,7 @@ func (s *Server) updateIntegrationDefinition(w http.ResponseWriter, r *http.Requ
 // @Success      204
 // @Router       /internal/integrations/{integration_id} [delete]
 func (s *Server) deleteIntegrationDefinition(w http.ResponseWriter, r *http.Request) {
-	if err := s.engine.DeleteIntegration(chi.URLParam(r, "integration_id")); err != nil {
+	if err := s.engine.DeleteIntegration(r.Context(), chi.URLParam(r, "integration_id")); err != nil {
 		writeCoreError(w, err)
 		return
 	}
@@ -510,7 +510,7 @@ func (s *Server) registerAdapter(w http.ResponseWriter, r *http.Request) {
 	if !decodeOrError(w, r, &req) {
 		return
 	}
-	result, err := s.engine.RegisterAdapter(req)
+	result, err := s.engine.RegisterAdapter(r.Context(), req)
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -526,7 +526,7 @@ func (s *Server) registerAdapter(w http.ResponseWriter, r *http.Request) {
 // @Success      200  {object}  map[string]interface{}
 // @Router       /v1/coverage [get]
 func (s *Server) coverage(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.engine.Coverage())
+	writeJSON(w, http.StatusOK, s.engine.Coverage(r.Context()))
 }
 
 // @Summary      Make a policy decision
@@ -544,7 +544,7 @@ func (s *Server) decide(w http.ResponseWriter, r *http.Request) {
 	if !decodeOrError(w, r, &req) {
 		return
 	}
-	decision, err := s.engine.Decide(req)
+	decision, err := s.engine.Decide(r.Context(), req)
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -567,7 +567,7 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 	if !decodeOrError(w, r, &req) {
 		return
 	}
-	result, err := s.engine.Report(req)
+	result, err := s.engine.Report(r.Context(), req)
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -592,7 +592,7 @@ func (s *Server) resolveApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.OperatorID = principalID(r)
-	result, err := s.engine.ResolveApproval(chi.URLParam(r, "approval_id"), req)
+	result, err := s.engine.ResolveApproval(r.Context(), chi.URLParam(r, "approval_id"), req)
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -620,7 +620,7 @@ func (s *Server) approvalsList(w http.ResponseWriter, r *http.Request) {
 		limit = parsed
 	}
 
-	approvals, err := s.engine.Approvals(limit)
+	approvals, err := s.engine.Approvals(r.Context(), limit)
 	if err != nil {
 		writeCoreError(w, err)
 		return
@@ -648,7 +648,7 @@ func (s *Server) eventsList(w http.ResponseWriter, r *http.Request) {
 		limit = parsed
 	}
 
-	events, err := s.engine.Events(limit)
+	events, err := s.engine.Events(r.Context(), limit)
 	if err != nil {
 		writeCoreError(w, err)
 		return

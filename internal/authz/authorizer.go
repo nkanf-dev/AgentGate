@@ -24,21 +24,57 @@ type Config struct {
 }
 
 type Principal struct {
-	Role Role
-	ID   string
+	Role  Role
+	ID    string
+	Bound bool // True if the ID was explicitly provided in the token config
+}
+
+type tokenEntry struct {
+	token     string
+	principal Principal
 }
 
 type Authorizer struct {
-	adapterTokens  []string
-	operatorTokens []string
-	adminTokens    []string
+	entries []tokenEntry
 }
 
 func New(config Config) *Authorizer {
-	return &Authorizer{
-		adapterTokens:  compact(config.AdapterTokens),
-		operatorTokens: compact(config.OperatorTokens),
-		adminTokens:    compact(config.AdminTokens),
+	a := &Authorizer{}
+
+	// Order matters: admin -> operator -> adapter (highest privilege first)
+	for _, t := range compact(config.AdminTokens) {
+		a.entries = append(a.entries, parseToken(t, RoleAdmin))
+	}
+	for _, t := range compact(config.OperatorTokens) {
+		a.entries = append(a.entries, parseToken(t, RoleOperator))
+	}
+	for _, t := range compact(config.AdapterTokens) {
+		a.entries = append(a.entries, parseToken(t, RoleAdapter))
+	}
+
+	return a
+}
+
+func parseToken(s string, role Role) tokenEntry {
+	parts := strings.SplitN(s, ":", 2)
+	token := parts[0]
+	if len(parts) > 1 {
+		return tokenEntry{
+			token: token,
+			principal: Principal{
+				Role:  role,
+				ID:    parts[1],
+				Bound: true,
+			},
+		}
+	}
+	return tokenEntry{
+		token: token,
+		principal: Principal{
+			Role:  role,
+			ID:    autoPrincipalID(role, token),
+			Bound: false,
+		},
 	}
 }
 
@@ -66,29 +102,20 @@ func (a *Authorizer) authorize(r *http.Request, required []Role) (Principal, boo
 	if token == "" {
 		return Principal{}, false
 	}
-	role, ok := a.roleForToken(token)
-	if !ok {
-		return Principal{}, false
-	}
-	for _, candidate := range required {
-		if roleAllowed(role, candidate) {
-			return Principal{Role: role, ID: principalID(role, token)}, true
+
+	for _, entry := range a.entries {
+		if subtle.ConstantTimeCompare([]byte(entry.token), []byte(token)) == 1 {
+			// Found a matching token. Now check if the role is allowed.
+			for _, candidate := range required {
+				if roleAllowed(entry.principal.Role, candidate) {
+					return entry.principal, true
+				}
+			}
+			// Token matches but role is not authorized for this endpoint.
+			return Principal{}, false
 		}
 	}
 	return Principal{}, false
-}
-
-func (a *Authorizer) roleForToken(token string) (Role, bool) {
-	if containsToken(a.adminTokens, token) {
-		return RoleAdmin, true
-	}
-	if containsToken(a.operatorTokens, token) {
-		return RoleOperator, true
-	}
-	if containsToken(a.adapterTokens, token) {
-		return RoleAdapter, true
-	}
-	return "", false
 }
 
 func roleAllowed(actual Role, required Role) bool {
@@ -104,15 +131,6 @@ func bearerToken(header string) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.TrimPrefix(header, prefix))
-}
-
-func containsToken(tokens []string, token string) bool {
-	for _, candidate := range tokens {
-		if subtle.ConstantTimeCompare([]byte(candidate), []byte(token)) == 1 {
-			return true
-		}
-	}
-	return false
 }
 
 func compact(values []string) []string {
@@ -133,7 +151,7 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 	return principal, ok
 }
 
-func principalID(role Role, token string) string {
+func autoPrincipalID(role Role, token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return string(role) + "_" + hex.EncodeToString(sum[:8])
 }

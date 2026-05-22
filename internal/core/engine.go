@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/agentgate/agentgate/internal/authz"
 	"github.com/agentgate/agentgate/internal/policy"
 	"github.com/agentgate/agentgate/internal/scanner"
 	"github.com/agentgate/agentgate/internal/types"
@@ -51,41 +52,41 @@ type Engine struct {
 }
 
 type EventStore interface {
-	AppendEvent(event types.EventEnvelope) error
-	ListEvents(limit int) ([]types.EventEnvelope, error)
-	GetEventByDecisionID(decisionID string) (types.EventEnvelope, bool, error)
-	PruneEvents(before time.Time) (int64, error)
+	AppendEvent(ctx context.Context, event types.EventEnvelope) error
+	ListEvents(ctx context.Context, limit int) ([]types.EventEnvelope, error)
+	GetEventByDecisionID(ctx context.Context, decisionID string) (types.EventEnvelope, bool, error)
+	PruneEvents(ctx context.Context, before time.Time) (int64, error)
 }
 
 type StateStore interface {
-	UpsertAdapterRegistration(registration types.AdapterRegistration, registeredAt time.Time, lastSeenAt time.Time) error
-	ListAdapterRegistrations() ([]types.AdapterCoverage, error)
-	SaveIntegrationDefinition(definition types.IntegrationDefinition, now time.Time) error
-	GetIntegrationDefinition(integrationID string) (types.IntegrationDefinition, bool, error)
-	ListIntegrationDefinitions() ([]types.IntegrationDefinition, error)
-	DeleteIntegrationDefinition(integrationID string) error
-	SaveApproval(approval types.ApprovalRecord) error
-	ResolveApprovalAtomic(command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error)
-	GetApproval(approvalID string) (types.ApprovalRecord, bool, error)
-	ListApprovals(limit int) ([]types.ApprovalRecord, error)
-	SaveAttemptGrant(sessionID string, taskID string, attemptID string, approvalID string, expiresAt time.Time) error
-	GetAttemptGrant(sessionID string, taskID string, attemptID string) (types.AttemptGrant, bool, error)
-	SaveSecretHandle(handle types.SecretHandle, value string) error
-	GetSecretHandle(handleID string) (types.SecretHandle, string, bool, error)
-	SavePolicyVersion(bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time) (policy.VersionRecord, error)
-	SavePolicyVersionAtomic(bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time, event types.EventEnvelope) (policy.VersionRecord, error)
-	GetActivePolicyBundle() (policy.Bundle, policy.VersionRecord, bool, error)
-	GetPolicyBundleVersion(version int) (policy.Bundle, policy.VersionRecord, bool, error)
-	ListPolicyVersions(limit int) ([]policy.VersionRecord, error)
-	SavePolicyBundle(bundle policy.Bundle) error
-	GetPolicyBundle(bundleID string) (policy.Bundle, bool, error)
-	ListPolicyBundles(includeArchived bool) ([]policy.Bundle, error)
-	ArchivePolicyBundle(bundleID string, updatedAt time.Time) error
-	GetSessionFacts(sessionID string) (types.SessionFactsRecord, bool, error)
-	UpsertSessionFacts(record types.SessionFactsRecord) error
-	UpdateSessionFacts(sessionID string, update func(types.SessionFactsRecord, bool) (types.SessionFactsRecord, error)) error
-	ListSecretHandles() ([]types.SecretHandleHydration, error)
-	ListAttemptGrants() ([]types.AttemptGrantHydration, error)
+	UpsertAdapterRegistration(ctx context.Context, registration types.AdapterRegistration, registeredAt time.Time, lastSeenAt time.Time) error
+	ListAdapterRegistrations(ctx context.Context) ([]types.AdapterCoverage, error)
+	SaveIntegrationDefinition(ctx context.Context, definition types.IntegrationDefinition, now time.Time) error
+	GetIntegrationDefinition(ctx context.Context, integrationID string) (types.IntegrationDefinition, bool, error)
+	ListIntegrationDefinitions(ctx context.Context) ([]types.IntegrationDefinition, error)
+	DeleteIntegrationDefinition(ctx context.Context, integrationID string) error
+	SaveApproval(ctx context.Context, approval types.ApprovalRecord) error
+	ResolveApprovalAtomic(ctx context.Context, command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error)
+	GetApproval(ctx context.Context, approvalID string) (types.ApprovalRecord, bool, error)
+	ListApprovals(ctx context.Context, limit int) ([]types.ApprovalRecord, error)
+	SaveAttemptGrant(ctx context.Context, sessionID string, taskID string, attemptID string, approvalID string, expiresAt time.Time) error
+	GetAttemptGrant(ctx context.Context, sessionID string, taskID string, attemptID string) (types.AttemptGrant, bool, error)
+	SaveSecretHandle(ctx context.Context, handle types.SecretHandle, value string) error
+	GetSecretHandle(ctx context.Context, handleID string) (types.SecretHandle, string, bool, error)
+	SavePolicyVersion(ctx context.Context, bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time) (policy.VersionRecord, error)
+	SavePolicyVersionAtomic(ctx context.Context, bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time, event types.EventEnvelope) (policy.VersionRecord, error)
+	GetActivePolicyBundle(ctx context.Context) (policy.Bundle, policy.VersionRecord, bool, error)
+	GetPolicyBundleVersion(ctx context.Context, version int) (policy.Bundle, policy.VersionRecord, bool, error)
+	ListPolicyVersions(ctx context.Context, limit int) ([]policy.VersionRecord, error)
+	SavePolicyBundle(ctx context.Context, bundle policy.Bundle) error
+	GetPolicyBundle(ctx context.Context, bundleID string) (policy.Bundle, bool, error)
+	ListPolicyBundles(ctx context.Context, includeArchived bool) ([]policy.Bundle, error)
+	ArchivePolicyBundle(ctx context.Context, bundleID string, updatedAt time.Time) error
+	GetSessionFacts(ctx context.Context, sessionID string) (types.SessionFactsRecord, bool, error)
+	UpsertSessionFacts(ctx context.Context, record types.SessionFactsRecord) error
+	UpdateSessionFacts(ctx context.Context, sessionID string, update func(ctx context.Context, record types.SessionFactsRecord, found bool) (types.SessionFactsRecord, error)) error
+	ListSecretHandles(ctx context.Context) ([]types.SecretHandleHydration, error)
+	ListAttemptGrants(ctx context.Context) ([]types.AttemptGrantHydration, error)
 }
 
 type Option func(*Engine)
@@ -186,7 +187,7 @@ func NewEngine(options ...Option) *Engine {
 	engine.runtimes = newRuntimeSupervisor()
 
 	engine.hydrateFromStore()
-	engine.bootstrapManagedRuntimes()
+	engine.bootstrapManagedRuntimes(context.Background())
 	engine.startEventCleanup()
 	return engine
 }
@@ -196,13 +197,14 @@ func (e *Engine) hydrateFromStore() {
 		return
 	}
 
-	if err := e.approvals.Hydrate(); err != nil {
+	ctx := context.Background()
+	if err := e.approvals.Hydrate(ctx); err != nil {
 		log.Printf("hydrate approvals: %v", err)
 	}
-	if err := e.vault.Hydrate(); err != nil {
+	if err := e.vault.Hydrate(ctx); err != nil {
 		log.Printf("hydrate secret handles: %v", err)
 	}
-	if err := e.policy.Hydrate(); err != nil {
+	if err := e.policy.Hydrate(ctx); err != nil {
 		log.Printf("hydrate policy: %v", err)
 	}
 }
@@ -301,8 +303,9 @@ func (e *Engine) stopCh() <-chan struct{} {
 
 func (e *Engine) pruneOldEvents() {
 	before := time.Now().UTC().Add(-time.Duration(e.eventRetentionDays) * 24 * time.Hour)
+	ctx := context.Background()
 	if e.eventStore != nil {
-		n, err := e.eventStore.PruneEvents(before)
+		n, err := e.eventStore.PruneEvents(ctx, before)
 		if err != nil {
 			log.Printf("prune events: %v", err)
 			return
@@ -339,8 +342,8 @@ func (e *Engine) StartedAt() time.Time {
 	return e.startedAt
 }
 
-func (e *Engine) PolicyStatus() map[string]interface{} {
-	bundle := e.policy.Active().bundle
+func (e *Engine) PolicyStatus(ctx context.Context) map[string]interface{} {
+	bundle := e.policy.Active(context.Background()).bundle
 	return map[string]interface{}{
 		"version":   bundle.Version,
 		"status":    bundle.StatusValue(),
@@ -348,43 +351,43 @@ func (e *Engine) PolicyStatus() map[string]interface{} {
 	}
 }
 
-func (e *Engine) bootstrapManagedRuntimes() {
+func (e *Engine) bootstrapManagedRuntimes(ctx context.Context) {
 	if e.stateStore == nil {
 		return
 	}
-	definitions, err := e.stateStore.ListIntegrationDefinitions()
+	definitions, err := e.stateStore.ListIntegrationDefinitions(ctx)
 	if err != nil {
 		log.Printf("bootstrap managed runtimes: %v", err)
 		return
 	}
 	for _, definition := range definitions {
-		if err := e.reconcileManagedRuntime(definition); err != nil {
-			e.runtimes.setError(definition.ID, "bootstrap_failed", err)
+		if err := e.reconcileManagedRuntime(ctx, definition); err != nil {
+			e.runtimes.setError(ctx, definition.ID, "bootstrap_failed", err)
 		}
 	}
 }
 
-func (e *Engine) reconcileManagedRuntime(definition types.IntegrationDefinition) error {
-	return e.runtimes.Ensure(definition)
+func (e *Engine) reconcileManagedRuntime(ctx context.Context, definition types.IntegrationDefinition) error {
+	return e.runtimes.Ensure(ctx, definition)
 }
 
-func (e *Engine) CurrentPolicy() PolicyCurrentResponse {
-	active := e.policy.Active()
+func (e *Engine) CurrentPolicy(ctx context.Context) PolicyCurrentResponse {
+	active := e.policy.Active(ctx)
 	return PolicyCurrentResponse{
 		Bundle: active.bundle,
 		Record: active.record,
 	}
 }
 
-func (e *Engine) PolicyBundles(includeArchived bool) (PolicyBundlesResponse, error) {
+func (e *Engine) PolicyBundles(ctx context.Context, includeArchived bool) (PolicyBundlesResponse, error) {
 	if e.stateStore != nil {
-		bundles, err := e.stateStore.ListPolicyBundles(includeArchived)
+		bundles, err := e.stateStore.ListPolicyBundles(ctx, includeArchived)
 		if err != nil {
 			return PolicyBundlesResponse{}, errStatus(http.StatusInternalServerError, "state_store_read_failed", err.Error())
 		}
 		return PolicyBundlesResponse{Bundles: bundles}, nil
 	}
-	active := e.policy.Active()
+	active := e.policy.Active(ctx)
 	bundles := active.bundles
 	if !includeArchived {
 		filtered := bundles[:0]
@@ -398,12 +401,12 @@ func (e *Engine) PolicyBundles(includeArchived bool) (PolicyBundlesResponse, err
 	return PolicyBundlesResponse{Bundles: bundles}, nil
 }
 
-func (e *Engine) GetPolicyBundle(bundleID string) (policy.Bundle, error) {
+func (e *Engine) GetPolicyBundle(ctx context.Context, bundleID string) (policy.Bundle, error) {
 	if bundleID == "" {
 		return policy.Bundle{}, errBadRequest("missing_bundle_id", "bundle_id is required")
 	}
 	if e.stateStore != nil {
-		bundle, found, err := e.stateStore.GetPolicyBundle(bundleID)
+		bundle, found, err := e.stateStore.GetPolicyBundle(ctx, bundleID)
 		if err != nil {
 			return policy.Bundle{}, errStatus(http.StatusInternalServerError, "state_store_read_failed", err.Error())
 		}
@@ -412,7 +415,7 @@ func (e *Engine) GetPolicyBundle(bundleID string) (policy.Bundle, error) {
 		}
 		return bundle, nil
 	}
-	active := e.policy.Active()
+	active := e.policy.Active(ctx)
 	for _, bundle := range active.bundles {
 		if bundle.BundleID == bundleID {
 			return bundle, nil
@@ -421,7 +424,7 @@ func (e *Engine) GetPolicyBundle(bundleID string) (policy.Bundle, error) {
 	return policy.Bundle{}, errStatus(http.StatusNotFound, "policy_bundle_not_found", "policy bundle was not found")
 }
 
-func (e *Engine) CreatePolicyBundle(bundle policy.Bundle) (policy.Bundle, error) {
+func (e *Engine) CreatePolicyBundle(ctx context.Context, bundle policy.Bundle) (policy.Bundle, error) {
 	now := time.Now().UTC()
 	bundle = normalizeManagedBundle(bundle, now)
 	if bundle.BundleID == "" {
@@ -433,15 +436,15 @@ func (e *Engine) CreatePolicyBundle(bundle policy.Bundle) (policy.Bundle, error)
 		return policy.Bundle{}, err
 	}
 	if e.stateStore != nil {
-		if err := e.stateStore.SavePolicyBundle(bundle); err != nil {
+		if err := e.stateStore.SavePolicyBundle(ctx, bundle); err != nil {
 			return policy.Bundle{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
 		}
 	}
 	return bundle, nil
 }
 
-func (e *Engine) UpdatePolicyBundle(bundleID string, bundle policy.Bundle) (policy.Bundle, error) {
-	current, err := e.GetPolicyBundle(bundleID)
+func (e *Engine) UpdatePolicyBundle(ctx context.Context, bundleID string, bundle policy.Bundle) (policy.Bundle, error) {
+	current, err := e.GetPolicyBundle(ctx, bundleID)
 	if err != nil {
 		return policy.Bundle{}, err
 	}
@@ -453,36 +456,36 @@ func (e *Engine) UpdatePolicyBundle(bundleID string, bundle policy.Bundle) (poli
 		return policy.Bundle{}, err
 	}
 	if e.stateStore != nil {
-		if err := e.stateStore.SavePolicyBundle(bundle); err != nil {
+		if err := e.stateStore.SavePolicyBundle(ctx, bundle); err != nil {
 			return policy.Bundle{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
 		}
 	}
 	return bundle, nil
 }
 
-func (e *Engine) DeletePolicyBundle(bundleID string) error {
+func (e *Engine) DeletePolicyBundle(ctx context.Context, bundleID string) error {
 	if bundleID == "" {
 		return errBadRequest("missing_bundle_id", "bundle_id is required")
 	}
 	now := time.Now().UTC()
 	if e.stateStore != nil {
-		if err := e.stateStore.ArchivePolicyBundle(bundleID, now); err != nil {
+		if err := e.stateStore.ArchivePolicyBundle(ctx, bundleID, now); err != nil {
 			return errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
 		}
 	}
 	return nil
 }
 
-func (e *Engine) ValidatePolicyBundle(bundleID string) (PolicyValidationResponse, error) {
-	bundle, err := e.GetPolicyBundle(bundleID)
+func (e *Engine) ValidatePolicyBundle(ctx context.Context, bundleID string) (PolicyValidationResponse, error) {
+	bundle, err := e.GetPolicyBundle(ctx, bundleID)
 	if err != nil {
 		return PolicyValidationResponse{}, err
 	}
-	return e.ValidatePolicy(bundle), nil
+	return e.ValidatePolicy(ctx, bundle), nil
 }
 
-func (e *Engine) PublishPolicyBundle(bundleID string) (policy.Bundle, error) {
-	bundle, err := e.GetPolicyBundle(bundleID)
+func (e *Engine) PublishPolicyBundle(ctx context.Context, bundleID string) (policy.Bundle, error) {
+	bundle, err := e.GetPolicyBundle(ctx, bundleID)
 	if err != nil {
 		return policy.Bundle{}, err
 	}
@@ -492,14 +495,14 @@ func (e *Engine) PublishPolicyBundle(bundleID string) (policy.Bundle, error) {
 		return policy.Bundle{}, err
 	}
 	if e.stateStore != nil {
-		if err := e.stateStore.SavePolicyBundle(bundle); err != nil {
+		if err := e.stateStore.SavePolicyBundle(ctx, bundle); err != nil {
 			return policy.Bundle{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
 		}
 	}
 	return bundle, nil
 }
 
-func (e *Engine) ValidatePolicy(bundle policy.Bundle) PolicyValidationResponse {
+func (e *Engine) ValidatePolicy(ctx context.Context, bundle policy.Bundle) PolicyValidationResponse {
 	if err := bundle.Validate(); err != nil {
 		return PolicyValidationResponse{
 			Valid:  false,
@@ -509,18 +512,18 @@ func (e *Engine) ValidatePolicy(bundle policy.Bundle) PolicyValidationResponse {
 	return policyValidationSuccess(bundle)
 }
 
-func (e *Engine) PolicyVersions(limit int) (PolicyVersionsResponse, error) {
+func (e *Engine) PolicyVersions(ctx context.Context, limit int) (PolicyVersionsResponse, error) {
 	if e.stateStore != nil {
-		records, err := e.stateStore.ListPolicyVersions(limit)
+		records, err := e.stateStore.ListPolicyVersions(ctx, limit)
 		if err != nil {
 			return PolicyVersionsResponse{}, errStatus(http.StatusInternalServerError, "state_store_read_failed", err.Error())
 		}
 		return PolicyVersionsResponse{Versions: records}, nil
 	}
-	return PolicyVersionsResponse{Versions: []policy.VersionRecord{e.policy.Active().record}}, nil
+	return PolicyVersionsResponse{Versions: []policy.VersionRecord{e.policy.Active(context.Background()).record}}, nil
 }
 
-func (e *Engine) PublishPolicy(req PolicyPublishRequest) (PolicyCurrentResponse, error) {
+func (e *Engine) PublishPolicy(ctx context.Context, req PolicyPublishRequest) (PolicyCurrentResponse, error) {
 	if err := req.Bundle.Validate(); err != nil {
 		return PolicyCurrentResponse{}, errBadRequest("invalid_policy_bundle", err.Error())
 	}
@@ -537,10 +540,10 @@ func (e *Engine) PublishPolicy(req PolicyPublishRequest) (PolicyCurrentResponse,
 		},
 		OccurredAt: now,
 	}
-	return e.policy.Publish(req.Bundle, req.OperatorID, req.Message, 0, now, event)
+	return e.policy.Publish(ctx, req.Bundle, req.OperatorID, req.Message, 0, now, event)
 }
 
-func (e *Engine) RollbackPolicy(req PolicyRollbackRequest) (PolicyCurrentResponse, error) {
+func (e *Engine) RollbackPolicy(ctx context.Context, req PolicyRollbackRequest) (PolicyCurrentResponse, error) {
 	if req.Version <= 0 {
 		return PolicyCurrentResponse{}, errBadRequest("invalid_policy_version", "version must be positive")
 	}
@@ -558,24 +561,24 @@ func (e *Engine) RollbackPolicy(req PolicyRollbackRequest) (PolicyCurrentRespons
 		},
 		OccurredAt: now,
 	}
-	return e.policy.Rollback(req.Version, req.OperatorID, req.Message, now, event)
+	return e.policy.Rollback(ctx, req.Version, req.OperatorID, req.Message, now, event)
 }
 
-func (e *Engine) Integrations() (types.IntegrationsResponse, error) {
-	definitions, err := e.integrationDefinitions()
+func (e *Engine) Integrations(ctx context.Context) (types.IntegrationsResponse, error) {
+	definitions, err := e.integrationDefinitions(ctx)
 	if err != nil {
 		return types.IntegrationsResponse{}, err
 	}
 	if definitions == nil {
 		definitions = []types.IntegrationDefinition{}
 	}
-	adapters, err := e.adapterCoverages()
+	adapters, err := e.adapterCoverages(ctx)
 	if err != nil {
 		return types.IntegrationsResponse{}, err
 	}
 	now := time.Now().UTC()
 	for index := range definitions {
-		definitions[index] = e.hydrateIntegrationHealth(definitions[index], adapters, now)
+		definitions[index] = e.hydrateIntegrationHealth(ctx, definitions[index], adapters, now)
 	}
 	sort.SliceStable(definitions, func(i, j int) bool {
 		if definitions[i].Enabled == definitions[j].Enabled {
@@ -586,52 +589,52 @@ func (e *Engine) Integrations() (types.IntegrationsResponse, error) {
 	return types.IntegrationsResponse{Integrations: definitions}, nil
 }
 
-func (e *Engine) GetIntegration(integrationID string) (types.IntegrationDefinition, error) {
+func (e *Engine) GetIntegration(ctx context.Context, integrationID string) (types.IntegrationDefinition, error) {
 	if integrationID == "" {
 		return types.IntegrationDefinition{}, errBadRequest("missing_integration_id", "integration id is required")
 	}
-	definition, found, err := e.integrationDefinition(integrationID)
+	definition, found, err := e.integrationDefinition(ctx, integrationID)
 	if err != nil {
 		return types.IntegrationDefinition{}, err
 	}
 	if !found {
 		return types.IntegrationDefinition{}, errStatus(http.StatusNotFound, "integration_not_found", "integration definition was not found")
 	}
-	adapters, err := e.adapterCoverages()
+	adapters, err := e.adapterCoverages(ctx)
 	if err != nil {
 		return types.IntegrationDefinition{}, err
 	}
-	return e.hydrateIntegrationHealth(definition, adapters, time.Now().UTC()), nil
+	return e.hydrateIntegrationHealth(ctx, definition, adapters, time.Now().UTC()), nil
 }
 
-func (e *Engine) SaveIntegration(definition types.IntegrationDefinition) (types.IntegrationDefinition, error) {
+func (e *Engine) SaveIntegration(ctx context.Context, definition types.IntegrationDefinition) (types.IntegrationDefinition, error) {
 	normalized, err := normalizeIntegrationDefinition(definition)
 	if err != nil {
 		return types.IntegrationDefinition{}, errBadRequest("invalid_integration_definition", err.Error())
 	}
 	now := time.Now().UTC()
 	if e.stateStore != nil {
-		if err := e.stateStore.SaveIntegrationDefinition(normalized, now); err != nil {
+		if err := e.stateStore.SaveIntegrationDefinition(ctx, normalized, now); err != nil {
 			return types.IntegrationDefinition{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
 		}
 	}
-	adapters, err := e.adapterCoverages()
+	adapters, err := e.adapterCoverages(ctx)
 	if err != nil {
 		return types.IntegrationDefinition{}, err
 	}
-	if err := e.reconcileManagedRuntime(normalized); err != nil {
+	if err := e.reconcileManagedRuntime(ctx, normalized); err != nil {
 		return types.IntegrationDefinition{}, errStatus(http.StatusInternalServerError, "managed_runtime_reconcile_failed", err.Error())
 	}
-	return e.hydrateIntegrationHealth(normalized, adapters, now), nil
+	return e.hydrateIntegrationHealth(ctx, normalized, adapters, now), nil
 }
 
-func (e *Engine) DeleteIntegration(integrationID string) error {
+func (e *Engine) DeleteIntegration(ctx context.Context, integrationID string) error {
 	if integrationID == "" {
 		return errBadRequest("missing_integration_id", "integration id is required")
 	}
-	e.runtimes.Stop(integrationID)
+	e.runtimes.Stop(ctx, integrationID)
 	if e.stateStore != nil {
-		if err := e.stateStore.DeleteIntegrationDefinition(integrationID); err != nil {
+		if err := e.stateStore.DeleteIntegrationDefinition(ctx, integrationID); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return errStatus(http.StatusNotFound, "integration_not_found", "integration definition was not found")
 			}
@@ -642,9 +645,9 @@ func (e *Engine) DeleteIntegration(integrationID string) error {
 	return errStatus(http.StatusNotFound, "integration_not_found", "integration definition was not found")
 }
 
-func (e *Engine) integrationDefinitions() ([]types.IntegrationDefinition, error) {
+func (e *Engine) integrationDefinitions(ctx context.Context) ([]types.IntegrationDefinition, error) {
 	if e.stateStore != nil {
-		definitions, err := e.stateStore.ListIntegrationDefinitions()
+		definitions, err := e.stateStore.ListIntegrationDefinitions(ctx)
 		if err != nil {
 			return nil, errStatus(http.StatusInternalServerError, "state_store_read_failed", err.Error())
 		}
@@ -653,9 +656,9 @@ func (e *Engine) integrationDefinitions() ([]types.IntegrationDefinition, error)
 	return []types.IntegrationDefinition{}, nil
 }
 
-func (e *Engine) integrationDefinition(integrationID string) (types.IntegrationDefinition, bool, error) {
+func (e *Engine) integrationDefinition(ctx context.Context, integrationID string) (types.IntegrationDefinition, bool, error) {
 	if e.stateStore != nil {
-		definition, found, err := e.stateStore.GetIntegrationDefinition(integrationID)
+		definition, found, err := e.stateStore.GetIntegrationDefinition(ctx, integrationID)
 		if err != nil {
 			return types.IntegrationDefinition{}, false, errStatus(http.StatusInternalServerError, "state_store_read_failed", err.Error())
 		}
@@ -664,9 +667,9 @@ func (e *Engine) integrationDefinition(integrationID string) (types.IntegrationD
 	return types.IntegrationDefinition{}, false, nil
 }
 
-func (e *Engine) adapterCoverages() ([]types.AdapterCoverage, error) {
+func (e *Engine) adapterCoverages(ctx context.Context) ([]types.AdapterCoverage, error) {
 	if e.stateStore != nil {
-		adapters, err := e.stateStore.ListAdapterRegistrations()
+		adapters, err := e.stateStore.ListAdapterRegistrations(ctx)
 		if err != nil {
 			return nil, errStatus(http.StatusInternalServerError, "state_store_read_failed", err.Error())
 		}
@@ -691,10 +694,10 @@ func (e *Engine) adapterCoverages() ([]types.AdapterCoverage, error) {
 	return adapters, nil
 }
 
-func (e *Engine) hydrateIntegrationHealth(definition types.IntegrationDefinition, adapters []types.AdapterCoverage, now time.Time) types.IntegrationDefinition {
+func (e *Engine) hydrateIntegrationHealth(ctx context.Context, definition types.IntegrationDefinition, adapters []types.AdapterCoverage, now time.Time) types.IntegrationDefinition {
 	definition.Health = types.IntegrationHealth{ComputedAt: now}
 	definition.MatchedAdapters = nil
-	definition.Health.Runtime = e.runtimes.View(definition.ID)
+	definition.Health.Runtime = e.runtimes.View(ctx, definition.ID)
 	if !definition.Enabled {
 		definition.Health.Status = types.IntegrationHealthDisabled
 		return definition
@@ -746,20 +749,30 @@ func (e *Engine) hydrateIntegrationHealth(definition types.IntegrationDefinition
 	return definition
 }
 
-func (e *Engine) RegisterAdapter(req types.AdapterRegistration) (types.RegistrationResult, error) {
+func (e *Engine) RegisterAdapter(ctx context.Context, req types.AdapterRegistration) (types.RegistrationResult, error) {
 	if req.AdapterID == "" {
 		return types.RegistrationResult{}, errBadRequest("missing_adapter_id", "adapter_id is required")
 	}
 	if err := validateRegistration(req); err != nil {
 		return types.RegistrationResult{}, errBadRequest("invalid_registration", err.Error())
 	}
+
+	// Enforce identity binding if configured.
+	if principal, ok := authz.PrincipalFromContext(ctx); ok && principal.Bound {
+		if req.AdapterID != principal.ID && req.IntegrationID != principal.ID {
+			return types.RegistrationResult{}, errStatus(http.StatusForbidden, "identity_binding_violation",
+				fmt.Sprintf("token is bound to identity %q, but request uses adapter %q / integration %q",
+					principal.ID, req.AdapterID, req.IntegrationID))
+		}
+	}
+
 	if len(req.Surfaces) == 0 && len(req.SupportingChannels) == 0 {
 		return types.RegistrationResult{}, errBadRequest("missing_coverage", "at least one surface or supporting channel is required")
 	}
 
 	now := time.Now().UTC()
 	if e.stateStore != nil {
-		if err := e.stateStore.UpsertAdapterRegistration(req, now, now); err != nil {
+		if err := e.stateStore.UpsertAdapterRegistration(ctx, req, now, now); err != nil {
 			return types.RegistrationResult{}, errStatus(http.StatusInternalServerError, "state_store_write_failed", err.Error())
 		}
 	}
@@ -775,7 +788,7 @@ func (e *Engine) RegisterAdapter(req types.AdapterRegistration) (types.Registrat
 	if req.IntegrationID != "" {
 		metadata["integration_id"] = req.IntegrationID
 	}
-	if err := e.appendEvent(types.EventEnvelope{
+	if err := e.appendEvent(ctx, types.EventEnvelope{
 		EventID:    newID("evt_register"),
 		EventType:  "adapter_registered",
 		AdapterID:  req.AdapterID,
@@ -793,7 +806,7 @@ func (e *Engine) RegisterAdapter(req types.AdapterRegistration) (types.Registrat
 	}, nil
 }
 
-func (e *Engine) Coverage() types.CoverageResponse {
+func (e *Engine) Coverage(ctx context.Context) types.CoverageResponse {
 	now := time.Now().UTC()
 	response := types.CoverageResponse{
 		GeneratedAt: now,
@@ -806,7 +819,7 @@ func (e *Engine) Coverage() types.CoverageResponse {
 	}
 
 	if e.stateStore != nil {
-		adapters, err := e.stateStore.ListAdapterRegistrations()
+		adapters, err := e.stateStore.ListAdapterRegistrations(ctx)
 		if err == nil {
 			response.Adapters = adapters
 			for _, adapter := range adapters {
@@ -852,20 +865,32 @@ func (e *Engine) Coverage() types.CoverageResponse {
 	return response
 }
 
-func (e *Engine) Approvals(limit int) (types.ApprovalsResponse, error) {
-	approvals, err := e.approvals.List(limit)
+func (e *Engine) Approvals(ctx context.Context, limit int) (types.ApprovalsResponse, error) {
+	approvals, err := e.approvals.List(ctx, limit)
 	if err != nil {
 		return types.ApprovalsResponse{}, errStatus(http.StatusInternalServerError, "state_store_read_failed", err.Error())
 	}
 	return types.ApprovalsResponse{Approvals: approvals}, nil
 }
 
-func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
+func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.PolicyDecision, error) {
 	if req.RequestID == "" {
 		req.RequestID = newID("req")
 	}
 	if req.RequestKind == types.RequestKindToolAttempt && req.Session.AttemptID == "" {
 		req.Session.AttemptID = req.RequestID
+	}
+
+	// Enforce identity binding if configured.
+	if principal, ok := authz.PrincipalFromContext(ctx); ok && principal.Bound && principal.Role == authz.RoleAdapter {
+		integrationID := strings.TrimSpace(mapStringValue(req.Policy, "integration_id"))
+		if integrationID == "" {
+			integrationID = strings.TrimSpace(mapStringValue(req.Context.Raw, "integration_id"))
+		}
+		if integrationID != principal.ID {
+			return types.PolicyDecision{}, errStatus(http.StatusForbidden, "identity_binding_violation",
+				fmt.Sprintf("token is bound to integration %q, but request uses %q", principal.ID, integrationID))
+		}
 	}
 
 	now := time.Now().UTC()
@@ -883,7 +908,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 	var obligations []types.Obligation
 	var newTaints []types.Taint
 
-	activePolicy := e.policy.Active()
+	activePolicy := e.policy.Active(ctx)
 
 	decisionReady := false
 	if patch := validateDecisionRequest(req, surface); patch != nil {
@@ -899,7 +924,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 	var sessionFacts types.SessionFacts
 	if !decisionReady {
 		var enrichErr error
-		inputFacts, enrichErr = e.enrichPolicyFacts(&req)
+		inputFacts, enrichErr = e.enrichPolicyFacts(ctx, &req)
 		if enrichErr != nil {
 			policyEvaluation = requestValidationEvaluation(&decisionPatch{
 				effect:       types.EffectDeny,
@@ -923,7 +948,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 		newTaints = append([]types.Taint(nil), req.Context.Taints...)
 
 		var err error
-		sessionFacts, err = e.sessionFactsForDecision(req.Session.SessionID)
+		sessionFacts, err = e.sessionFactsForDecision(ctx, req.Session.SessionID)
 		if err != nil {
 			log.Printf("session facts read failed, proceeding with empty facts: %v", err)
 			sessionFacts = types.SessionFacts{}
@@ -939,7 +964,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 	}
 
 	if !decisionReady && req.RequestKind == types.RequestKindToolAttempt && surface == types.SurfaceRuntime {
-		if grant, ok, err := e.approvals.ValidGrant(req.Session, now); err == nil && ok {
+		if grant, ok, err := e.approvals.ValidGrant(ctx, req.Session, now); err == nil && ok {
 			effect = types.EffectAllowWithAudit
 			reason = "user_allow_once_valid"
 			appliedRules = []string{"runtime.high_risk.allow_once_grant"}
@@ -965,7 +990,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 		}
 	}
 
-	if enriched, patch := e.executeObligations(obligations, req, inputFacts, reason, now); patch != nil {
+	if enriched, patch := e.executeObligations(ctx, obligations, req, inputFacts, reason, now); patch != nil {
 		effect = patch.effect
 		reason = patch.reason
 		appliedRules = patch.appliedRules
@@ -974,7 +999,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 		obligations = enriched
 	}
 
-	if isValidSurface(surface) && !e.hasCoverage(surface) {
+	if isValidSurface(surface) && !e.hasCoverage(ctx, surface) {
 		warnings = append(warnings, fmt.Sprintf("no adapter registration currently covers %s surface", surface))
 	}
 
@@ -1028,7 +1053,7 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 		metadata["matched_rule_count"] = len(traceMetadata.MatchedRules)
 	}
 
-	if err := e.appendEvent(types.EventEnvelope{
+	if err := e.appendEvent(ctx, types.EventEnvelope{
 		EventID:    newID("evt_decide"),
 		EventType:  "policy_decision",
 		RequestID:  req.RequestID,
@@ -1043,28 +1068,28 @@ func (e *Engine) Decide(req types.PolicyRequest) (types.PolicyDecision, error) {
 		return types.PolicyDecision{}, errStatus(http.StatusInternalServerError, "event_store_write_failed", err.Error())
 	}
 
-	if err := e.updateSessionFactsFromDecision(req, decision, newTaints, now); err != nil {
+	if err := e.updateSessionFactsFromDecision(ctx, req, decision, newTaints, now); err != nil {
 		log.Printf("session facts update failed: %v", err)
 	}
 
 	return decision, nil
 }
 
-func (e *Engine) Report(req types.ReportRequest) (types.ReportResponse, error) {
+func (e *Engine) Report(ctx context.Context, req types.ReportRequest) (types.ReportResponse, error) {
 	if req.RequestID == "" && req.DecisionID == "" {
 		return types.ReportResponse{}, errBadRequest("missing_correlation", "request_id or decision_id is required")
 	}
 
 	now := time.Now().UTC()
-	redactedMetadata, _, err := e.vault.RedactValue(context.Background(), req.Metadata)
+	redactedMetadata, _, err := e.vault.RedactValue(ctx, req.Metadata)
 	if err != nil {
 		return types.ReportResponse{}, errStatus(http.StatusInternalServerError, "audit_redaction_failed", err.Error())
 	}
-	redactedError, err := e.vault.RedactString(context.Background(), req.ErrorMessage)
+	redactedError, err := e.vault.RedactString(ctx, req.ErrorMessage)
 	if err != nil {
 		return types.ReportResponse{}, errStatus(http.StatusInternalServerError, "audit_redaction_failed", err.Error())
 	}
-	if err := e.appendEvent(types.EventEnvelope{
+	if err := e.appendEvent(ctx, types.EventEnvelope{
 		EventID:    newID("evt_report"),
 		EventType:  "adapter_report",
 		RequestID:  req.RequestID,
@@ -1085,7 +1110,7 @@ func (e *Engine) Report(req types.ReportRequest) (types.ReportResponse, error) {
 	return types.ReportResponse{Accepted: true, RecordedAt: now}, nil
 }
 
-func (e *Engine) ResolveApproval(approvalID string, req types.ApprovalResolveRequest) (types.ApprovalResolveResponse, error) {
+func (e *Engine) ResolveApproval(ctx context.Context, approvalID string, req types.ApprovalResolveRequest) (types.ApprovalResolveResponse, error) {
 	if approvalID == "" {
 		return types.ApprovalResolveResponse{}, errBadRequest("missing_approval_id", "approval_id is required")
 	}
@@ -1114,7 +1139,7 @@ func (e *Engine) ResolveApproval(approvalID string, req types.ApprovalResolveReq
 		},
 		OccurredAt: now,
 	}
-	result, err := e.approvals.Resolve(command, event)
+	result, err := e.approvals.Resolve(ctx, command, event)
 	if err != nil {
 		var coreErr *Error
 		if errors.As(err, &coreErr) {
@@ -1132,9 +1157,9 @@ func (e *Engine) ResolveApproval(approvalID string, req types.ApprovalResolveReq
 	}, nil
 }
 
-func (e *Engine) Events(limit int) ([]types.EventEnvelope, error) {
+func (e *Engine) Events(ctx context.Context, limit int) ([]types.EventEnvelope, error) {
 	if e.eventStore != nil {
-		return e.eventStore.ListEvents(limit)
+		return e.eventStore.ListEvents(ctx, limit)
 	}
 	e.eventMu.RLock()
 	events := append([]types.EventEnvelope(nil), e.events...)
@@ -1145,8 +1170,8 @@ func (e *Engine) Events(limit int) ([]types.EventEnvelope, error) {
 	return events, nil
 }
 
-func (e *Engine) executeObligations(obligations []types.Obligation, req types.PolicyRequest, facts inputSecretFacts, reason string, now time.Time) ([]types.Obligation, *decisionPatch) {
-	capabilities, adapterFound := e.capabilitiesForRequest(req)
+func (e *Engine) executeObligations(ctx context.Context, obligations []types.Obligation, req types.PolicyRequest, facts inputSecretFacts, reason string, now time.Time) ([]types.Obligation, *decisionPatch) {
+	capabilities, adapterFound := e.capabilitiesForRequest(ctx, req)
 	enriched := make([]types.Obligation, 0, len(obligations))
 	executed := make(map[types.ObligationType]bool)
 	for _, ob := range obligations {
@@ -1159,7 +1184,7 @@ func (e *Engine) executeObligations(obligations []types.Obligation, req types.Po
 				return nil, capabilityDenialPatch("adapter_cannot_rewrite_input")
 			}
 			executed[ob.Type] = true
-			result, patch := e.executeRewriteInput(req, facts, now)
+			result, patch := e.executeRewriteInput(ctx, req, facts, now)
 			if patch != nil {
 				return nil, patch
 			}
@@ -1177,7 +1202,7 @@ func (e *Engine) executeObligations(obligations []types.Obligation, req types.Po
 				continue
 			}
 			executed[ob.Type] = true
-			result, patch := e.executeResolveSecretHandle(req, now)
+			result, patch := e.executeResolveSecretHandle(ctx, req, now)
 			if patch != nil {
 				return nil, patch
 			}
@@ -1190,7 +1215,7 @@ func (e *Engine) executeObligations(obligations []types.Obligation, req types.Po
 				return nil, capabilityDenialPatch("adapter_cannot_pause_for_approval")
 			}
 			executed[ob.Type] = true
-			result, patch := e.executeApprovalRequest(req, reason, now)
+			result, patch := e.executeApprovalRequest(ctx, req, reason, now)
 			if patch != nil {
 				return nil, patch
 			}
@@ -1202,12 +1227,12 @@ func (e *Engine) executeObligations(obligations []types.Obligation, req types.Po
 	return enriched, nil
 }
 
-func (e *Engine) executeRewriteInput(req types.PolicyRequest, facts inputSecretFacts, now time.Time) (types.Obligation, *decisionPatch) {
+func (e *Engine) executeRewriteInput(ctx context.Context, req types.PolicyRequest, facts inputSecretFacts, now time.Time) (types.Obligation, *decisionPatch) {
 	if len(facts.findings) == 0 {
 		return types.Obligation{Type: types.ObligationRewriteInput}, nil
 	}
 
-	rewritten, handles, summaries, err := e.vault.Rewrite(context.Background(), facts.text, req.Session.SessionID, req.Session.TaskID, now)
+	rewritten, handles, summaries, err := e.vault.Rewrite(ctx, facts.text, req.Session.SessionID, req.Session.TaskID, now)
 	if err != nil {
 		return types.Obligation{}, &decisionPatch{
 			effect:       types.EffectDeny,
@@ -1229,8 +1254,8 @@ func (e *Engine) executeRewriteInput(req types.PolicyRequest, facts inputSecretF
 	}, nil
 }
 
-func (e *Engine) executeResolveSecretHandle(req types.PolicyRequest, now time.Time) (types.Obligation, *decisionPatch) {
-	handle, value, err := e.vault.Resolve(context.Background(), req.Target.Identifier, req.Session.SessionID, req.Session.TaskID, now)
+func (e *Engine) executeResolveSecretHandle(ctx context.Context, req types.PolicyRequest, now time.Time) (types.Obligation, *decisionPatch) {
+	handle, value, err := e.vault.Resolve(ctx, req.Target.Identifier, req.Session.SessionID, req.Session.TaskID, now)
 	if err != nil {
 		var coreErr *Error
 		if errors.As(err, &coreErr) && coreErr.Code == "secret_handle_scope_mismatch" {
@@ -1276,9 +1301,9 @@ func (e *Engine) executeResolveSecretHandle(req types.PolicyRequest, now time.Ti
 	}, nil
 }
 
-func (e *Engine) executeApprovalRequest(req types.PolicyRequest, reason string, now time.Time) (types.Obligation, *decisionPatch) {
+func (e *Engine) executeApprovalRequest(ctx context.Context, req types.PolicyRequest, reason string, now time.Time) (types.Obligation, *decisionPatch) {
 	// Check for existing pending approval on the same attempt.
-	if existing, _ := e.approvals.FindPending(req.Session.SessionID, req.Session.TaskID, req.Session.AttemptID, now); existing != nil {
+	if existing, _ := e.approvals.FindPending(ctx, req.Session.SessionID, req.Session.TaskID, req.Session.AttemptID, now); existing != nil {
 		return types.Obligation{
 			Type: types.ObligationApprovalRequest,
 			Params: map[string]interface{}{
@@ -1292,7 +1317,7 @@ func (e *Engine) executeApprovalRequest(req types.PolicyRequest, reason string, 
 	}
 
 	timeout := 10 * time.Minute
-	active := e.policy.Active()
+	active := e.policy.Active(context.Background())
 	if active.bundle.RuntimePolicy.ApprovalTimeout.Duration > 0 {
 		timeout = active.bundle.RuntimePolicy.ApprovalTimeout.Duration
 	}
@@ -1302,7 +1327,7 @@ func (e *Engine) executeApprovalRequest(req types.PolicyRequest, reason string, 
 		approvalReason = "High-risk runtime attempt paused by AgentGate policy."
 	}
 
-	channel := e.approvalChannelForRequest(req)
+	channel := e.approvalChannelForRequest(ctx, req)
 	approval := types.ApprovalRecord{
 		ApprovalID: newID("appr"),
 		RequestID:  req.RequestID,
@@ -1316,7 +1341,7 @@ func (e *Engine) executeApprovalRequest(req types.PolicyRequest, reason string, 
 		Channel:    channel,
 	}
 
-	if err := e.approvals.Create(approval); err != nil {
+	if err := e.approvals.Create(ctx, approval); err != nil {
 		return types.Obligation{}, &decisionPatch{
 			effect:       types.EffectDeny,
 			reason:       "approval_store_failed",
@@ -1337,7 +1362,7 @@ func (e *Engine) executeApprovalRequest(req types.PolicyRequest, reason string, 
 	}, nil
 }
 
-func (e *Engine) approvalChannelForRequest(req types.PolicyRequest) string {
+func (e *Engine) approvalChannelForRequest(ctx context.Context, req types.PolicyRequest) string {
 	integrationID := strings.TrimSpace(mapStringValue(req.Policy, "integration_id"))
 	if integrationID == "" {
 		integrationID = strings.TrimSpace(mapStringValue(req.Context.Raw, "integration_id"))
@@ -1345,7 +1370,7 @@ func (e *Engine) approvalChannelForRequest(req types.PolicyRequest) string {
 	if integrationID == "" {
 		return ""
 	}
-	definition, found, err := e.integrationDefinition(integrationID)
+	definition, found, err := e.integrationDefinition(ctx, integrationID)
 	if err != nil || !found || !definition.Enabled {
 		return ""
 	}
@@ -1355,7 +1380,7 @@ func (e *Engine) approvalChannelForRequest(req types.PolicyRequest) string {
 	return "default"
 }
 
-func (e *Engine) capabilitiesForRequest(req types.PolicyRequest) (types.AdapterCapabilities, bool) {
+func (e *Engine) capabilitiesForRequest(ctx context.Context, req types.PolicyRequest) (types.AdapterCapabilities, bool) {
 	integrationID := strings.TrimSpace(mapStringValue(req.Policy, "integration_id"))
 	if integrationID == "" {
 		integrationID = strings.TrimSpace(mapStringValue(req.Context.Raw, "integration_id"))
@@ -1373,9 +1398,9 @@ func (e *Engine) capabilitiesForRequest(req types.PolicyRequest) (types.AdapterC
 	return types.AdapterCapabilities{}, false
 }
 
-func (e *Engine) hasCoverage(surface types.Surface) bool {
+func (e *Engine) hasCoverage(ctx context.Context, surface types.Surface) bool {
 	if e.stateStore != nil {
-		adapters, err := e.stateStore.ListAdapterRegistrations()
+		adapters, err := e.stateStore.ListAdapterRegistrations(ctx)
 		if err == nil {
 			for _, adapter := range adapters {
 				for _, registeredSurface := range adapter.Surfaces {
@@ -1401,11 +1426,11 @@ func (e *Engine) hasCoverage(surface types.Surface) bool {
 	return false
 }
 
-func (e *Engine) sessionFactsForDecision(sessionID string) (types.SessionFacts, error) {
+func (e *Engine) sessionFactsForDecision(ctx context.Context, sessionID string) (types.SessionFacts, error) {
 	if sessionID == "" || e.stateStore == nil {
 		return types.SessionFacts{}, nil
 	}
-	record, found, err := e.stateStore.GetSessionFacts(sessionID)
+	record, found, err := e.stateStore.GetSessionFacts(ctx, sessionID)
 	if err != nil {
 		return types.SessionFacts{}, err
 	}
@@ -1415,11 +1440,11 @@ func (e *Engine) sessionFactsForDecision(sessionID string) (types.SessionFacts, 
 	return normalizeSessionFacts(record.Facts), nil
 }
 
-func (e *Engine) updateSessionFactsFromDecision(req types.PolicyRequest, decision types.PolicyDecision, newTaints []types.Taint, now time.Time) error {
+func (e *Engine) updateSessionFactsFromDecision(ctx context.Context, req types.PolicyRequest, decision types.PolicyDecision, newTaints []types.Taint, now time.Time) error {
 	if e.stateStore == nil || req.Session.SessionID == "" {
 		return nil
 	}
-	return e.stateStore.UpdateSessionFacts(req.Session.SessionID, func(record types.SessionFactsRecord, found bool) (types.SessionFactsRecord, error) {
+	return e.stateStore.UpdateSessionFacts(ctx, req.Session.SessionID, func(ctx context.Context, record types.SessionFactsRecord, found bool) (types.SessionFactsRecord, error) {
 		if !found {
 			record = types.SessionFactsRecord{
 				SessionID: req.Session.SessionID,
@@ -1565,9 +1590,9 @@ func containsSideEffect(haystack []types.SideEffect, needle types.SideEffect) bo
 	return false
 }
 
-func (e *Engine) appendEvent(event types.EventEnvelope) error {
+func (e *Engine) appendEvent(ctx context.Context, event types.EventEnvelope) error {
 	if e.eventStore != nil {
-		return e.eventStore.AppendEvent(event)
+		return e.eventStore.AppendEvent(ctx, event)
 	}
 	e.eventMu.Lock()
 	defer e.eventMu.Unlock()
@@ -1719,13 +1744,13 @@ func requestValidationEvaluation(patch *decisionPatch) policy.Evaluation {
 	}
 }
 
-func (e *Engine) enrichPolicyFacts(req *types.PolicyRequest) (inputSecretFacts, error) {
+func (e *Engine) enrichPolicyFacts(ctx context.Context, req *types.PolicyRequest) (inputSecretFacts, error) {
 	text := extractScannableText(req)
 	if text == "" {
 		return inputSecretFacts{}, nil
 	}
 
-	findings, injFindings, err := e.vault.Detect(text)
+	findings, injFindings, err := e.vault.Detect(ctx, text)
 	if err != nil {
 		return inputSecretFacts{}, err
 	}
