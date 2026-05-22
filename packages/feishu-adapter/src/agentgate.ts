@@ -62,13 +62,11 @@ export class AgentGateTransportClient {
   async resolveApproval(
     approvalId: string,
     decision: "allow_once" | "deny",
-    operatorId: string,
   ): Promise<ApprovalResolveResponse> {
     return this.post<ApprovalResolveResponse>(
       `/v1/approvals/${encodeURIComponent(approvalId)}/resolve`,
       {
         decision,
-        operator_id: operatorId,
         channel: "feishu",
       },
       this.operatorToken,

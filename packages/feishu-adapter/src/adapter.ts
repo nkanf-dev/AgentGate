@@ -188,7 +188,7 @@ export class FeishuApprovalAdapter {
       operatorId,
     });
     try {
-      const result = await this.agentGate.resolveApproval(approvalId, decision, operatorId);
+      const result = await this.agentGate.resolveApproval(approvalId, decision);
       const status = result.status === "approved" ? "approved" : result.status === "expired" ? "expired" : "denied";
       console.log("[agentgate-feishu] approval resolved", {
         approvalId,

@@ -233,6 +233,7 @@ func (s *Server) publishPolicy(w http.ResponseWriter, r *http.Request) {
 	if !decodeOrError(w, r, &req) {
 		return
 	}
+	req.OperatorID = principalID(r)
 	result, err := s.engine.PublishPolicy(req)
 	if err != nil {
 		writeCoreError(w, err)
@@ -256,6 +257,7 @@ func (s *Server) rollbackPolicy(w http.ResponseWriter, r *http.Request) {
 	if !decodeOrError(w, r, &req) {
 		return
 	}
+	req.OperatorID = principalID(r)
 	result, err := s.engine.RollbackPolicy(req)
 	if err != nil {
 		writeCoreError(w, err)
@@ -589,6 +591,7 @@ func (s *Server) resolveApproval(w http.ResponseWriter, r *http.Request) {
 	if !decodeOrError(w, r, &req) {
 		return
 	}
+	req.OperatorID = principalID(r)
 	result, err := s.engine.ResolveApproval(chi.URLParam(r, "approval_id"), req)
 	if err != nil {
 		writeCoreError(w, err)
@@ -721,4 +724,12 @@ func isAllowedOrigin(origin string, allowedOrigins []string) bool {
 		}
 	}
 	return false
+}
+
+func principalID(r *http.Request) string {
+	principal, ok := authz.PrincipalFromContext(r.Context())
+	if !ok {
+		return ""
+	}
+	return principal.ID
 }

@@ -1,7 +1,10 @@
 package authz
 
 import (
+	"context"
 	"crypto/subtle"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"strings"
 )
@@ -22,6 +25,7 @@ type Config struct {
 
 type Principal struct {
 	Role Role
+	ID   string
 }
 
 type Authorizer struct {
@@ -45,13 +49,14 @@ func (a *Authorizer) Middleware(required ...Role) func(http.Handler) http.Handle
 				next.ServeHTTP(w, r)
 				return
 			}
-			if _, ok := a.authorize(r, required); !ok {
+			principal, ok := a.authorize(r, required)
+			if !ok {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
 				_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","message":"valid bearer token required"}}`))
 				return
 			}
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalContextKey{}, principal)))
 		})
 	}
 }
@@ -67,7 +72,7 @@ func (a *Authorizer) authorize(r *http.Request, required []Role) (Principal, boo
 	}
 	for _, candidate := range required {
 		if roleAllowed(role, candidate) {
-			return Principal{Role: role}, true
+			return Principal{Role: role, ID: principalID(role, token)}, true
 		}
 	}
 	return Principal{}, false
@@ -119,4 +124,16 @@ func compact(values []string) []string {
 		}
 	}
 	return result
+}
+
+type principalContextKey struct{}
+
+func PrincipalFromContext(ctx context.Context) (Principal, bool) {
+	principal, ok := ctx.Value(principalContextKey{}).(Principal)
+	return principal, ok
+}
+
+func principalID(role Role, token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return string(role) + "_" + hex.EncodeToString(sum[:8])
 }
