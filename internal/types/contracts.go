@@ -124,11 +124,11 @@ type IntegrationMatchedAdapter struct {
 }
 
 type IntegrationRuntimeSpec struct {
-	Managed  bool                   `json:"managed"`
-	Worker   string                 `json:"worker"`
-	Enabled  bool                   `json:"enabled"`
-	Config   map[string]interface{} `json:"config,omitempty"`
-	Restart  IntegrationRestartSpec `json:"restart,omitempty"`
+	Managed bool                   `json:"managed"`
+	Command []string               `json:"command,omitempty"`
+	Enabled bool                   `json:"enabled"`
+	Env     map[string]interface{} `json:"env,omitempty"`
+	Restart IntegrationRestartSpec `json:"restart,omitempty"`
 }
 
 type IntegrationRestartSpec struct {
@@ -138,15 +138,15 @@ type IntegrationRestartSpec struct {
 }
 
 type IntegrationRuntimeView struct {
-	Managed        bool      `json:"managed"`
-	Worker         string    `json:"worker,omitempty"`
-	Status         string    `json:"status,omitempty"`
-	RestartCount   int       `json:"restart_count,omitempty"`
-	LastStartedAt  *time.Time `json:"last_started_at,omitempty"`
-	LastExitedAt   *time.Time `json:"last_exited_at,omitempty"`
-	LastHealthyAt  *time.Time `json:"last_healthy_at,omitempty"`
-	LastError      string    `json:"last_error,omitempty"`
-	Pid            int       `json:"pid,omitempty"`
+	Managed       bool       `json:"managed"`
+	Command       []string   `json:"command,omitempty"`
+	Status        string     `json:"status,omitempty"`
+	RestartCount  int        `json:"restart_count,omitempty"`
+	LastStartedAt *time.Time `json:"last_started_at,omitempty"`
+	LastExitedAt  *time.Time `json:"last_exited_at,omitempty"`
+	LastHealthyAt *time.Time `json:"last_healthy_at,omitempty"`
+	LastError     string     `json:"last_error,omitempty"`
+	Pid           int        `json:"pid,omitempty"`
 }
 
 type IntegrationsResponse struct {

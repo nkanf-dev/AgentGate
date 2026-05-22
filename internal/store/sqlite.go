@@ -366,11 +366,17 @@ WHERE integration_id = ?
 }
 
 func (s *SQLiteStore) AppendEvent(event types.EventEnvelope) error {
+	return appendEventExec(context.Background(), s.db, event)
+}
+
+func appendEventExec(ctx context.Context, exec interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+}, event types.EventEnvelope) error {
 	metadataJSON, err := json.Marshal(event.Metadata)
 	if err != nil {
 		return fmt.Errorf("marshal event metadata: %w", err)
 	}
-	_, err = s.db.ExecContext(context.Background(), `
+	_, err = exec.ExecContext(ctx, `
 INSERT INTO event_envelopes (
 	event_id,
 	event_type,
@@ -599,11 +605,17 @@ func scanEvent(scanner eventScanner) (types.EventEnvelope, error) {
 }
 
 func (s *SQLiteStore) SaveApproval(approval types.ApprovalRecord) error {
+	return saveApprovalExec(context.Background(), s.db, approval)
+}
+
+func saveApprovalExec(ctx context.Context, exec interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+}, approval types.ApprovalRecord) error {
 	var resolvedAt interface{}
 	if approval.ResolvedAt != nil {
 		resolvedAt = approval.ResolvedAt.Format(time.RFC3339Nano)
 	}
-	_, err := s.db.ExecContext(context.Background(), `
+	_, err := exec.ExecContext(ctx, `
 INSERT INTO approval_states (
 	approval_id,
 	request_id,
@@ -719,7 +731,13 @@ LIMIT ?
 }
 
 func (s *SQLiteStore) SaveAttemptGrant(sessionID string, taskID string, attemptID string, approvalID string, expiresAt time.Time) error {
-	_, err := s.db.ExecContext(context.Background(), `
+	return saveAttemptGrantExec(context.Background(), s.db, sessionID, taskID, attemptID, approvalID, expiresAt)
+}
+
+func saveAttemptGrantExec(ctx context.Context, exec interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+}, sessionID string, taskID string, attemptID string, approvalID string, expiresAt time.Time) error {
+	_, err := exec.ExecContext(ctx, `
 INSERT INTO attempt_grants (
 	session_id,
 	task_id,
@@ -972,14 +990,22 @@ WHERE handle_id = ?
 	}
 	handle.CreatedAt = parsed
 	if expiresAt != "" {
-		if parsedExp, err := time.Parse(time.RFC3339Nano, expiresAt); err == nil {
-			handle.ExpiresAt = parsedExp
+		parsedExp, err := time.Parse(time.RFC3339Nano, expiresAt)
+		if err != nil {
+			return types.SecretHandle{}, "", false, fmt.Errorf("parse secret handle expires_at: %w", err)
 		}
+		handle.ExpiresAt = parsedExp
 	}
 	return handle, string(value), true, nil
 }
 
 func (s *SQLiteStore) SavePolicyVersion(bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time) (policy.VersionRecord, error) {
+	return s.savePolicyVersion(context.Background(), s.db, bundle, publishedBy, message, sourceVersion, publishedAt)
+}
+
+func (s *SQLiteStore) savePolicyVersion(ctx context.Context, txLike interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+}, bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time) (policy.VersionRecord, error) {
 	if err := bundle.Validate(); err != nil {
 		return policy.VersionRecord{}, fmt.Errorf("validate policy bundle: %w", err)
 	}
@@ -987,13 +1013,7 @@ func (s *SQLiteStore) SavePolicyVersion(bundle policy.Bundle, publishedBy string
 	if err != nil {
 		return policy.VersionRecord{}, fmt.Errorf("marshal policy bundle: %w", err)
 	}
-	tx, err := s.db.BeginTx(context.Background(), nil)
-	if err != nil {
-		return policy.VersionRecord{}, fmt.Errorf("begin policy version transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.ExecContext(context.Background(), `
+	if _, err := txLike.ExecContext(ctx, `
 UPDATE policy_versions
 SET active = 0,
 	status = 'superseded'
@@ -1002,7 +1022,7 @@ WHERE active = 1
 		return policy.VersionRecord{}, fmt.Errorf("deactivate active policy version: %w", err)
 	}
 
-	_, err = tx.ExecContext(context.Background(), `
+	_, err = txLike.ExecContext(ctx, `
 INSERT INTO policy_versions (
 	version,
 	bundle_json,
@@ -1027,9 +1047,6 @@ INSERT INTO policy_versions (
 	if err != nil {
 		return policy.VersionRecord{}, fmt.Errorf("insert policy version: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return policy.VersionRecord{}, fmt.Errorf("commit policy version transaction: %w", err)
-	}
 	return policy.VersionRecord{
 		Version:       bundle.Version,
 		Status:        bundle.StatusValue(),
@@ -1040,6 +1057,86 @@ INSERT INTO policy_versions (
 		Message:       message,
 		SourceVersion: sourceVersion,
 	}, nil
+}
+
+func (s *SQLiteStore) ResolveApprovalAtomic(command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error) {
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return types.ApprovalResolveResult{}, fmt.Errorf("begin resolve approval transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	record, found, err := getApprovalTx(tx, command.ApprovalID)
+	if err != nil {
+		return types.ApprovalResolveResult{}, err
+	}
+	if !found {
+		return types.ApprovalResolveResult{}, sql.ErrNoRows
+	}
+	if record.Status != types.ApprovalPending {
+		return types.ApprovalResolveResult{}, fmt.Errorf("approval conflict: %w", errApprovalAlreadyResolved)
+	}
+
+	decision := strings.ToLower(strings.TrimSpace(command.Decision))
+	switch decision {
+	case "approve", "approved", "allow", "allow_once":
+		record.Status = types.ApprovalApproved
+	case "deny", "denied", "reject", "rejected":
+		record.Status = types.ApprovalDenied
+	default:
+		return types.ApprovalResolveResult{}, fmt.Errorf("invalid approval decision %q", command.Decision)
+	}
+	record.OperatorID = command.OperatorID
+	record.Channel = command.Channel
+	record.ResolvedAt = &command.ResolvedAt
+
+	if !record.ExpiresAt.After(command.ResolvedAt) {
+		record.Status = types.ApprovalExpired
+	}
+
+	if err := saveApprovalExec(context.Background(), tx, record); err != nil {
+		return types.ApprovalResolveResult{}, err
+	}
+
+	var grant *types.AttemptGrant
+	if record.Status == types.ApprovalApproved {
+		nextGrant := types.AttemptGrant{
+			ApprovalID: record.ApprovalID,
+			ExpiresAt:  record.ExpiresAt,
+		}
+		if err := saveAttemptGrantExec(context.Background(), tx, record.SessionID, record.TaskID, record.AttemptID, record.ApprovalID, record.ExpiresAt); err != nil {
+			return types.ApprovalResolveResult{}, err
+		}
+		grant = &nextGrant
+	}
+
+	if err := appendEventExec(context.Background(), tx, event); err != nil {
+		return types.ApprovalResolveResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return types.ApprovalResolveResult{}, fmt.Errorf("commit resolve approval transaction: %w", err)
+	}
+	return types.ApprovalResolveResult{Approval: record, Grant: grant}, nil
+}
+
+func (s *SQLiteStore) SavePolicyVersionAtomic(bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time, event types.EventEnvelope) (policy.VersionRecord, error) {
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return policy.VersionRecord{}, fmt.Errorf("begin policy version atomic transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	record, err := s.savePolicyVersion(context.Background(), tx, bundle, publishedBy, message, sourceVersion, publishedAt)
+	if err != nil {
+		return policy.VersionRecord{}, err
+	}
+	if err := appendEventExec(context.Background(), tx, event); err != nil {
+		return policy.VersionRecord{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return policy.VersionRecord{}, fmt.Errorf("commit policy version atomic transaction: %w", err)
+	}
+	return record, nil
 }
 
 func (s *SQLiteStore) GetActivePolicyBundle() (policy.Bundle, policy.VersionRecord, bool, error) {
@@ -1234,6 +1331,8 @@ type approvalScanner interface {
 	Scan(dest ...interface{}) error
 }
 
+var errApprovalAlreadyResolved = errors.New("approval already resolved")
+
 func scanApproval(scanner approvalScanner) (types.ApprovalRecord, error) {
 	var approval types.ApprovalRecord
 	var status string
@@ -1275,6 +1374,34 @@ func scanApproval(scanner approvalScanner) (types.ApprovalRecord, error) {
 		approval.ResolvedAt = &parsed
 	}
 	return approval, nil
+}
+
+func getApprovalTx(tx *sql.Tx, approvalID string) (types.ApprovalRecord, bool, error) {
+	row := tx.QueryRowContext(context.Background(), `
+SELECT
+	approval_id,
+	COALESCE(request_id, ''),
+	session_id,
+	COALESCE(task_id, ''),
+	COALESCE(attempt_id, ''),
+	status,
+	reason,
+	COALESCE(operator_id, ''),
+	COALESCE(channel, ''),
+	created_at,
+	expires_at,
+	resolved_at
+FROM approval_states
+WHERE approval_id = ?
+`, approvalID)
+	approval, err := scanApproval(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return types.ApprovalRecord{}, false, nil
+		}
+		return types.ApprovalRecord{}, false, fmt.Errorf("get approval tx: %w", err)
+	}
+	return approval, true, nil
 }
 
 type policyVersionScanner interface {
@@ -1437,9 +1564,11 @@ FROM secret_handles
 		}
 		h.Handle.CreatedAt = parsed
 		if expiresAt != "" {
-			if parsedExp, err := time.Parse(time.RFC3339Nano, expiresAt); err == nil {
-				h.Handle.ExpiresAt = parsedExp
+			parsedExp, err := time.Parse(time.RFC3339Nano, expiresAt)
+			if err != nil {
+				return nil, fmt.Errorf("parse secret handle expires_at: %w", err)
 			}
+			h.Handle.ExpiresAt = parsedExp
 		}
 		h.Value = string(value)
 		results = append(results, h)

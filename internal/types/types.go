@@ -32,7 +32,7 @@ const (
 
 type ApprovalResolveRequest struct {
 	Decision   string `json:"decision"`
-	OperatorID string `json:"operator_id"`
+	OperatorID string `json:"operator_id,omitempty"`
 	Channel    string `json:"channel"`
 }
 
@@ -40,4 +40,17 @@ type ApprovalResolveResponse struct {
 	ApprovalID string         `json:"approval_id"`
 	Status     ApprovalStatus `json:"status"`
 	ResolvedAt time.Time      `json:"resolved_at"`
+}
+
+type ApprovalResolveCommand struct {
+	ApprovalID string
+	Decision   string
+	OperatorID string
+	Channel    string
+	ResolvedAt time.Time
+}
+
+type ApprovalResolveResult struct {
+	Approval ApprovalRecord
+	Grant    *AttemptGrant
 }
