@@ -31,6 +31,13 @@ const (
 	EffectExclusion        Effect = "exclusion"
 )
 
+type Disposition string
+
+const (
+	DispositionAllow Disposition = "allow"
+	DispositionDeny  Disposition = "deny"
+)
+
 type AdapterRegistration struct {
 	AdapterID          string                 `json:"adapter_id"`
 	IntegrationID      string                 `json:"integration_id,omitempty"`
@@ -48,10 +55,9 @@ type HostDescriptor struct {
 }
 
 type AdapterCapabilities struct {
-	CanBlock            bool `json:"can_block"`
-	CanRewriteInput     bool `json:"can_rewrite_input"`
-	CanRewriteToolArgs  bool `json:"can_rewrite_tool_args"`
-	CanPauseForApproval bool `json:"can_pause_for_approval"`
+	CanBlock           bool `json:"can_block"`
+	CanRewriteInput    bool `json:"can_rewrite_input"`
+	CanRewriteToolArgs bool `json:"can_rewrite_tool_args"`
 }
 
 type RegistrationResult struct {
@@ -132,9 +138,9 @@ type IntegrationRuntimeSpec struct {
 }
 
 type IntegrationRestartSpec struct {
-	Enabled      bool `json:"enabled"`
-	MaxAttempts  int  `json:"max_attempts,omitempty"`
-	BackoffMs    int  `json:"backoff_ms,omitempty"`
+	Enabled     bool `json:"enabled"`
+	MaxAttempts int  `json:"max_attempts,omitempty"`
+	BackoffMs   int  `json:"backoff_ms,omitempty"`
 }
 
 type IntegrationRuntimeView struct {
@@ -178,10 +184,10 @@ type SessionContext struct {
 }
 
 type ActionContext struct {
-	Operation   string   `json:"operation,omitempty"`
-	Tool        string   `json:"tool,omitempty"`
+	Operation   string       `json:"operation,omitempty"`
+	Tool        string       `json:"tool,omitempty"`
 	SideEffects []SideEffect `json:"side_effects,omitempty"`
-	OpenWorld   bool     `json:"open_world,omitempty"`
+	OpenWorld   bool         `json:"open_world,omitempty"`
 }
 
 type TargetContext struct {
@@ -208,19 +214,19 @@ type SessionFactsRecord struct {
 }
 
 type SessionFacts struct {
-	RequestCount         int        `json:"request_count"`
-	DenyCount            int        `json:"deny_count"`
-	ApprovalCount        int        `json:"approval_count"`
-	AllowCount           int        `json:"allow_count"`
-	AllowWithAuditCount  int        `json:"allow_with_audit_count"`
-	DistinctTargets      []string   `json:"distinct_targets"`
-	DistinctTools       []string   `json:"distinct_tools"`
-	DistinctReasonCodes []string   `json:"distinct_reason_codes"`
+	RequestCount        int          `json:"request_count"`
+	DenyCount           int          `json:"deny_count"`
+	ApprovalCount       int          `json:"approval_count"`
+	AllowCount          int          `json:"allow_count"`
+	AllowWithAuditCount int          `json:"allow_with_audit_count"`
+	DistinctTargets     []string     `json:"distinct_targets"`
+	DistinctTools       []string     `json:"distinct_tools"`
+	DistinctReasonCodes []string     `json:"distinct_reason_codes"`
 	SideEffectSequence  []SideEffect `json:"side_effect_sequence"`
-	Taints              []Taint    `json:"taints,omitempty"`
-	LastEffect          string     `json:"last_effect,omitempty"`
-	LastRequestAt       *time.Time `json:"last_request_at,omitempty"`
-	FirstRequestAt      *time.Time `json:"first_request_at,omitempty"`
+	Taints              []Taint      `json:"taints,omitempty"`
+	LastEffect          string       `json:"last_effect,omitempty"`
+	LastRequestAt       *time.Time   `json:"last_request_at,omitempty"`
+	FirstRequestAt      *time.Time   `json:"first_request_at,omitempty"`
 }
 
 type Obligation struct {
@@ -251,7 +257,7 @@ type SecretFindingSummary struct {
 type PolicyDecision struct {
 	DecisionID   string              `json:"decision_id"`
 	RequestID    string              `json:"request_id"`
-	Effect       Effect              `json:"effect"`
+	Disposition  Disposition         `json:"disposition"`
 	ReasonCode   string              `json:"reason_code"`
 	Obligations  []Obligation        `json:"obligations"`
 	AppliedRules []string            `json:"applied_rules,omitempty"`

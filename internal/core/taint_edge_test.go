@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/agentgate/agentgate/internal/policy"
 	"github.com/agentgate/agentgate/internal/store"
@@ -20,7 +21,7 @@ func TestEdgeSourceTrackingPreExistingTaint(t *testing.T) {
 	}
 	defer stateStore.Close()
 
-	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(approvalPolicyBundle("runtime_high_risk_requires_approval", 0)))
 
 	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_pre_taint",
@@ -65,7 +66,7 @@ func TestEdgeAdapterPreSetCustomTaint(t *testing.T) {
 	}
 	defer stateStore.Close()
 
-	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(approvalPolicyBundle("runtime_high_risk_requires_approval", 0)))
 
 	// Adapter pre-sets TaintSecretBearing (not in session facts).
 	_, err = engine.Decide(context.Background(), types.PolicyRequest{
@@ -76,7 +77,7 @@ func TestEdgeAdapterPreSetCustomTaint(t *testing.T) {
 		Target:      types.TargetContext{Kind: "model_context"},
 		Context: types.DecisionContext{
 			Surface: types.SurfaceInput,
-			Taints:  []types.Taint{types.TaintSecretBearing}, // adapter pre-set
+			Taints:  []types.Taint{types.TaintSecretBearing},       // adapter pre-set
 			Raw:     map[string]interface{}{"text": "hello world"}, // no actual secret
 		},
 	})
@@ -113,29 +114,39 @@ func TestEdgeGrantPreCheckSkipsTaintAccumulation(t *testing.T) {
 	}
 	defer stateStore.Close()
 
-	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(approvalPolicyBundle("runtime_high_risk_requires_approval", 0)))
 	session := types.SessionContext{SessionID: "sess_grant_taint", TaskID: "task_1", AttemptID: "att_1"}
 
-	// Step 1: create an approval.
-	approvalDec, err := engine.Decide(context.Background(), types.PolicyRequest{
-		RequestID:   "req_approval",
-		RequestKind: types.RequestKindToolAttempt,
-		Session:     session,
-		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
-		Target:      types.TargetContext{Kind: "process"},
-		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
-	})
-	if err != nil {
-		t.Fatalf("approval decide: %v", err)
-	}
-	approvalID := approvalIDFromDecision(t, approvalDec)
-
-	// Step 2: approve it.
+	approvalResult := make(chan types.PolicyDecision, 1)
+	approvalErr := make(chan error, 1)
+	go func() {
+		dec, err := engine.Decide(context.Background(), types.PolicyRequest{
+			RequestID:   "req_approval",
+			RequestKind: types.RequestKindToolAttempt,
+			Session:     session,
+			Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
+			Target:      types.TargetContext{Kind: "process"},
+			Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+		})
+		if err != nil {
+			approvalErr <- err
+			return
+		}
+		approvalResult <- dec
+	}()
+	approvalID := waitForPendingApprovalID(t, engine)
 	_, err = engine.ResolveApproval(context.Background(), approvalID, types.ApprovalResolveRequest{
 		Decision: "allow_once", OperatorID: "op_1", Channel: "test",
 	})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
+	}
+	select {
+	case err := <-approvalErr:
+		t.Fatalf("approval decide: %v", err)
+	case <-approvalResult:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for approval workflow")
 	}
 
 	// Step 3: retry same attempt. Grant pre-check should fire.
@@ -183,7 +194,7 @@ func TestEdgeValidationFailureSkipsTaintAccumulation(t *testing.T) {
 	}
 	defer stateStore.Close()
 
-	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(runtimeAllowBundle()))
 
 	// Invalid request (missing request_id triggers validation failure).
 	_, err = engine.Decide(context.Background(), types.PolicyRequest{
@@ -266,8 +277,8 @@ func TestEdgeCrossSurfaceTaintInheritance(t *testing.T) {
 		t.Fatalf("decide 2: %v", err)
 	}
 
-	if dec2.Effect != types.EffectDeny {
-		t.Fatalf("runtime request should inherit injection taint from input, got effect=%q reason=%q", dec2.Effect, dec2.ReasonCode)
+	if dec2.Disposition != types.DispositionDeny {
+		t.Fatalf("runtime request should inherit injection taint from input, got disposition=%q reason=%q", dec2.Disposition, dec2.ReasonCode)
 	}
 	if dec2.ReasonCode != "runtime_tainted_deny" {
 		t.Fatalf("expected runtime_tainted_deny, got %q", dec2.ReasonCode)
@@ -284,7 +295,7 @@ func TestEdgeBothContentAndSourceTaints(t *testing.T) {
 	}
 	defer stateStore.Close()
 
-	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(runtimeAllowBundle()))
 
 	// Runtime request with injection in content.summary AND OpenWorld.
 	_, err = engine.Decide(context.Background(), types.PolicyRequest{
@@ -329,7 +340,7 @@ func TestEdgeSourceTrackingDoubleSignal(t *testing.T) {
 	}
 	defer stateStore.Close()
 
-	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(runtimeAllowBundle()))
 
 	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_double_signal",
@@ -369,7 +380,7 @@ func TestEdgeInputInjectionPlusSecretSameText(t *testing.T) {
 	}
 	defer stateStore.Close()
 
-	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(runtimeAllowBundle()))
 
 	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_inj_sec",
@@ -414,7 +425,7 @@ func TestEdgeTaintAccumulationAcrossRequests(t *testing.T) {
 	}
 	defer stateStore.Close()
 
-	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(runtimeAllowBundle()))
 
 	// Request 1: injection.
 	_, err = engine.Decide(context.Background(), types.PolicyRequest{
@@ -520,7 +531,7 @@ func TestEdgeSourceTrackingNetworkEgressOnly(t *testing.T) {
 	}
 	defer stateStore.Close()
 
-	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(runtimeAllowBundle()))
 
 	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_ne_only",
@@ -561,7 +572,7 @@ func TestEdgeSourceTrackingNonNetworkSideEffects(t *testing.T) {
 	}
 	defer stateStore.Close()
 
-	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(runtimeAllowBundle()))
 
 	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_non_net",
@@ -598,7 +609,7 @@ func TestEdgeInjectionInContentSummary(t *testing.T) {
 	}
 	defer stateStore.Close()
 
-	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore), WithPolicyBundle(runtimeAllowBundle()))
 
 	_, err = engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_summary_inj",
@@ -721,8 +732,8 @@ func TestEdgeTaintVisibleToCELRuleOnNextRequest(t *testing.T) {
 		t.Fatalf("decide 2: %v", err)
 	}
 
-	if dec2.Effect != types.EffectDeny {
-		t.Fatalf("request 2 should be denied by inherited injection taint, got effect=%q reason=%q", dec2.Effect, dec2.ReasonCode)
+	if dec2.Disposition != types.DispositionDeny {
+		t.Fatalf("request 2 should be denied by inherited injection taint, got disposition=%q reason=%q", dec2.Disposition, dec2.ReasonCode)
 	}
 	if dec2.ReasonCode != "input_tainted_deny" {
 		t.Fatalf("expected reason=input_tainted_deny, got %q", dec2.ReasonCode)
@@ -799,4 +810,18 @@ func TestEdgeSecretInContentSummary(t *testing.T) {
 	if !hasSecretClass {
 		t.Fatalf("expected DataClassSecret in data classes, got %v", req.Content.DataClasses)
 	}
+}
+
+func runtimeAllowBundle() policy.Bundle {
+	return coreTestBundle([]policy.Rule{
+		{
+			ID:           "runtime.allow.all",
+			Priority:     200,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectAllow,
+			ReasonCode:   "runtime_allow_all",
+			When:         policy.Condition{Language: "cel", Expression: `true`},
+		},
+	})
 }

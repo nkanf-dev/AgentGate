@@ -154,6 +154,10 @@ func (m *memoryStateStore) SaveApproval(ctx context.Context, approval types.Appr
 	return nil
 }
 
+func (m *memoryStateStore) CreateApprovalAtomic(ctx context.Context, approval types.ApprovalRecord, event types.EventEnvelope) error {
+	return m.SaveApproval(ctx, approval)
+}
+
 func (m *memoryStateStore) ResolveApprovalAtomic(ctx context.Context, command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -187,6 +191,22 @@ func (m *memoryStateStore) ResolveApprovalAtomic(ctx context.Context, command ty
 	}
 
 	return types.ApprovalResolveResult{Approval: record, Grant: grant}, nil
+}
+
+func (m *memoryStateStore) ExpireApprovalAtomic(ctx context.Context, approvalID string, expiredAt time.Time, event types.EventEnvelope) (types.ApprovalRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	record, ok := m.approvals[approvalID]
+	if !ok {
+		return types.ApprovalRecord{}, sql.ErrNoRows
+	}
+	if record.Status != types.ApprovalPending {
+		return record, nil
+	}
+	record.Status = types.ApprovalExpired
+	record.ResolvedAt = &expiredAt
+	m.approvals[approvalID] = record
+	return record, nil
 }
 
 func (m *memoryStateStore) GetApproval(ctx context.Context, approvalID string) (types.ApprovalRecord, bool, error) {

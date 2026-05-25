@@ -36,7 +36,6 @@ export class AgentGateTransportClient {
           can_block: false,
           can_rewrite_input: false,
           can_rewrite_tool_args: false,
-          can_pause_for_approval: false,
         },
       },
       this.adapterToken,

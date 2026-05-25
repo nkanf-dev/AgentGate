@@ -116,10 +116,10 @@ type InputPolicy struct {
 }
 
 type RuntimePolicy struct {
-	RequireApprovalTools       []string `json:"require_approval_tools,omitempty"`
+	RequireApprovalTools       []string           `json:"require_approval_tools,omitempty"`
 	RequireApprovalSideEffects []types.SideEffect `json:"require_approval_side_effects,omitempty"`
-	RequireApprovalOpenWorld   bool     `json:"require_approval_open_world,omitempty"`
-	ApprovalTimeout            Duration `json:"approval_timeout,omitempty"`
+	RequireApprovalOpenWorld   bool               `json:"require_approval_open_world,omitempty"`
+	ApprovalTimeout            Duration           `json:"approval_timeout,omitempty"`
 }
 
 type ResourcePolicy struct {
@@ -249,7 +249,7 @@ func DefaultBundle() Bundle {
 					{Type: types.ObligationApprovalRequest},
 				},
 				When: Condition{
-					Language:   "cel",
+					Language: "cel",
 					Expression: `content.data_classes.exists(x, x == "secret") &&
 						action.side_effects.exists(x, x in ["network_egress", "filesystem_write", "process_spawn"])`,
 				},
@@ -266,7 +266,7 @@ func DefaultBundle() Bundle {
 					{Type: types.ObligationApprovalRequest},
 				},
 				When: Condition{
-					Language:   "cel",
+					Language: "cel",
 					Expression: `context.taints.exists(x, x in ["untrusted_external", "possible_prompt_injection", "embedded_instruction"]) &&
 						action.side_effects.exists(x, x in ["filesystem_write", "network_egress", "process_spawn", "secret_resolve"])`,
 				},
@@ -280,7 +280,7 @@ func DefaultBundle() Bundle {
 				Effect:       types.EffectApprovalRequired,
 				ReasonCode:   "runtime_session_escalation_requires_approval",
 				When: Condition{
-					Language:   "cel",
+					Language: "cel",
 					Expression: `session_facts.deny_count > 2 ||
 						session_facts.approval_count > 3 ||
 						(session_facts.distinct_targets.size() > 2 &&
@@ -331,7 +331,7 @@ func DefaultBundle() Bundle {
 					{Type: types.ObligationApprovalRequest},
 				},
 				When: Condition{
-					Language:   "cel",
+					Language: "cel",
 					Expression: `context.taints.exists(x, x in ["untrusted_external", "possible_prompt_injection", "embedded_instruction"]) ||
 						content.data_classes.exists(x, x in ["secret", "credential", "financial"])`,
 				},

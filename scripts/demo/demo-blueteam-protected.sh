@@ -31,7 +31,7 @@ trap 'kill ${openclaw_pid} 2>/dev/null || true' EXIT
 
 wait_for_session_event "${session_id}" "runtime_high_risk_requires_approval" 45 1
 
-echo "[demo:blueteam] approval_required observed"
+echo "[demo:blueteam] approval_requested observed"
 echo "[demo:blueteam] pending approvals:"
 show_pending_approvals
 echo

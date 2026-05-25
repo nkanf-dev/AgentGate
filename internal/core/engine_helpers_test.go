@@ -1,4 +1,5 @@
 package core
+
 import (
 	"context"
 	"testing"
@@ -131,11 +132,11 @@ func TestUpdateSessionFacts(t *testing.T) {
 		Action: types.ActionContext{Tool: "bash", SideEffects: []types.SideEffect{types.SideEffectNetworkEgress}},
 	}
 	decision := types.PolicyDecision{
-		Effect:     types.EffectAllow,
-		ReasonCode: "test_reason",
+		Disposition: types.DispositionAllow,
+		ReasonCode:  "test_reason",
 	}
 
-	facts := updateSessionFacts(types.SessionFacts{}, req, decision, nil, now)
+	facts := updateSessionFacts(types.SessionFacts{}, req, types.EffectAllow, decision, nil, now)
 	if facts.RequestCount != 1 {
 		t.Fatalf("expected RequestCount=1, got %d", facts.RequestCount)
 	}
@@ -168,10 +169,10 @@ func TestUpdateSessionFactsDeny(t *testing.T) {
 		Target: types.TargetContext{Identifier: "api/blocked"},
 	}
 	decision := types.PolicyDecision{
-		Effect: types.EffectDeny,
+		Disposition: types.DispositionDeny,
 	}
 
-	facts := updateSessionFacts(types.SessionFacts{}, req, decision, nil, now)
+	facts := updateSessionFacts(types.SessionFacts{}, req, types.EffectDeny, decision, nil, now)
 	if facts.DenyCount != 1 {
 		t.Fatalf("expected DenyCount=1, got %d", facts.DenyCount)
 	}
@@ -184,12 +185,15 @@ func TestUpdateSessionFactsApproval(t *testing.T) {
 	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
 	req := types.PolicyRequest{}
 	decision := types.PolicyDecision{
-		Effect: types.EffectApprovalRequired,
+		Disposition: types.DispositionAllow,
 	}
 
-	facts := updateSessionFacts(types.SessionFacts{}, req, decision, nil, now)
+	facts := updateSessionFacts(types.SessionFacts{}, req, types.EffectApprovalRequired, decision, nil, now)
 	if facts.ApprovalCount != 1 {
 		t.Fatalf("expected ApprovalCount=1, got %d", facts.ApprovalCount)
+	}
+	if facts.AllowCount != 1 {
+		t.Fatalf("expected AllowCount=1, got %d", facts.AllowCount)
 	}
 }
 
@@ -323,7 +327,7 @@ func handleIDFromDecision(t *testing.T, decision types.PolicyDecision) string {
 
 func approvalIDFromDecision(t *testing.T, decision types.PolicyDecision) string {
 	for _, ob := range decision.Obligations {
-		if ob.Type == types.ObligationApprovalRequest {
+		if ob.Type == types.ObligationApprovalRequest || ob.Type == types.ObligationAuditEvent {
 			id, ok := ob.Params["approval_id"].(string)
 			if ok {
 				return id
@@ -331,6 +335,19 @@ func approvalIDFromDecision(t *testing.T, decision types.PolicyDecision) string 
 		}
 	}
 	t.Fatal("missing approval_id in obligations")
+	return ""
+}
+
+func waitForPendingApprovalID(t *testing.T, engine *Engine) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for approvalID := range testApprovals(engine).SnapshotApprovals(context.Background()) {
+			return approvalID
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for pending approval")
 	return ""
 }
 

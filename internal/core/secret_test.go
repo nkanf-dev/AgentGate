@@ -125,8 +125,8 @@ func TestDecisionWithoutSessionFailsClosedBeforeSecretHandleCreation(t *testing.
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-	if decision.Effect != types.EffectDeny {
-		t.Fatalf("effect = %q, want deny", decision.Effect)
+	if decision.Disposition != types.DispositionDeny {
+		t.Fatalf("disposition = %q, want deny", decision.Disposition)
 	}
 }
 
@@ -161,8 +161,8 @@ func TestInputSecretFailsClosedWithoutPolicyRule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-	if decision.Effect != types.EffectDeny {
-		t.Fatalf("effect = %q, want deny", decision.Effect)
+	if decision.Disposition != types.DispositionDeny {
+		t.Fatalf("disposition = %q, want deny", decision.Disposition)
 	}
 }
 
@@ -233,8 +233,8 @@ func TestHydrateSecretHandlesFromStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resource decide after restart: %v", err)
 	}
-	if resourceDecision.Effect != types.EffectAllowWithAudit {
-		t.Fatalf("resource effect = %q, want allow_with_audit", resourceDecision.Effect)
+	if resourceDecision.Disposition != types.DispositionAllow {
+		t.Fatalf("resource disposition = %q, want allow", resourceDecision.Disposition)
 	}
 }
 
@@ -297,8 +297,8 @@ func TestSecretHandleExpiresAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve decide: %v", err)
 	}
-	if resolveDec.Effect != types.EffectDeny {
-		t.Fatalf("expired resolve effect = %q, want deny", resolveDec.Effect)
+	if resolveDec.Disposition != types.DispositionDeny {
+		t.Fatalf("expired resolve disposition = %q, want deny", resolveDec.Disposition)
 	}
 	if resolveDec.ReasonCode != "secret_handle_expired" {
 		t.Fatalf("expired resolve reason = %q, want secret_handle_expired", resolveDec.ReasonCode)
@@ -335,8 +335,7 @@ func TestDecideInputPathWithoutSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-	if dec.Effect != types.EffectAllow {
-		t.Fatalf("effect = %q, want allow", dec.Effect)
+	if dec.Disposition != types.DispositionAllow {
+		t.Fatalf("disposition = %q, want allow", dec.Disposition)
 	}
 }
-

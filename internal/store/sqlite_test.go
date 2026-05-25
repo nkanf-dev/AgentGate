@@ -151,10 +151,9 @@ func TestSQLiteStoreStateRoundTrip(t *testing.T) {
 		Host:          types.HostDescriptor{Kind: "openclaw", Version: "test"},
 		Surfaces:      []types.Surface{types.SurfaceInput, types.SurfaceRuntime},
 		Capabilities: types.AdapterCapabilities{
-			CanBlock:            true,
-			CanRewriteInput:     true,
-			CanRewriteToolArgs:  true,
-			CanPauseForApproval: true,
+			CanBlock:           true,
+			CanRewriteInput:    true,
+			CanRewriteToolArgs: true,
 		},
 	}
 	if err := store.UpsertAdapterRegistration(context.Background(), registration, now, now); err != nil {

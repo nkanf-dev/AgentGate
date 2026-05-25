@@ -298,7 +298,7 @@ export function approvalPayloadFromApproval(
 }
 
 export function approvalPayloadFromEvent(event: EventEnvelope): ApprovalCardPayload | undefined {
-  if (event.event_type !== "policy_decision" || event.effect !== "approval_required") {
+  if (event.event_type !== "approval_requested") {
     return undefined;
   }
   const approvalId = stringValue(event.metadata?.approval_id);
@@ -342,8 +342,7 @@ function stringArrayValue(value: unknown): string[] | undefined {
 function findApprovalEvent(approval: ApprovalRecord, events: EventEnvelope[]): EventEnvelope | undefined {
   return events.find(
     (event) =>
-      event.event_type === "policy_decision" &&
-      event.effect === "approval_required" &&
+      event.event_type === "approval_requested" &&
       event.request_id === approval.request_id &&
       event.session_id === approval.session_id &&
       stringValue(event.metadata?.approval_id) === approval.approval_id,

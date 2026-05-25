@@ -1,4 +1,4 @@
-import { AgentGateClient, decideOrDeny, waitForApprovalDecision } from "./client.js";
+import { AgentGateClient, decideOrDeny } from "./client.js";
 import type {
   AdapterRegistration,
   GuardDecision,
@@ -139,7 +139,6 @@ export function createRegistration(config: NormalizedAgentGateOpenClawConfig): A
       can_block: true,
       can_rewrite_input: true,
       can_rewrite_tool_args: true,
-      can_pause_for_approval: true,
     },
   };
 }
@@ -151,9 +150,8 @@ export function createAgentGateInputHook(
   return async function agentGateInputHook(event: OpenClawInputEvent): Promise<OpenClawHookResult> {
     const request = mapInputEventToPolicyRequest(event, config.integrationId);
     const decision = await decideOrDeny(client, request);
-    const finalDecision = await resolveApprovalIfNeeded(client, decision, config.operatorToken);
-    await reportDecision(client, config.adapterId, "input", finalDecision, "input_hook_decided");
-    return applyInputDecision(event, finalDecision);
+    await reportDecision(client, config.adapterId, "input", decision, "input_hook_decided");
+    return applyInputDecision(event, decision);
   };
 }
 
@@ -167,9 +165,8 @@ export function createAgentGateToolHook(
   ): Promise<OpenClawHookResult> {
     const request = mapToolAttemptToPolicyRequest(event, ctx, config.integrationId);
     const decision = await decideOrDeny(client, request);
-    const finalDecision = await resolveApprovalIfNeeded(client, decision, config.operatorToken);
-    await reportDecision(client, config.adapterId, "runtime", finalDecision, "runtime_hook_decided");
-    return applyRuntimeDecision(finalDecision);
+    await reportDecision(client, config.adapterId, "runtime", decision, "runtime_hook_decided");
+    return applyRuntimeDecision(decision);
   };
 }
 
@@ -276,7 +273,7 @@ export function applyInputDecision(
   event: OpenClawInputEvent,
   decision: GuardDecision,
 ): OpenClawHookResult {
-  if (decision.effect === "deny" || decision.effect === "exclusion") {
+  if (decision.disposition === "deny") {
     return { block: true, reason: decision.reason_code };
   }
 
@@ -297,7 +294,7 @@ export function applyInputDecision(
 }
 
 export function applyRuntimeDecision(decision: GuardDecision): OpenClawHookResult {
-  if (decision.effect === "deny" || decision.effect === "exclusion") {
+  if (decision.disposition === "deny") {
     return { block: true, reason: decision.reason_code };
   }
 
@@ -330,72 +327,6 @@ async function reportDecision(
   }
 }
 
-async function resolveApprovalIfNeeded(
-  client: AgentGateClient,
-  decision: GuardDecision,
-  operatorToken?: string,
-): Promise<GuardDecision> {
-  if (decision.effect !== "approval_required") {
-    return decision;
-  }
-
-  const approvalId = approvalIDFromObligations(decision.obligations);
-  if (!approvalId) {
-    return {
-      ...decision,
-      effect: "deny",
-      reason_code: "approval_missing_id",
-      obligations: appendAudit(decision.obligations, "approval id missing from obligations"),
-    };
-  }
-
-  if (!operatorToken) {
-    return {
-      ...decision,
-      effect: "deny",
-      reason_code: "approval_poll_unauthorized",
-      obligations: appendAudit(decision.obligations, "operator token missing for approval polling"),
-    };
-  }
-
-  const operatorClient = clientForOperator(client, operatorToken);
-  const approval = await waitForApprovalDecision(operatorClient, approvalId);
-  if (!approval) {
-    return {
-      ...decision,
-      effect: "deny",
-      reason_code: "approval_timeout",
-      obligations: appendAudit(decision.obligations, `approval ${approvalId} timed out waiting for resolution`),
-    };
-  }
-
-  if (approval.status === "approved") {
-    return {
-      ...decision,
-      effect: "allow_with_audit",
-      reason_code: "user_allow_once_valid",
-      obligations: stripApprovalControl(decision.obligations),
-    };
-  }
-
-  return {
-    ...decision,
-    effect: "deny",
-    reason_code: approval.status === "expired" ? "approval_expired" : "approval_denied",
-    obligations: appendAudit(
-      stripApprovalControl(decision.obligations),
-      `approval ${approvalId} resolved as ${approval.status}`,
-    ),
-  };
-}
-
-function clientForOperator(client: AgentGateClient, operatorToken: string): AgentGateClient {
-  return new AgentGateClient({
-    baseUrl: client.getBaseUrl(),
-    token: operatorToken,
-  });
-}
-
 function findRewriteInput(obligations: Obligation[]): string | undefined {
   for (const obligation of obligations) {
     if (obligation.type !== "rewrite_input") {
@@ -420,38 +351,6 @@ function findRewriteToolArgs(obligations: Obligation[]): Record<string, unknown>
     }
   }
   return undefined;
-}
-
-function approvalIDFromObligations(obligations: Obligation[]): string | undefined {
-  for (const obligation of obligations) {
-    if (obligation.type !== "approval_request") {
-      continue;
-    }
-    const approvalId = obligation.params?.approval_id;
-    if (typeof approvalId === "string" && approvalId.length > 0) {
-      return approvalId;
-    }
-  }
-  return undefined;
-}
-
-function stripApprovalControl(obligations: Obligation[]): Obligation[] {
-  return obligations.filter(
-    (obligation) => obligation.type !== "approval_request" && obligation.type !== "task_control",
-  );
-}
-
-function appendAudit(obligations: Obligation[], message: string): Obligation[] {
-  return [
-    ...stripApprovalControl(obligations),
-    {
-      type: "audit_event",
-      params: {
-        severity: "info",
-        message,
-      },
-    },
-  ];
 }
 
 function inferSideEffects(tool: string, args: Record<string, unknown>): string[] {

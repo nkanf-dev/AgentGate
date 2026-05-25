@@ -1265,9 +1265,6 @@ const docTemplate = `{
                 "can_block": {
                     "type": "boolean"
                 },
-                "can_pause_for_approval": {
-                    "type": "boolean"
-                },
                 "can_rewrite_input": {
                     "type": "boolean"
                 },
@@ -1465,6 +1462,17 @@ const docTemplate = `{
                 "EffectExclusion"
             ]
         },
+        "types.Disposition": {
+            "type": "string",
+            "enum": [
+                "allow",
+                "deny"
+            ],
+            "x-enum-varnames": [
+                "DispositionAllow",
+                "DispositionDeny"
+            ]
+        },
         "types.HostDescriptor": {
             "type": "object",
             "properties": {
@@ -1610,8 +1618,8 @@ const docTemplate = `{
                 "decision_id": {
                     "type": "string"
                 },
-                "effect": {
-                    "$ref": "#/definitions/types.Effect"
+                "disposition": {
+                    "$ref": "#/definitions/types.Disposition"
                 },
                 "explanation": {
                     "$ref": "#/definitions/types.DecisionExplanation"

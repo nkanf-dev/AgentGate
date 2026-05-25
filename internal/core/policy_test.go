@@ -36,8 +36,8 @@ func TestPublishPolicyValidatesAndAffectsDecisions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-	if dec.Effect != types.EffectDeny {
-		t.Fatalf("initial effect = %q, want deny", dec.Effect)
+	if dec.Disposition != types.DispositionDeny {
+		t.Fatalf("initial disposition = %q, want deny", dec.Disposition)
 	}
 
 	// Publish a more restrictive policy with audit.
@@ -74,8 +74,8 @@ func TestPublishPolicyValidatesAndAffectsDecisions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decide 2: %v", err)
 	}
-	if dec2.Effect != types.EffectAllowWithAudit {
-		t.Fatalf("effect after publish = %q, want allow_with_audit", dec2.Effect)
+	if dec2.Disposition != types.DispositionAllow {
+		t.Fatalf("disposition after publish = %q, want allow", dec2.Disposition)
 	}
 	if dec2.Explanation.PolicyTrace.PolicyVersion != publishResp.Record.Version {
 		t.Fatalf("policy version = %d, want %d", dec2.Explanation.PolicyTrace.PolicyVersion, publishResp.Record.Version)
@@ -143,13 +143,23 @@ func TestRollbackPolicyCreatesNewActiveVersion(t *testing.T) {
 	}
 	// Version 1 allows bash (by omission of restrictive rules in coreTestBundle if only one rule is added).
 	// Actually coreTestBundle has default deny if rules are empty? No, aggregateBundles adds DefaultBundle rules if empty.
-	if decision.Effect != types.EffectAllow {
-		t.Fatalf("effect after rollback = %q, want allow", decision.Effect)
+	if decision.Disposition != types.DispositionAllow {
+		t.Fatalf("disposition after rollback = %q, want allow", decision.Disposition)
 	}
 }
 
 func TestPolicyDecisionEventIncludesPolicyTraceMetadata(t *testing.T) {
-	engine := NewEngine()
+	engine := NewEngine(WithPolicyBundle(coreTestBundle([]policy.Rule{
+		{
+			ID:           "runtime.exec.audit",
+			Priority:     300,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "runtime_bash_audited",
+			When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
+		},
+	})))
 
 	_, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_trace",

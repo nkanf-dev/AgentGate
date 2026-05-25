@@ -69,8 +69,8 @@ policy:
 func TestLoadFromEnvVars(t *testing.T) {
 	// Save and restore env vars.
 	envVars := map[string]string{
-		"AGENTGATE_SERVER_ADDR":        "",
-		"AGENTGATE_DATABASE_DSN":       "",
+		"AGENTGATE_SERVER_ADDR":         "",
+		"AGENTGATE_DATABASE_DSN":        "",
 		"AGENTGATE_AUTH_ADAPTER_TOKENS": "",
 	}
 	origEnv := make(map[string]string)

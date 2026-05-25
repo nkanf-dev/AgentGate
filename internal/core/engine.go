@@ -66,7 +66,9 @@ type StateStore interface {
 	ListIntegrationDefinitions(ctx context.Context) ([]types.IntegrationDefinition, error)
 	DeleteIntegrationDefinition(ctx context.Context, integrationID string) error
 	SaveApproval(ctx context.Context, approval types.ApprovalRecord) error
+	CreateApprovalAtomic(ctx context.Context, approval types.ApprovalRecord, event types.EventEnvelope) error
 	ResolveApprovalAtomic(ctx context.Context, command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error)
+	ExpireApprovalAtomic(ctx context.Context, approvalID string, expiredAt time.Time, event types.EventEnvelope) (types.ApprovalRecord, error)
 	GetApproval(ctx context.Context, approvalID string) (types.ApprovalRecord, bool, error)
 	ListApprovals(ctx context.Context, limit int) ([]types.ApprovalRecord, error)
 	SaveAttemptGrant(ctx context.Context, sessionID string, taskID string, attemptID string, approvalID string, expiresAt time.Time) error
@@ -107,6 +109,13 @@ type decisionPatch struct {
 type inputSecretFacts struct {
 	text     string
 	findings []scanner.SecretFinding
+}
+
+type approvalWorkflowResult struct {
+	approval    types.ApprovalRecord
+	disposition types.Disposition
+	reason      string
+	obligations []types.Obligation
 }
 
 type Error struct {
@@ -534,9 +543,9 @@ func (e *Engine) PublishPolicy(ctx context.Context, req PolicyPublishRequest) (P
 		EventType: "policy_published",
 		Summary:   "policy published",
 		Metadata: map[string]interface{}{
-			"operator_id":    req.OperatorID,
-			"message":        req.Message,
-			"published_at":   now.Format(time.RFC3339Nano),
+			"operator_id":  req.OperatorID,
+			"message":      req.Message,
+			"published_at": now.Format(time.RFC3339Nano),
 		},
 		OccurredAt: now,
 	}
@@ -902,7 +911,7 @@ func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.Pol
 
 	warnings := make([]string, 0, 2)
 	var policyEvaluation policy.Evaluation
-	var effect types.Effect
+	var policyEffect types.Effect
 	var reason string
 	var appliedRules []string
 	var obligations []types.Obligation
@@ -913,7 +922,7 @@ func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.Pol
 	decisionReady := false
 	if patch := validateDecisionRequest(req, surface); patch != nil {
 		policyEvaluation = requestValidationEvaluation(patch)
-		effect = patch.effect
+		policyEffect = patch.effect
 		reason = patch.reason
 		appliedRules = patch.appliedRules
 		obligations = append([]types.Obligation(nil), patch.obligations...)
@@ -932,7 +941,7 @@ func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.Pol
 				appliedRules: []string{"core.secret_detection.fail_closed"},
 				obligations:  []types.Obligation{abortTaskObligation()},
 			})
-			effect = types.EffectDeny
+			policyEffect = types.EffectDeny
 			reason = "secret_detection_failed"
 			appliedRules = []string{"core.secret_detection.fail_closed"}
 			obligations = []types.Obligation{abortTaskObligation()}
@@ -965,25 +974,25 @@ func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.Pol
 
 	if !decisionReady && req.RequestKind == types.RequestKindToolAttempt && surface == types.SurfaceRuntime {
 		if grant, ok, err := e.approvals.ValidGrant(ctx, req.Session, now); err == nil && ok {
-			effect = types.EffectAllowWithAudit
+			policyEffect = types.EffectAllowWithAudit
 			reason = "user_allow_once_valid"
 			appliedRules = []string{"runtime.high_risk.allow_once_grant"}
 			obligations = []types.Obligation{auditObligation("info", map[string]interface{}{"approval_id": grant.ApprovalID})}
-			policyEvaluation = policy.Evaluation{Effect: effect, ReasonCode: reason, AppliedRules: appliedRules}
+			policyEvaluation = policy.Evaluation{Effect: policyEffect, ReasonCode: reason, AppliedRules: appliedRules}
 			decisionReady = true
 		}
 	}
 
 	if !decisionReady {
 		policyEvaluation = policy.EvaluateBundles(activePolicy.bundles, req, sessionFacts)
-		effect = policyEvaluation.Effect
+		policyEffect = policyEvaluation.Effect
 		reason = policyEvaluation.ReasonCode
 		appliedRules = append([]string(nil), policyEvaluation.AppliedRules...)
 		obligations = append([]types.Obligation(nil), policyEvaluation.Obligations...)
 
 		// Safety check: EffectApprovalRequired must have an approval_request obligation.
-		if effect == types.EffectApprovalRequired && !hasObligation(obligations, types.ObligationApprovalRequest) {
-			effect = types.EffectDeny
+		if policyEffect == types.EffectApprovalRequired && !hasObligation(obligations, types.ObligationApprovalRequest) {
+			policyEffect = types.EffectDeny
 			reason = "broken_approval_rule"
 			appliedRules = append(appliedRules, "core.safety.missing_obligation")
 			obligations = []types.Obligation{abortTaskObligation()}
@@ -991,7 +1000,7 @@ func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.Pol
 	}
 
 	if enriched, patch := e.executeObligations(ctx, obligations, req, inputFacts, reason, now); patch != nil {
-		effect = patch.effect
+		policyEffect = patch.effect
 		reason = patch.reason
 		appliedRules = patch.appliedRules
 		obligations = patch.obligations
@@ -1003,15 +1012,34 @@ func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.Pol
 		warnings = append(warnings, fmt.Sprintf("no adapter registration currently covers %s surface", surface))
 	}
 
+	finalReason := reason
+	finalObligations := stripInternalObligations(obligations)
+	disposition := dispositionFromEffect(policyEffect)
+	var approval *types.ApprovalRecord
+	if policyEffect == types.EffectApprovalRequired {
+		workflowResult, err := e.completeApprovalWorkflow(ctx, req, policyEvaluation, reason, now, warnings)
+		if err != nil {
+			var coreErr *Error
+			if errors.As(err, &coreErr) {
+				return types.PolicyDecision{}, err
+			}
+			return types.PolicyDecision{}, errStatus(http.StatusInternalServerError, "approval_workflow_failed", err.Error())
+		}
+		approval = &workflowResult.approval
+		disposition = workflowResult.disposition
+		finalReason = workflowResult.reason
+		finalObligations = workflowResult.obligations
+	}
+
 	decision := types.PolicyDecision{
 		DecisionID:   newID("dec"),
 		RequestID:    req.RequestID,
-		Effect:       effect,
-		ReasonCode:   reason,
-		Obligations:  obligations,
+		Disposition:  disposition,
+		ReasonCode:   finalReason,
+		Obligations:  finalObligations,
 		AppliedRules: appliedRules,
 		Explanation: types.DecisionExplanation{
-			Summary:     decisionSummary(reason),
+			Summary:     decisionSummary(finalReason),
 			Warnings:    warnings,
 			PolicyTrace: policyTrace(activePolicy.bundle, policyEvaluation),
 		},
@@ -1020,36 +1048,40 @@ func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.Pol
 	traceMetadata := decision.Explanation.PolicyTrace
 
 	metadata := map[string]interface{}{
-		"request_kind":        req.RequestKind,
-		"actor_user":          req.Actor.UserID,
-		"host_id":             req.Actor.HostID,
-		"integration_id":      mapStringValue(req.Policy, "integration_id"),
-		"operation":           req.Action.Operation,
-		"tool":                req.Action.Tool,
-		"content_summary":     req.Content.Summary,
-		"side_effects":        append([]types.SideEffect(nil), req.Action.SideEffects...),
-		"open_world":          req.Action.OpenWorld,
-		"target_kind":         req.Target.Kind,
-		"target_identifier":   req.Target.Identifier,
-		"applied_rules":       appliedRules,
-		"obligations":         obligationTypes(obligations),
-		"task_id":             req.Session.TaskID,
-		"attempt_id":          req.Session.AttemptID,
-		"approval_id":         approvalIDFromObligations(obligations),
-		"approval_scope":      approvalScopeFromObligations(obligations),
-		"approval_channel":    approvalChannelFromObligations(obligations),
-		"approval_expires_at": approvalExpiresAtFromObligations(obligations),
-		"warnings":            warnings,
-		"policy_version":      traceMetadata.PolicyVersion,
-		"policy_status":       traceMetadata.PolicyStatus,
-		"selected_rule":       traceMetadata.SelectedRule,
-		"top_priority":        traceMetadata.TopPriority,
-		"defaulted":           traceMetadata.Defaulted,
-		"matched_rules":       policyRuleTraceIDs(traceMetadata.MatchedRules),
+		"request_kind":      req.RequestKind,
+		"policy_effect":     policyEffect,
+		"disposition":       disposition,
+		"actor_user":        req.Actor.UserID,
+		"host_id":           req.Actor.HostID,
+		"integration_id":    mapStringValue(req.Policy, "integration_id"),
+		"operation":         req.Action.Operation,
+		"tool":              req.Action.Tool,
+		"content_summary":   req.Content.Summary,
+		"side_effects":      append([]types.SideEffect(nil), req.Action.SideEffects...),
+		"open_world":        req.Action.OpenWorld,
+		"target_kind":       req.Target.Kind,
+		"target_identifier": req.Target.Identifier,
+		"applied_rules":     appliedRules,
+		"obligations":       obligationTypes(finalObligations),
+		"task_id":           req.Session.TaskID,
+		"attempt_id":        req.Session.AttemptID,
+		"warnings":          warnings,
+		"policy_version":    traceMetadata.PolicyVersion,
+		"policy_status":     traceMetadata.PolicyStatus,
+		"selected_rule":     traceMetadata.SelectedRule,
+		"top_priority":      traceMetadata.TopPriority,
+		"defaulted":         traceMetadata.Defaulted,
+		"matched_rules":     policyRuleTraceIDs(traceMetadata.MatchedRules),
+	}
+	if approval != nil {
+		metadata["approval_id"] = approval.ApprovalID
+		metadata["approval_scope"] = fmt.Sprintf("session:%s task:%s attempt:%s", approval.SessionID, approval.TaskID, approval.AttemptID)
+		metadata["approval_channel"] = approval.Channel
+		metadata["approval_expires_at"] = approval.ExpiresAt
 	}
 
-	if effect == types.EffectAllowWithAudit {
-		metadata["audit_trigger"] = auditTrigger(obligations, reason)
+	if policyEffect == types.EffectAllowWithAudit || (policyEffect == types.EffectApprovalRequired && disposition == types.DispositionAllow) {
+		metadata["audit_trigger"] = auditTrigger(finalObligations, finalReason)
 		metadata["matched_rule_count"] = len(traceMetadata.MatchedRules)
 	}
 
@@ -1060,15 +1092,15 @@ func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.Pol
 		DecisionID: decision.DecisionID,
 		SessionID:  req.Session.SessionID,
 		Surface:    surface,
-		Effect:     effect,
-		Summary:    reason,
+		Effect:     effectFromDisposition(disposition),
+		Summary:    finalReason,
 		Metadata:   metadata,
 		OccurredAt: now,
 	}); err != nil {
 		return types.PolicyDecision{}, errStatus(http.StatusInternalServerError, "event_store_write_failed", err.Error())
 	}
 
-	if err := e.updateSessionFactsFromDecision(ctx, req, decision, newTaints, now); err != nil {
+	if err := e.updateSessionFactsFromDecision(ctx, req, policyEffect, decision, newTaints, now); err != nil {
 		log.Printf("session facts update failed: %v", err)
 	}
 
@@ -1157,6 +1189,185 @@ func (e *Engine) ResolveApproval(ctx context.Context, approvalID string, req typ
 	}, nil
 }
 
+func dispositionFromEffect(effect types.Effect) types.Disposition {
+	switch effect {
+	case types.EffectAllow, types.EffectAllowWithAudit:
+		return types.DispositionAllow
+	default:
+		return types.DispositionDeny
+	}
+}
+
+func effectFromDisposition(disposition types.Disposition) types.Effect {
+	if disposition == types.DispositionAllow {
+		return types.EffectAllow
+	}
+	return types.EffectDeny
+}
+
+func stripInternalObligations(obligations []types.Obligation) []types.Obligation {
+	filtered := make([]types.Obligation, 0, len(obligations))
+	for _, obligation := range obligations {
+		if obligation.Type == types.ObligationApprovalRequest || obligation.Type == types.ObligationTaskControl {
+			continue
+		}
+		filtered = append(filtered, obligation)
+	}
+	return filtered
+}
+
+func (e *Engine) completeApprovalWorkflow(ctx context.Context, req types.PolicyRequest, evaluation policy.Evaluation, reason string, now time.Time, warnings []string) (approvalWorkflowResult, error) {
+	pending, err := e.approvals.FindPending(ctx, req.Session.SessionID, req.Session.TaskID, req.Session.AttemptID, now)
+	if err != nil {
+		return approvalWorkflowResult{}, errStatus(http.StatusInternalServerError, "approval_store_read_failed", err.Error())
+	}
+
+	var approval types.ApprovalRecord
+	if pending != nil {
+		approval = *pending
+	} else {
+		timeout := 10 * time.Minute
+		active := e.policy.Active(ctx)
+		if active.bundle.RuntimePolicy.ApprovalTimeout.Duration > 0 {
+			timeout = active.bundle.RuntimePolicy.ApprovalTimeout.Duration
+		}
+		approvalReason := reason
+		if approvalReason == "" {
+			approvalReason = "High-risk request requires operator approval."
+		}
+		approval = types.ApprovalRecord{
+			ApprovalID: newID("appr"),
+			RequestID:  req.RequestID,
+			SessionID:  req.Session.SessionID,
+			TaskID:     req.Session.TaskID,
+			AttemptID:  req.Session.AttemptID,
+			Status:     types.ApprovalPending,
+			Reason:     approvalReason,
+			CreatedAt:  now,
+			ExpiresAt:  now.Add(timeout),
+			Channel:    e.approvalChannelForRequest(ctx, req),
+		}
+		event := e.approvalRequestedEvent(req, approval, evaluation, warnings, now)
+		if err := e.approvals.Create(ctx, approval, event); err != nil {
+			return approvalWorkflowResult{}, errStatus(http.StatusInternalServerError, "approval_store_write_failed", err.Error())
+		}
+	}
+
+	resolved, err := e.approvals.Await(ctx, approval.ApprovalID, approval.ExpiresAt)
+	if err != nil {
+		return approvalWorkflowResult{}, err
+	}
+	if resolved.ApprovalID != "" {
+		approval = resolved
+	}
+	if approval.Status == types.ApprovalPending || approval.Status == types.ApprovalExpired {
+		expiredAt := time.Now().UTC()
+		expiredEvent := types.EventEnvelope{
+			EventID:   newID("evt_approval"),
+			EventType: "approval_expired",
+			RequestID: req.RequestID,
+			SessionID: req.Session.SessionID,
+			Surface:   req.Context.Surface,
+			Effect:    types.EffectDeny,
+			Summary:   "approval_expired",
+			Metadata: map[string]interface{}{
+				"approval_id": approval.ApprovalID,
+				"channel":     approval.Channel,
+			},
+			OccurredAt: expiredAt,
+		}
+		expired, expireErr := e.approvals.Expire(ctx, approval.ApprovalID, expiredAt, expiredEvent)
+		if expireErr != nil {
+			return approvalWorkflowResult{}, errStatus(http.StatusInternalServerError, "approval_store_write_failed", expireErr.Error())
+		}
+		approval = expired
+	}
+
+	switch approval.Status {
+	case types.ApprovalApproved:
+		return approvalWorkflowResult{
+			approval:    approval,
+			disposition: types.DispositionAllow,
+			reason:      "user_allow_once_valid",
+			obligations: []types.Obligation{
+				auditObligation("info", map[string]interface{}{"approval_id": approval.ApprovalID}),
+			},
+		}, nil
+	case types.ApprovalDenied:
+		return approvalWorkflowResult{
+			approval:    approval,
+			disposition: types.DispositionDeny,
+			reason:      "approval_denied",
+			obligations: []types.Obligation{
+				auditObligation("warning", map[string]interface{}{"approval_id": approval.ApprovalID}),
+			},
+		}, nil
+	case types.ApprovalExpired:
+		return approvalWorkflowResult{
+			approval:    approval,
+			disposition: types.DispositionDeny,
+			reason:      "approval_expired",
+			obligations: []types.Obligation{
+				auditObligation("warning", map[string]interface{}{"approval_id": approval.ApprovalID}),
+			},
+		}, nil
+	default:
+		return approvalWorkflowResult{
+			approval:    approval,
+			disposition: types.DispositionDeny,
+			reason:      "approval_denied",
+			obligations: []types.Obligation{
+				auditObligation("warning", map[string]interface{}{"approval_id": approval.ApprovalID}),
+			},
+		}, nil
+	}
+}
+
+func (e *Engine) approvalRequestedEvent(req types.PolicyRequest, approval types.ApprovalRecord, evaluation policy.Evaluation, warnings []string, occurredAt time.Time) types.EventEnvelope {
+	metadata := map[string]interface{}{
+		"request_kind":        req.RequestKind,
+		"actor_user":          req.Actor.UserID,
+		"host_id":             req.Actor.HostID,
+		"integration_id":      mapStringValue(req.Policy, "integration_id"),
+		"operation":           req.Action.Operation,
+		"tool":                req.Action.Tool,
+		"content_summary":     req.Content.Summary,
+		"side_effects":        append([]types.SideEffect(nil), req.Action.SideEffects...),
+		"open_world":          req.Action.OpenWorld,
+		"target_kind":         req.Target.Kind,
+		"target_identifier":   req.Target.Identifier,
+		"task_id":             req.Session.TaskID,
+		"attempt_id":          req.Session.AttemptID,
+		"approval_id":         approval.ApprovalID,
+		"approval_scope":      fmt.Sprintf("session:%s task:%s attempt:%s", approval.SessionID, approval.TaskID, approval.AttemptID),
+		"approval_channel":    approval.Channel,
+		"approval_expires_at": approval.ExpiresAt,
+		"warnings":            warnings,
+		"selected_rule":       evaluation.SelectedRule,
+		"applied_rules":       append([]string(nil), evaluation.AppliedRules...),
+		"matched_rules":       matchedRuleIDs(evaluation),
+	}
+	return types.EventEnvelope{
+		EventID:    newID("evt_approval"),
+		EventType:  "approval_requested",
+		RequestID:  req.RequestID,
+		SessionID:  req.Session.SessionID,
+		Surface:    req.Context.Surface,
+		Effect:     types.EffectApprovalRequired,
+		Summary:    approval.Reason,
+		Metadata:   metadata,
+		OccurredAt: occurredAt,
+	}
+}
+
+func matchedRuleIDs(evaluation policy.Evaluation) []string {
+	ids := make([]string, 0, len(evaluation.MatchedRules))
+	for _, match := range evaluation.MatchedRules {
+		ids = append(ids, match.Rule.ID)
+	}
+	return ids
+}
+
 func (e *Engine) Events(ctx context.Context, limit int) ([]types.EventEnvelope, error) {
 	if e.eventStore != nil {
 		return e.eventStore.ListEvents(ctx, limit)
@@ -1211,15 +1422,8 @@ func (e *Engine) executeObligations(ctx context.Context, obligations []types.Obl
 			if executed[ob.Type] {
 				continue
 			}
-			if adapterFound && !capabilities.CanPauseForApproval {
-				return nil, capabilityDenialPatch("adapter_cannot_pause_for_approval")
-			}
 			executed[ob.Type] = true
-			result, patch := e.executeApprovalRequest(ctx, req, reason, now)
-			if patch != nil {
-				return nil, patch
-			}
-			enriched = append(enriched, result)
+			enriched = append(enriched, ob)
 		default:
 			enriched = append(enriched, ob)
 		}
@@ -1297,67 +1501,6 @@ func (e *Engine) executeResolveSecretHandle(ctx context.Context, req types.Polic
 			"placeholder":  handle.Placeholder,
 			"kind":         handle.Kind,
 			"secret_value": value,
-		},
-	}, nil
-}
-
-func (e *Engine) executeApprovalRequest(ctx context.Context, req types.PolicyRequest, reason string, now time.Time) (types.Obligation, *decisionPatch) {
-	// Check for existing pending approval on the same attempt.
-	if existing, _ := e.approvals.FindPending(ctx, req.Session.SessionID, req.Session.TaskID, req.Session.AttemptID, now); existing != nil {
-		return types.Obligation{
-			Type: types.ObligationApprovalRequest,
-			Params: map[string]interface{}{
-				"approval_id": existing.ApprovalID,
-				"scope":       fmt.Sprintf("session:%s task:%s attempt:%s", existing.SessionID, existing.TaskID, existing.AttemptID),
-				"channel":     existing.Channel,
-				"expires_at":  existing.ExpiresAt,
-				"reason":      existing.Reason,
-			},
-		}, nil
-	}
-
-	timeout := 10 * time.Minute
-	active := e.policy.Active(context.Background())
-	if active.bundle.RuntimePolicy.ApprovalTimeout.Duration > 0 {
-		timeout = active.bundle.RuntimePolicy.ApprovalTimeout.Duration
-	}
-
-	approvalReason := reason
-	if approvalReason == "" {
-		approvalReason = "High-risk runtime attempt paused by AgentGate policy."
-	}
-
-	channel := e.approvalChannelForRequest(ctx, req)
-	approval := types.ApprovalRecord{
-		ApprovalID: newID("appr"),
-		RequestID:  req.RequestID,
-		SessionID:  req.Session.SessionID,
-		TaskID:     req.Session.TaskID,
-		AttemptID:  req.Session.AttemptID,
-		Status:     types.ApprovalPending,
-		Reason:     approvalReason,
-		CreatedAt:  now,
-		ExpiresAt:  now.Add(timeout),
-		Channel:    channel,
-	}
-
-	if err := e.approvals.Create(ctx, approval); err != nil {
-		return types.Obligation{}, &decisionPatch{
-			effect:       types.EffectDeny,
-			reason:       "approval_store_failed",
-			appliedRules: []string{"core.approval.create.fail_closed"},
-			obligations:  []types.Obligation{abortTaskObligation()},
-		}
-	}
-
-	return types.Obligation{
-		Type: types.ObligationApprovalRequest,
-		Params: map[string]interface{}{
-			"approval_id": approval.ApprovalID,
-			"scope":       fmt.Sprintf("session:%s task:%s attempt:%s", approval.SessionID, approval.TaskID, approval.AttemptID),
-			"expires_at":  approval.ExpiresAt,
-			"channel":     approval.Channel,
-			"reason":      approval.Reason,
 		},
 	}, nil
 }
@@ -1440,7 +1583,7 @@ func (e *Engine) sessionFactsForDecision(ctx context.Context, sessionID string) 
 	return normalizeSessionFacts(record.Facts), nil
 }
 
-func (e *Engine) updateSessionFactsFromDecision(ctx context.Context, req types.PolicyRequest, decision types.PolicyDecision, newTaints []types.Taint, now time.Time) error {
+func (e *Engine) updateSessionFactsFromDecision(ctx context.Context, req types.PolicyRequest, policyEffect types.Effect, decision types.PolicyDecision, newTaints []types.Taint, now time.Time) error {
 	if e.stateStore == nil || req.Session.SessionID == "" {
 		return nil
 	}
@@ -1459,26 +1602,27 @@ func (e *Engine) updateSessionFactsFromDecision(ctx context.Context, req types.P
 		}
 		record.AdapterID = firstNonEmpty(record.AdapterID, stringValue(req.Policy["integration_id"]))
 		record.UpdatedAt = now
-		record.Facts = updateSessionFacts(record.Facts, req, decision, newTaints, now)
+		record.Facts = updateSessionFacts(record.Facts, req, policyEffect, decision, newTaints, now)
 		return record, nil
 	})
 }
 
-func updateSessionFacts(facts types.SessionFacts, req types.PolicyRequest, decision types.PolicyDecision, newTaints []types.Taint, now time.Time) types.SessionFacts {
+func updateSessionFacts(facts types.SessionFacts, req types.PolicyRequest, policyEffect types.Effect, decision types.PolicyDecision, newTaints []types.Taint, now time.Time) types.SessionFacts {
 	facts = normalizeSessionFacts(facts)
 	facts.RequestCount++
-	switch decision.Effect {
-	case types.EffectDeny, types.EffectExclusion:
-		facts.DenyCount++
+	switch policyEffect {
 	case types.EffectApprovalRequired:
 		facts.ApprovalCount++
-	case types.EffectAllow:
-		facts.AllowCount++
 	case types.EffectAllowWithAudit:
-		facts.AllowCount++
 		facts.AllowWithAuditCount++
 	}
-	facts.LastEffect = string(decision.Effect)
+	switch decision.Disposition {
+	case types.DispositionAllow:
+		facts.AllowCount++
+	case types.DispositionDeny:
+		facts.DenyCount++
+	}
+	facts.LastEffect = string(policyEffect)
 	if facts.FirstRequestAt == nil || facts.FirstRequestAt.IsZero() {
 		first := now
 		facts.FirstRequestAt = &first
@@ -1651,9 +1795,6 @@ func validateRegistration(req types.AdapterRegistration) error {
 	if _, ok := seenSurfaces[types.SurfaceRuntime]; ok {
 		if !capabilities.CanBlock {
 			return fmt.Errorf("runtime surface requires can_block capability")
-		}
-		if !capabilities.CanPauseForApproval {
-			return fmt.Errorf("runtime surface requires can_pause_for_approval capability")
 		}
 	}
 	if _, ok := seenSurfaces[types.SurfaceResource]; ok && !capabilities.CanBlock {
@@ -1983,6 +2124,10 @@ func decisionSummary(reason string) string {
 		return "Runtime attempt has high-risk side effects and requires an attempt-scoped approval."
 	case "user_allow_once_valid":
 		return "Attempt-scoped approval grant matched this runtime request."
+	case "approval_denied":
+		return "Operator denied the approval request; AgentGate blocked the action."
+	case "approval_expired":
+		return "Approval request expired before an operator allowed the action; AgentGate blocked the action."
 	default:
 		return reason
 	}

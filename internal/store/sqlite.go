@@ -608,6 +608,25 @@ func (s *SQLiteStore) SaveApproval(ctx context.Context, approval types.ApprovalR
 	return saveApprovalExec(ctx, s.db, approval)
 }
 
+func (s *SQLiteStore) CreateApprovalAtomic(ctx context.Context, approval types.ApprovalRecord, event types.EventEnvelope) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin create approval transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := saveApprovalExec(ctx, tx, approval); err != nil {
+		return err
+	}
+	if err := appendEventExec(ctx, tx, event); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit create approval transaction: %w", err)
+	}
+	return nil
+}
+
 func saveApprovalExec(ctx context.Context, exec interface {
 	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
 }, approval types.ApprovalRecord) error {
@@ -1117,6 +1136,38 @@ func (s *SQLiteStore) ResolveApprovalAtomic(ctx context.Context, command types.A
 		return types.ApprovalResolveResult{}, fmt.Errorf("commit resolve approval transaction: %w", err)
 	}
 	return types.ApprovalResolveResult{Approval: record, Grant: grant}, nil
+}
+
+func (s *SQLiteStore) ExpireApprovalAtomic(ctx context.Context, approvalID string, expiredAt time.Time, event types.EventEnvelope) (types.ApprovalRecord, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return types.ApprovalRecord{}, fmt.Errorf("begin expire approval transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	record, found, err := getApprovalTx(ctx, tx, approvalID)
+	if err != nil {
+		return types.ApprovalRecord{}, err
+	}
+	if !found {
+		return types.ApprovalRecord{}, sql.ErrNoRows
+	}
+	if record.Status != types.ApprovalPending {
+		return record, nil
+	}
+
+	record.Status = types.ApprovalExpired
+	record.ResolvedAt = &expiredAt
+	if err := saveApprovalExec(ctx, tx, record); err != nil {
+		return types.ApprovalRecord{}, err
+	}
+	if err := appendEventExec(ctx, tx, event); err != nil {
+		return types.ApprovalRecord{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return types.ApprovalRecord{}, fmt.Errorf("commit expire approval transaction: %w", err)
+	}
+	return record, nil
 }
 
 func (s *SQLiteStore) SavePolicyVersionAtomic(ctx context.Context, bundle policy.Bundle, publishedBy string, message string, sourceVersion int, publishedAt time.Time, event types.EventEnvelope) (policy.VersionRecord, error) {

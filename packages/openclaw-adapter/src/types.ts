@@ -15,6 +15,8 @@ export type Effect =
   | "deny"
   | "exclusion";
 
+export type Disposition = "allow" | "deny";
+
 export type Taint =
   | "untrusted_external"
   | "possible_prompt_injection"
@@ -37,7 +39,6 @@ export interface AdapterCapabilities {
   can_block: boolean;
   can_rewrite_input: boolean;
   can_rewrite_tool_args: boolean;
-  can_pause_for_approval: boolean;
 }
 
 export interface AdapterRegistration {
@@ -153,7 +154,7 @@ export interface DecisionExplanation {
 export interface GuardDecision {
   decision_id: string;
   request_id: string;
-  effect: Effect;
+  disposition: Disposition;
   reason_code: string;
   obligations: Obligation[];
   applied_rules?: string[];

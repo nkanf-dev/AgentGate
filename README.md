@@ -52,12 +52,12 @@ Policies are organized into **Bundles**, each containing ordered **Rules**. Acti
 | `allow` | Permit the action. |
 | `allow_with_audit` | Permit and emit an audit event. |
 | `deny` | Block the action. |
-| `approval_required` | Pause the attempt pending operator approval. |
+| `approval_required` | Internal PDP workflow state; Core completes approval before returning a final executable answer. |
 | `exclusion` | Explicit exclusion effect with block semantics. |
 
 **Conditions** are [CEL](https://github.com/google/cel-spec) expressions against the request fact model and Core-owned session facts.
 
-**Obligations** are actions executed on match: redact audit fields, rewrite input, create a SecretHandle, request approval, pause or abort a task.
+**Obligations** are actions executed on match. Some stay adapter-facing, such as `rewrite_input` or `rewrite_tool_args`; approval-control obligations stay internal to Core.
 
 AgentGate fails closed on invalid requests, missing active policy, CEL indeterminate results, and missing secret policy.
 
@@ -84,7 +84,7 @@ sequenceDiagram
 
   Input->>Core: "POST /v1/decide (input with secret-like content)"
   Core->>Core: "Detect secret and create task-scoped SecretHandle"
-  Core-->>Input: "allow_with_audit + rewrite_input"
+  Core-->>Input: "disposition=allow + rewrite_input"
   Input->>Model: "Forward placeholder text, not raw secret"
 
   Resource->>Core: "POST /v1/decide (resolve_secret_handle)"
@@ -92,7 +92,7 @@ sequenceDiagram
   alt "scope mismatch"
     Core-->>Resource: "deny + abort_task"
   else "scope match"
-    Core-->>Resource: "allow_with_audit + resolve_secret_handle"
+    Core-->>Resource: "disposition=allow + resolve_secret_handle"
     Resource->>Core: "POST /v1/report (redacted metadata)"
   end
 ```
@@ -109,17 +109,15 @@ sequenceDiagram
 
   Adapter->>Core: "POST /v1/decide (tool_attempt)"
   Core->>Core: "Match approval_required rule"
-  Core-->>Adapter: "approval_required + approval_request + pause_for_approval"
-  Adapter->>Adapter: "Pause attempt"
+  Core->>Core: "Create approval + emit approval_requested"
   Operator->>Core: "POST /v1/approvals/{id}/resolve"
   alt "allow_once"
     Core->>Core: "Create attempt-scoped grant"
-    Adapter->>Core: "Retry same attempt"
-    Core-->>Adapter: "allow_with_audit"
+    Core-->>Adapter: "disposition=allow"
   else "deny"
-    Core-->>Adapter: "attempt remains blocked"
+    Core-->>Adapter: "disposition=deny"
   else "expired or store failure"
-    Core-->>Adapter: "fail closed"
+    Core-->>Adapter: "disposition=deny (fail closed)"
   end
 ```
 
@@ -228,25 +226,11 @@ flowchart TB
 {
   "decision_id": "dec_01",
   "request_id": "req_01",
-  "effect": "approval_required",
-  "reason_code": "runtime_high_risk_requires_approval",
-  "obligations": [
-    {
-      "type": "approval_request",
-      "params": {
-        "approval_id": "appr_01",
-        "scope": "attempt"
-      }
-    },
-    {
-      "type": "task_control",
-      "params": {
-        "action": "pause_for_approval"
-      }
-    }
-  ],
+  "disposition": "deny",
+  "reason_code": "approval_denied",
+  "obligations": [],
   "explanation": {
-    "summary": "Runtime attempt has high-risk side effects and requires an attempt-scoped approval."
+    "summary": "Core completed the approval workflow and returned a final executable deny."
   },
   "decided_at": "2026-04-29T00:00:00Z"
 }

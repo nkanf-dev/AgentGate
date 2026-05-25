@@ -52,19 +52,19 @@ var injectionPatterns = []injectionPattern{
 		pattern: regexp.MustCompile(`(?i)<\s*(system|instructions?|prompt)\s*>`),
 	},
 	{
-		kind: "role_play",
+		kind:    "role_play",
 		pattern: regexp.MustCompile(`(?i)\bpretend\s+you\s+are\s+(an?\s+)?(AI|assistant|model)\s+(without|with\s+no)\s+(restrictions|guidelines|rules|limits)\b`),
 	},
 	{
-		kind: "role_play",
+		kind:    "role_play",
 		pattern: regexp.MustCompile(`(?i)\bact\s+as\s+(if|though)\s+you\s+(have|are)\s+(no|without)\s+(guidelines|rules|restrictions|limitations)\b`),
 	},
 	{
-		kind: "role_play",
+		kind:    "role_play",
 		pattern: regexp.MustCompile(`(?i)\benable\s+DAN\s+mode\b`),
 	},
 	{
-		kind: "role_play",
+		kind:    "role_play",
 		pattern: regexp.MustCompile(`(?i)\bjailbreak\b`),
 	},
 }

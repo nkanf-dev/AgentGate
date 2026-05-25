@@ -20,12 +20,11 @@ func TestRouterRejectsUnknownJSONFields(t *testing.T) {
 		"adapter_kind": "host_plugin",
 		"host": {"kind": "openclaw"},
 		"surfaces": ["input"],
-		"capabilities": {
-			"can_block": true,
-			"can_rewrite_input": true,
-			"can_rewrite_tool_args": true,
-			"can_pause_for_approval": true
-		},
+			"capabilities": {
+				"can_block": true,
+				"can_rewrite_input": true,
+				"can_rewrite_tool_args": true
+			},
 		"unexpected": true
 	}`))
 	request.Header.Set("Authorization", "Bearer adapter-token")
@@ -134,12 +133,11 @@ func TestIntegrationDefinitionMatchesRegisteredAdapterByIntegrationID(t *testing
 		"adapter_kind": "host_plugin",
 		"host": {"kind": "openclaw"},
 		"surfaces": ["input", "runtime"],
-		"capabilities": {
-			"can_block": true,
-			"can_rewrite_input": true,
-			"can_rewrite_tool_args": true,
-			"can_pause_for_approval": true
-		}
+			"capabilities": {
+				"can_block": true,
+				"can_rewrite_input": true,
+				"can_rewrite_tool_args": true
+			}
 	}`))
 	register.Header.Set("Authorization", "Bearer adapter-token")
 	register.Header.Set("Content-Type", "application/json")

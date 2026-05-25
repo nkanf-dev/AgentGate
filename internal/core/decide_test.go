@@ -70,13 +70,34 @@ func TestRuntimeOpenWorldEndToEnd(t *testing.T) {
 		Context: types.DecisionContext{Surface: types.SurfaceRuntime},
 	}
 
-	dec, err := engine.Decide(context.Background(), req)
-	if err != nil {
-		t.Fatalf("decide: %v", err)
+	resultCh := make(chan types.PolicyDecision, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		dec, err := engine.Decide(context.Background(), req)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- dec
+	}()
+
+	approvalID := waitForPendingApprovalID(t, engine)
+	if _, err := engine.ResolveApproval(context.Background(), approvalID, types.ApprovalResolveRequest{Decision: "allow_once"}); err != nil {
+		t.Fatalf("resolve approval: %v", err)
 	}
 
-	if dec.Effect != types.EffectApprovalRequired {
-		t.Fatalf("effect = %q, want approval_required", dec.Effect)
+	select {
+	case err := <-errCh:
+		t.Fatalf("decide: %v", err)
+	case dec := <-resultCh:
+		if dec.Disposition != types.DispositionAllow {
+			t.Fatalf("disposition = %q, want allow", dec.Disposition)
+		}
+		if dec.ReasonCode != "user_allow_once_valid" {
+			t.Fatalf("reason = %q, want user_allow_once_valid", dec.ReasonCode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for decision")
 	}
 }
 
@@ -113,8 +134,8 @@ func TestInjectionDetectionEndToEnd(t *testing.T) {
 		t.Fatalf("decide: %v", err)
 	}
 
-	if dec.Effect != types.EffectDeny {
-		t.Fatalf("effect = %q, want deny", dec.Effect)
+	if dec.Disposition != types.DispositionDeny {
+		t.Fatalf("disposition = %q, want deny", dec.Disposition)
 	}
 	if dec.ReasonCode != "prompt_injection_denied" {
 		t.Fatalf("reason = %q, want prompt_injection_denied", dec.ReasonCode)
@@ -144,12 +165,12 @@ func TestInjectionDetectorNilGuard(t *testing.T) {
 
 func TestCorePolicyDenyAllMatchesWhenNoRulesMatch(t *testing.T) {
 	engine := NewEngine(WithPolicyBundle(policy.Bundle{
-		BundleID: "empty",
-		Rules:    []policy.Rule{},
-		InputPolicy: policy.InputPolicy{SecretMode: "secret_handle"},
+		BundleID:       "empty",
+		Rules:          []policy.Rule{},
+		InputPolicy:    policy.InputPolicy{SecretMode: "secret_handle"},
 		ResourcePolicy: policy.ResourcePolicy{SecretHandleScope: "session_task"},
-		IssuedAt: time.Now(),
-		Version: 1,
+		IssuedAt:       time.Now(),
+		Version:        1,
 	}))
 
 	req := types.PolicyRequest{
@@ -167,8 +188,8 @@ func TestCorePolicyDenyAllMatchesWhenNoRulesMatch(t *testing.T) {
 		t.Fatalf("decide: %v", err)
 	}
 
-	if dec.Effect != types.EffectDeny {
-		t.Fatalf("effect = %q, want deny", dec.Effect)
+	if dec.Disposition != types.DispositionDeny {
+		t.Fatalf("disposition = %q, want deny", dec.Disposition)
 	}
 	if dec.ReasonCode != "policy_no_matching_rule" {
 		t.Fatalf("reason = %q, want policy_no_matching_rule", dec.ReasonCode)
@@ -204,8 +225,8 @@ func TestCorePolicyDenyAllHasLowestPriority(t *testing.T) {
 		t.Fatalf("decide: %v", err)
 	}
 
-	if dec.Effect != types.EffectAllow {
-		t.Fatalf("effect = %q, want allow", dec.Effect)
+	if dec.Disposition != types.DispositionAllow {
+		t.Fatalf("disposition = %q, want allow", dec.Disposition)
 	}
 }
 
@@ -227,8 +248,8 @@ func TestCorePolicyResourceUnsupportedTarget(t *testing.T) {
 		t.Fatalf("decide: %v", err)
 	}
 
-	if dec.Effect != types.EffectDeny {
-		t.Fatalf("effect = %q, want deny", dec.Effect)
+	if dec.Disposition != types.DispositionDeny {
+		t.Fatalf("disposition = %q, want deny", dec.Disposition)
 	}
 	if dec.ReasonCode != "resource_access_unsupported_target" {
 		t.Fatalf("reason = %q, want resource_access_unsupported_target", dec.ReasonCode)
@@ -348,9 +369,6 @@ func TestObligationExecutorApprovalRequest(t *testing.T) {
 	for _, ob := range enriched {
 		if ob.Type == types.ObligationApprovalRequest {
 			found = true
-			if ob.Params["approval_id"] == "" {
-				t.Error("missing approval_id")
-			}
 		}
 	}
 	if !found {
@@ -415,8 +433,8 @@ func TestExecutionOrderValidationSkipsPolicy(t *testing.T) {
 		t.Fatalf("decide: %v", err)
 	}
 
-	if dec.Effect != types.EffectDeny {
-		t.Fatalf("effect = %q, want deny", dec.Effect)
+	if dec.Disposition != types.DispositionDeny {
+		t.Fatalf("disposition = %q, want deny", dec.Disposition)
 	}
 	if dec.ReasonCode != "missing_task_id" {
 		t.Fatalf("reason = %q, want missing_task_id", dec.ReasonCode)
@@ -451,8 +469,8 @@ func TestMigrationBundleWithoutObligationsGetsDenyFallback(t *testing.T) {
 		t.Fatalf("decide: %v", err)
 	}
 
-	if dec.Effect != types.EffectDeny {
-		t.Fatalf("effect = %q, want deny", dec.Effect)
+	if dec.Disposition != types.DispositionDeny {
+		t.Fatalf("disposition = %q, want deny", dec.Disposition)
 	}
 }
 
@@ -482,7 +500,7 @@ func TestConcurrentDecideDoesNotCorruptState(t *testing.T) {
 }
 
 func TestSourceTrackingTaintUntrustedExternal(t *testing.T) {
-	engine := NewEngine(WithStateStore(newMemoryStateStore()))
+	engine := NewEngine(WithStateStore(newMemoryStateStore()), WithPolicyBundle(runtimeAllowBundle()))
 
 	req := types.PolicyRequest{
 		RequestID:   "req_ext",

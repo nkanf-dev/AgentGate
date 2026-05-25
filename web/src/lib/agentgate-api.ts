@@ -827,7 +827,7 @@ function normalizeApprovals(records: ApprovalRecord[], events: SecurityEvent[]):
       task_id: record.task_id || event?.task_id || "none",
       attempt_id: record.attempt_id || event?.attempt_id || "none",
       operator_id: record.operator_id || "unassigned",
-      reason: record.reason || event?.redacted_summary || "approval_required",
+      reason: record.reason || event?.redacted_summary || "approval_requested",
       scope: approvalScope(event),
       status: record.status,
       expires_in: formatExpiresIn(record.expires_at, record.status),

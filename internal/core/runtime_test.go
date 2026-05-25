@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/agentgate/agentgate/internal/types"
 )
@@ -56,10 +57,9 @@ func TestIntegrationHealthMatchesByIntegrationIDOnly(t *testing.T) {
 		Host:          types.HostDescriptor{Kind: "openclaw"},
 		Surfaces:      []types.Surface{types.SurfaceInput, types.SurfaceRuntime},
 		Capabilities: types.AdapterCapabilities{
-			CanBlock:            true,
-			CanRewriteInput:     true,
-			CanRewriteToolArgs:  true,
-			CanPauseForApproval: true,
+			CanBlock:           true,
+			CanRewriteInput:    true,
+			CanRewriteToolArgs: true,
 		},
 	})
 	if err != nil {
@@ -140,48 +140,57 @@ func TestRuntimeApprovalUsesIntegrationApprovalChannel(t *testing.T) {
 		Host:          types.HostDescriptor{Kind: "openclaw"},
 		Surfaces:      []types.Surface{types.SurfaceInput, types.SurfaceRuntime},
 		Capabilities: types.AdapterCapabilities{
-			CanBlock:            true,
-			CanRewriteInput:     true,
-			CanRewriteToolArgs:  true,
-			CanPauseForApproval: true,
+			CanBlock:           true,
+			CanRewriteInput:    true,
+			CanRewriteToolArgs: true,
 		},
 	})
 	if err != nil {
 		t.Fatalf("register adapter: %v", err)
 	}
 
-	dec, err := engine.Decide(context.Background(), types.PolicyRequest{
-		RequestID:   "req_approval_channel",
-		RequestKind: types.RequestKindToolAttempt,
-		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
-		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1", AttemptID: "att_1"},
-		Action: types.ActionContext{
-			Tool:        "bash",
-			Operation:   "execute",
-			SideEffects: []types.SideEffect{types.SideEffectProcessSpawn},
-		},
-		Target:  types.TargetContext{Kind: "process", Identifier: "shell"},
-		Context: types.DecisionContext{Surface: types.SurfaceRuntime},
-		Policy: map[string]interface{}{
-			"integration_id": "openclaw-main",
-		},
-	})
-	if err != nil {
-		t.Fatalf("decide: %v", err)
-	}
-
-	if dec.Effect != types.EffectApprovalRequired {
-		t.Fatalf("effect = %q, want approval_required", dec.Effect)
-	}
-
-	var channel string
-	for _, ob := range dec.Obligations {
-		if ob.Type == types.ObligationApprovalRequest {
-			channel = ob.Params["channel"].(string)
+	resultCh := make(chan types.PolicyDecision, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		dec, err := engine.Decide(context.Background(), types.PolicyRequest{
+			RequestID:   "req_approval_channel",
+			RequestKind: types.RequestKindToolAttempt,
+			Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+			Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1", AttemptID: "att_1"},
+			Action: types.ActionContext{
+				Tool:        "bash",
+				Operation:   "execute",
+				SideEffects: []types.SideEffect{types.SideEffectProcessSpawn},
+			},
+			Target:  types.TargetContext{Kind: "process", Identifier: "shell"},
+			Context: types.DecisionContext{Surface: types.SurfaceRuntime},
+			Policy: map[string]interface{}{
+				"integration_id": "openclaw-main",
+			},
+		})
+		if err != nil {
+			errCh <- err
+			return
 		}
-	}
+		resultCh <- dec
+	}()
 
-	if channel != "approval-feishu" {
-		t.Fatalf("approval channel = %q, want approval-feishu", channel)
+	approvalID := waitForPendingApprovalID(t, engine)
+	approval := testApprovals(engine).SnapshotApprovals(context.Background())[approvalID]
+	if approval.Channel != "approval-feishu" {
+		t.Fatalf("approval channel = %q, want approval-feishu", approval.Channel)
+	}
+	if _, err := engine.ResolveApproval(context.Background(), approvalID, types.ApprovalResolveRequest{Decision: "deny"}); err != nil {
+		t.Fatalf("resolve approval: %v", err)
+	}
+	select {
+	case err := <-errCh:
+		t.Fatalf("decide: %v", err)
+	case dec := <-resultCh:
+		if dec.Disposition != types.DispositionDeny {
+			t.Fatalf("disposition = %q, want deny", dec.Disposition)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for decision")
 	}
 }

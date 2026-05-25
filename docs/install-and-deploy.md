@@ -165,4 +165,4 @@ bun run build:web
 - 飞书机器人是否已经进群
 - 长连接模式是否已开启
 - `FEISHU_RECEIVE_ID` 是否是实际群 `chat_id`
-- AgentGate 是否已经产生 `approval_required` 事件
+- AgentGate 是否已经产生 `approval_requested` 事件

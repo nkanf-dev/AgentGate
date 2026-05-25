@@ -72,7 +72,7 @@ export class AgentGateResourceAdapter {
     const decision = await this.client.decide(policyRequest);
     const resolved = secretFromObligations(decision.obligations);
 
-    if ((decision.effect === "deny" || decision.effect === "exclusion") || resolved === undefined) {
+    if (decision.disposition === "deny" || resolved === undefined) {
       await this.client.report({
         request_id: decision.request_id,
         decision_id: decision.decision_id,
@@ -127,7 +127,6 @@ export function createResourceRegistration(
       can_block: true,
       can_rewrite_input: false,
       can_rewrite_tool_args: false,
-      can_pause_for_approval: false,
     },
   };
 }

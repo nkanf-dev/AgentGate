@@ -49,7 +49,7 @@ mismatch_decision="$(
 
 mismatch_effect="$(
   printf '%s' "${mismatch_decision}" \
-    | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const j=JSON.parse(s);console.log(`${j.effect}:${j.reason_code}:${j.obligations.map(o=>o.type).join(",")}`);})'
+    | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const j=JSON.parse(s);console.log(`${j.disposition}:${j.reason_code}:${j.obligations.map(o=>o.type).join(",")}`);})'
 )"
 
 printf 'handle_id=%s\n' "${handle_id}"

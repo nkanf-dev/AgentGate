@@ -1,11 +1,6 @@
 export type Surface = "input" | "runtime" | "resource";
 
-export type Effect =
-  | "allow"
-  | "allow_with_audit"
-  | "approval_required"
-  | "deny"
-  | "exclusion";
+export type Disposition = "allow" | "deny";
 
 export interface AdapterRegistration {
   adapter_id: string;
@@ -21,7 +16,6 @@ export interface AdapterRegistration {
     can_block: boolean;
     can_rewrite_input: boolean;
     can_rewrite_tool_args: boolean;
-    can_pause_for_approval: boolean;
   };
   metadata?: Record<string, unknown>;
 }
@@ -65,7 +59,7 @@ export interface Obligation {
 export interface PolicyDecision {
   decision_id: string;
   request_id: string;
-  effect: Effect;
+  disposition: Disposition;
   reason_code: string;
   obligations: Obligation[];
   applied_rules?: string[];

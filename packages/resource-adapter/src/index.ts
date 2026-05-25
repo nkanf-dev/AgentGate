@@ -2,7 +2,7 @@ export { AgentGateResourceClient } from "./client.js";
 export { AgentGateResourceAdapter, createResourceRegistration } from "./resource.js";
 export type {
   AdapterRegistration,
-  Effect,
+  Disposition,
   Obligation,
   PolicyDecision,
   PolicyRequest,

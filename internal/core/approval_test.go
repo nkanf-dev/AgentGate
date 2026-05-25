@@ -12,38 +12,22 @@ import (
 	"github.com/agentgate/agentgate/internal/types"
 )
 
-func TestExpiredApprovalCannotBeApproved(t *testing.T) {
+func TestResolveExpiredApprovalReturnsConflict(t *testing.T) {
 	engine := NewEngine()
-	req := types.PolicyRequest{
-		RequestID:   "req_1",
-		RequestKind: types.RequestKindToolAttempt,
-		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
-		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1", AttemptID: "att_1"},
-		Action: types.ActionContext{
-			Tool:        "bash",
-			Operation:   "execute",
-			SideEffects: []types.SideEffect{types.SideEffectProcessSpawn},
-		},
-		Target:  types.TargetContext{Kind: "process", Identifier: "shell"},
-		Context: types.DecisionContext{Surface: types.SurfaceRuntime},
-	}
+	now := time.Now().UTC()
+	testApprovals(engine).OverrideApproval(context.Background(), types.ApprovalRecord{
+		ApprovalID: "appr_expired",
+		RequestID:  "req_1",
+		SessionID:  "sess_1",
+		TaskID:     "task_1",
+		AttemptID:  "att_1",
+		Status:     types.ApprovalPending,
+		Reason:     "runtime_high_risk_requires_approval",
+		CreatedAt:  now.Add(-2 * time.Minute),
+		ExpiresAt:  now.Add(-time.Minute),
+	})
 
-	decision, err := engine.Decide(context.Background(), req)
-	if err != nil {
-		t.Fatalf("decide: %v", err)
-	}
-	approvalID := approvalIDFromObligations(decision.Obligations)
-	if approvalID == "" {
-		t.Fatalf("missing approval request obligation: %#v", decision.Obligations)
-	}
-
-	// Expire the approval manually.
-	approvalsSnap := testApprovals(engine).SnapshotApprovals(context.Background())
-	approval := approvalsSnap[approvalID]
-	approval.ExpiresAt = time.Now().UTC().Add(-time.Minute)
-	testApprovals(engine).OverrideApproval(context.Background(), approval)
-
-	_, err = engine.ResolveApproval(context.Background(), approvalID, types.ApprovalResolveRequest{
+	_, err := engine.ResolveApproval(context.Background(), "appr_expired", types.ApprovalResolveRequest{
 		Decision:   "allow_once",
 		OperatorID: "operator_1",
 		Channel:    "test",
@@ -54,86 +38,6 @@ func TestExpiredApprovalCannotBeApproved(t *testing.T) {
 	var coreErr *Error
 	if !errors.As(err, &coreErr) || coreErr.Code != "approval_expired" {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	// Note: in the new architecture, we might not auto-expire pending approvals when listing
-	// unless specifically implemented. Let's see how e.Approvals is implemented.
-	// Current e.Approvals: return e.approvals.List(context.Background(), limit)
-	// sqliteApprovalStore.List: returns s.approvals (pending) or s.stateStore.ListApprovals
-	// The test expectation might need adjustment or the implementation should match.
-	// ADR says ApprovalStore cleans up expired entries.
-}
-
-func TestApprovalsReadExpiresPendingRecords(t *testing.T) {
-	engine := NewEngine()
-	now := time.Now().UTC()
-	testApprovals(engine).OverrideApproval(context.Background(), types.ApprovalRecord{
-		ApprovalID: "appr_expired",
-		RequestID:  "req_1",
-		SessionID:  "sess_1",
-		TaskID:     "task_1",
-		AttemptID:  "attempt_1",
-		Status:     types.ApprovalPending,
-		Reason:     "runtime_high_risk_requires_approval",
-		CreatedAt:  now.Add(-2 * time.Minute),
-		ExpiresAt:  now.Add(-time.Minute),
-	})
-
-	approvals, err := engine.Approvals(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("approvals: %v", err)
-	}
-
-	var expiredFound bool
-	for _, a := range approvals.Approvals {
-		if a.ApprovalID == "appr_expired" {
-			// In memory store without Resolve doesn't auto-expire yet in List
-			// unless we implement it there.
-			// Let's adjust the test or implementation.
-			expiredFound = true
-		}
-	}
-	if !expiredFound {
-		t.Fatal("expired approval not found in list")
-	}
-}
-
-func TestApprovalsReadExpiresPendingRecordsFromStateStore(t *testing.T) {
-	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer stateStore.Close()
-
-	now := time.Now().UTC()
-	approval := types.ApprovalRecord{
-		ApprovalID: "appr_expired_store",
-		RequestID:  "req_1",
-		SessionID:  "sess_1",
-		TaskID:     "task_1",
-		AttemptID:  "attempt_1",
-		Status:     types.ApprovalPending,
-		Reason:     "runtime_high_risk_requires_approval",
-		CreatedAt:  now.Add(-2 * time.Minute),
-		ExpiresAt:  now.Add(-time.Minute),
-	}
-	if err := stateStore.SaveApproval(context.Background(), approval); err != nil {
-		t.Fatalf("save approval: %v", err)
-	}
-
-	engine := NewEngine(WithStateStore(stateStore))
-	approvals, err := engine.Approvals(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("approvals: %v", err)
-	}
-
-	var found bool
-	for _, a := range approvals.Approvals {
-		if a.ApprovalID == "appr_expired_store" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("approval not found")
 	}
 }
 
@@ -149,19 +53,16 @@ func TestHydrateAttemptGrantsFromStore(t *testing.T) {
 		t.Fatalf("save grant: %v", err)
 	}
 
-	// Create engine — hydration should load the grant.
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
 	key := "sess_g:task_g:attempt_g"
-	grants := testApprovals(engine).SnapshotGrants(context.Background())
-	grant, inMemory := grants[key]
-	if !inMemory {
+	grant, ok := testApprovals(engine).SnapshotGrants(context.Background())[key]
+	if !ok {
 		t.Fatal("attempt grant should be hydrated into memory")
 	}
 	if grant.ApprovalID != "appr_g" {
 		t.Fatalf("grant approval_id = %q, want appr_g", grant.ApprovalID)
 	}
 
-	// Verify Decide uses the hydrated grant.
 	dec, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_g",
 		RequestKind: types.RequestKindToolAttempt,
@@ -173,20 +74,19 @@ func TestHydrateAttemptGrantsFromStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-	if dec.Effect != types.EffectAllowWithAudit || dec.ReasonCode != "user_allow_once_valid" {
-		t.Fatalf("effect = %q, reason = %q", dec.Effect, dec.ReasonCode)
+	if dec.Disposition != types.DispositionAllow || dec.ReasonCode != "user_allow_once_valid" {
+		t.Fatalf("disposition = %q, reason = %q", dec.Disposition, dec.ReasonCode)
 	}
 }
 
-func TestResolveApprovalWriteOrderSQLiteFirst(t *testing.T) {
+func TestResolveApprovalAtomicFailureLeavesNoGhostState(t *testing.T) {
 	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	defer stateStore.Close()
 
-	failing := &failingStateStore{StateStore: stateStore, failEvents: true}
-
+	failing := &failingStateStore{StateStore: stateStore, failResolve: true}
 	now := time.Now().UTC()
 	approval := types.ApprovalRecord{
 		ApprovalID: "appr_order",
@@ -204,7 +104,6 @@ func TestResolveApprovalWriteOrderSQLiteFirst(t *testing.T) {
 	}
 
 	engine := NewEngine(WithEventStore(failing), WithStateStore(failing))
-
 	_, err = engine.ResolveApproval(context.Background(), "appr_order", types.ApprovalResolveRequest{
 		Decision:   "approve",
 		OperatorID: "op_1",
@@ -213,17 +112,11 @@ func TestResolveApprovalWriteOrderSQLiteFirst(t *testing.T) {
 		t.Fatal("expected error from resolve when store fails")
 	}
 
-	// The in-memory approval should still be Pending (not ghost-approved).
-	approvals := testApprovals(engine).SnapshotApprovals(context.Background())
-	stored := approvals["appr_order"]
+	stored := testApprovals(engine).SnapshotApprovals(context.Background())["appr_order"]
 	if stored.Status != types.ApprovalPending {
-		t.Fatalf("memory approval status = %q, want pending (no ghost state)", stored.Status)
+		t.Fatalf("memory approval status = %q, want pending", stored.Status)
 	}
-
-	// No ghost grant should exist.
-	grants := testApprovals(engine).SnapshotGrants(context.Background())
-	grantCount := len(grants)
-	if grantCount != 0 {
+	if grantCount := len(testApprovals(engine).SnapshotGrants(context.Background())); grantCount != 0 {
 		t.Fatalf("memory should have no ghost grants: count=%d", grantCount)
 	}
 }
@@ -251,15 +144,11 @@ func TestHydrateApprovalsFromStore(t *testing.T) {
 		t.Fatalf("save approval: %v", err)
 	}
 
-	// Create engine — hydration should load the approval into memory.
 	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
-	approvals := testApprovals(engine).SnapshotApprovals(context.Background())
-	_, inMemory := approvals["appr_hydrate"]
-	if !inMemory {
+	if _, inMemory := testApprovals(engine).SnapshotApprovals(context.Background())["appr_hydrate"]; !inMemory {
 		t.Fatal("approval should be hydrated into memory")
 	}
 
-	// Verify it can be resolved (which reads from memory).
 	resp, err := engine.ResolveApproval(context.Background(), "appr_hydrate", types.ApprovalResolveRequest{
 		Decision:   "approve",
 		OperatorID: "op_1",
@@ -272,134 +161,99 @@ func TestHydrateApprovalsFromStore(t *testing.T) {
 	}
 }
 
-func TestApprovalWriteOrderSQLiteFirst(t *testing.T) {
+func TestApprovalCreateFailureReturnsErrorAndNoGhostApproval(t *testing.T) {
 	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	defer stateStore.Close()
 
-	// Wrap StateStore to fail on approval save.
-	failing := &failingApprovalStateStore{StateStore: stateStore, failSave: true}
+	failing := &failingApprovalStateStore{StateStore: stateStore, failCreate: true}
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(failing), WithPolicyBundle(approvalPolicyBundle("runtime_high_risk_requires_approval", 0)))
 
-	bundle := coreTestBundle([]policy.Rule{
-		{
-			ID:           "runtime.bash.approval",
-			Priority:     100,
-			Surface:      types.SurfaceRuntime,
-			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
-			Effect:       types.EffectApprovalRequired,
-			ReasonCode:   "runtime_high_risk_requires_approval",
-			Obligations:  []policy.Obligation{{Type: "approval_request"}},
-			When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
-		},
-	})
-
-	engine := NewEngine(WithEventStore(stateStore), WithStateStore(failing), WithPolicyBundle(bundle))
-
-	decision, err := engine.Decide(context.Background(), types.PolicyRequest{
-		RequestID:   "req_appr_order",
-		RequestKind: types.RequestKindToolAttempt,
-		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
-		Session:     types.SessionContext{SessionID: "sess_appr_order", TaskID: "task_1", AttemptID: "att_1"},
-		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
-		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
-		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
-	})
-	if err != nil {
-		t.Fatalf("decide: %v", err)
+	_, err = engine.Decide(context.Background(), approvalRequest("req_appr_order", "att_1"))
+	if err == nil {
+		t.Fatal("expected approval create failure")
 	}
-
-	// Decision should be Deny because approval creation failed.
-	if decision.Effect != types.EffectDeny {
-		t.Fatalf("effect = %q, want deny", decision.Effect)
+	var coreErr *Error
+	if !errors.As(err, &coreErr) || coreErr.Code != "approval_store_write_failed" {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if decision.ReasonCode != "approval_store_failed" {
-		t.Fatalf("reason = %q, want approval_store_failed", decision.ReasonCode)
-	}
-
-	// Memory must not contain any ghost approvals.
-	approvals := testApprovals(engine).SnapshotApprovals(context.Background())
-	if len(approvals) != 0 {
-		t.Fatalf("memory should have no ghost approvals: count=%d", len(approvals))
+	if len(testApprovals(engine).SnapshotApprovals(context.Background())) != 0 {
+		t.Fatal("memory should have no ghost approvals")
 	}
 }
 
-type failingApprovalStateStore struct {
-	StateStore
-	failSave bool
-}
+func TestApprovalWorkflowCreatesGrantAndScopesByAttempt(t *testing.T) {
+	engine := NewEngine(WithPolicyBundle(approvalPolicyBundle("runtime_high_risk_requires_approval", 0)))
+	req := approvalRequest("req_1", "att_1")
 
-func (s *failingApprovalStateStore) SaveApproval(ctx context.Context, approval types.ApprovalRecord) error {
-	if s.failSave {
-		return fmt.Errorf("simulated db failure")
-	}
-	return s.StateStore.SaveApproval(ctx, approval)
-}
+	firstResult := make(chan types.PolicyDecision, 1)
+	firstErr := make(chan error, 1)
+	go func() {
+		dec, err := engine.Decide(context.Background(), req)
+		if err != nil {
+			firstErr <- err
+			return
+		}
+		firstResult <- dec
+	}()
 
-func TestRuntimeApprovalGrantIsAttemptScoped(t *testing.T) {
-	engine := NewEngine(WithPolicyBundle(coreTestBundle([]policy.Rule{
-		{
-			ID:           "runtime.bash.approval",
-			Priority:     100,
-			Surface:      types.SurfaceRuntime,
-			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
-			Effect:       types.EffectApprovalRequired,
-			ReasonCode:   "runtime_high_risk_requires_approval",
-			Obligations:  []policy.Obligation{{Type: "approval_request"}},
-			When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
-		},
-	})))
-
-	req := types.PolicyRequest{
-		RequestID:   "req_1",
-		RequestKind: types.RequestKindToolAttempt,
-		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
-		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1", AttemptID: "att_1"},
-		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
-		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
-		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
-	}
-
-	firstDec, err := engine.Decide(context.Background(), req)
-	if err != nil {
-		t.Fatalf("first decide: %v", err)
-	}
-	approvalID := approvalIDFromDecision(t, firstDec)
-
-	// Approve it.
-	_, err = engine.ResolveApproval(context.Background(), approvalID, types.ApprovalResolveRequest{
-		Decision:   "approve",
-		OperatorID: "op_1",
-	})
-	if err != nil {
+	approvalID := waitForPendingApprovalID(t, engine)
+	if _, err := engine.ResolveApproval(context.Background(), approvalID, types.ApprovalResolveRequest{Decision: "approve", OperatorID: "op_1"}); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
+	select {
+	case err := <-firstErr:
+		t.Fatalf("first decide: %v", err)
+	case dec := <-firstResult:
+		if dec.Disposition != types.DispositionAllow || dec.ReasonCode != "user_allow_once_valid" {
+			t.Fatalf("first disposition = %q reason = %q", dec.Disposition, dec.ReasonCode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first decision")
+	}
 
-	// Same attempt should be allowed now.
 	secondDec, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("second decide: %v", err)
 	}
-	if secondDec.Effect != types.EffectAllowWithAudit || secondDec.ReasonCode != "user_allow_once_valid" {
-		t.Fatalf("second decide effect = %q reason = %q, want allow_with_audit/user_allow_once_valid", secondDec.Effect, secondDec.ReasonCode)
+	if secondDec.Disposition != types.DispositionAllow || secondDec.ReasonCode != "user_allow_once_valid" {
+		t.Fatalf("second disposition = %q reason = %q", secondDec.Disposition, secondDec.ReasonCode)
 	}
 
-	// DIFFERENT attempt in same session/task should still require approval.
-	reqDiffAttempt := req
-	reqDiffAttempt.RequestID = "req_2"
-	reqDiffAttempt.Session.AttemptID = "att_2"
-	thirdDec, err := engine.Decide(context.Background(), reqDiffAttempt)
-	if err != nil {
-		t.Fatalf("third decide: %v", err)
+	diffReq := approvalRequest("req_2", "att_2")
+	thirdResult := make(chan types.PolicyDecision, 1)
+	thirdErr := make(chan error, 1)
+	go func() {
+		dec, err := engine.Decide(context.Background(), diffReq)
+		if err != nil {
+			thirdErr <- err
+			return
+		}
+		thirdResult <- dec
+	}()
+
+	nextApprovalID := waitForPendingApprovalID(t, engine)
+	if nextApprovalID == approvalID {
+		t.Fatal("different attempt should create a new approval")
 	}
-	if thirdDec.Effect != types.EffectApprovalRequired {
-		t.Fatalf("third decide effect = %q, want approval_required", thirdDec.Effect)
+	if _, err := engine.ResolveApproval(context.Background(), nextApprovalID, types.ApprovalResolveRequest{Decision: "deny", OperatorID: "op_2"}); err != nil {
+		t.Fatalf("resolve second approval: %v", err)
+	}
+	select {
+	case err := <-thirdErr:
+		t.Fatalf("third decide: %v", err)
+	case dec := <-thirdResult:
+		if dec.Disposition != types.DispositionDeny || dec.ReasonCode != "approval_denied" {
+			t.Fatalf("third disposition = %q reason = %q", dec.Disposition, dec.ReasonCode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for third decision")
 	}
 }
 
 func TestGrantPreCheckBypassesPolicy(t *testing.T) {
-	// Policy says DENY bash always.
 	engine := NewEngine(WithPolicyBundle(coreTestBundle([]policy.Rule{
 		{
 			ID:           "runtime.bash.deny",
@@ -412,47 +266,40 @@ func TestGrantPreCheckBypassesPolicy(t *testing.T) {
 		},
 	})))
 
-	req := types.PolicyRequest{
-		RequestID:   "req_1",
-		RequestKind: types.RequestKindToolAttempt,
-		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
-		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1", AttemptID: "att_1"},
-		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
-		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
-		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
-	}
-
-	// Should be denied by policy.
+	req := approvalRequest("req_1", "att_1")
 	dec1, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("decide 1: %v", err)
 	}
-	if dec1.Effect != types.EffectDeny {
-		t.Fatalf("initial effect = %q, want deny", dec1.Effect)
+	if dec1.Disposition != types.DispositionDeny {
+		t.Fatalf("initial disposition = %q, want deny", dec1.Disposition)
 	}
 
-	// Manually inject a grant for this attempt.
-	testApprovals(engine).Create(context.Background(), types.ApprovalRecord{
+	approval := types.ApprovalRecord{
 		ApprovalID: "appr_bypass",
 		Status:     types.ApprovalPending,
 		SessionID:  "sess_1",
 		TaskID:     "task_1",
 		AttemptID:  "att_1",
 		ExpiresAt:  time.Now().Add(1 * time.Hour),
-	})
-	testApprovals(engine).Resolve(context.Background(), types.ApprovalResolveCommand{
+	}
+	if err := testApprovals(engine).Create(context.Background(), approval, types.EventEnvelope{}); err != nil {
+		t.Fatalf("create approval: %v", err)
+	}
+	if _, err := testApprovals(engine).Resolve(context.Background(), types.ApprovalResolveCommand{
 		ApprovalID: "appr_bypass",
 		Decision:   "approve",
 		ResolvedAt: time.Now(),
-	}, types.EventEnvelope{})
+	}, types.EventEnvelope{}); err != nil {
+		t.Fatalf("resolve approval: %v", err)
+	}
 
-	// Now it should be allowed by grant PRE-CHECK, bypassing the DENY policy.
 	dec2, err := engine.Decide(context.Background(), req)
 	if err != nil {
 		t.Fatalf("decide 2: %v", err)
 	}
-	if dec2.Effect != types.EffectAllowWithAudit || dec2.ReasonCode != "user_allow_once_valid" {
-		t.Fatalf("effect after grant = %q reason = %q, want allow_with_audit/user_allow_once_valid", dec2.Effect, dec2.ReasonCode)
+	if dec2.Disposition != types.DispositionAllow || dec2.ReasonCode != "user_allow_once_valid" {
+		t.Fatalf("disposition after grant = %q reason = %q", dec2.Disposition, dec2.ReasonCode)
 	}
 }
 
@@ -469,7 +316,25 @@ func TestGrantPreCheckOnlyForRuntimeSurface(t *testing.T) {
 		},
 	})))
 
-	req := types.PolicyRequest{
+	if err := testApprovals(engine).Create(context.Background(), types.ApprovalRecord{
+		ApprovalID: "appr_input",
+		Status:     types.ApprovalPending,
+		SessionID:  "sess_1",
+		TaskID:     "task_1",
+		AttemptID:  "att_1",
+		ExpiresAt:  time.Now().Add(1 * time.Hour),
+	}, types.EventEnvelope{}); err != nil {
+		t.Fatalf("create approval: %v", err)
+	}
+	if _, err := testApprovals(engine).Resolve(context.Background(), types.ApprovalResolveCommand{
+		ApprovalID: "appr_input",
+		Decision:   "approve",
+		ResolvedAt: time.Now(),
+	}, types.EventEnvelope{}); err != nil {
+		t.Fatalf("resolve approval: %v", err)
+	}
+
+	dec, err := engine.Decide(context.Background(), types.PolicyRequest{
 		RequestID:   "req_input",
 		RequestKind: types.RequestKindInput,
 		Actor:       types.ActorContext{UserID: "u1"},
@@ -477,254 +342,178 @@ func TestGrantPreCheckOnlyForRuntimeSurface(t *testing.T) {
 		Action:      types.ActionContext{Operation: "model_input"},
 		Target:      types.TargetContext{Kind: "model_context"},
 		Context:     types.DecisionContext{Surface: types.SurfaceInput, Raw: map[string]interface{}{"text": "hi"}},
-	}
-
-	// Manually inject a grant.
-	testApprovals(engine).Create(context.Background(), types.ApprovalRecord{
-		ApprovalID: "appr_input",
-		Status:     types.ApprovalPending,
-		SessionID:  "sess_1",
-		TaskID:     "task_1",
-		AttemptID:  "att_1",
-		ExpiresAt:  time.Now().Add(1 * time.Hour),
-	})
-	testApprovals(engine).Resolve(context.Background(), types.ApprovalResolveCommand{
-		ApprovalID: "appr_input",
-		Decision:   "approve",
-		ResolvedAt: time.Now(),
-	}, types.EventEnvelope{})
-
-	// Grant pre-check should NOT trigger for Input surface.
-	dec, err := engine.Decide(context.Background(), req)
-	if err != nil {
-		t.Fatalf("decide: %v", err)
-	}
-	if dec.Effect != types.EffectDeny || dec.ReasonCode != "input_denied" {
-		t.Fatalf("effect = %q reason = %q, want deny/input_denied", dec.Effect, dec.ReasonCode)
-	}
-}
-
-func TestDuplicateApprovalPrevention(t *testing.T) {
-	engine := NewEngine(WithPolicyBundle(coreTestBundle([]policy.Rule{
-		{
-			ID:           "runtime.bash.approval",
-			Priority:     100,
-			Surface:      types.SurfaceRuntime,
-			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
-			Effect:       types.EffectApprovalRequired,
-			ReasonCode:   "runtime_high_risk_requires_approval",
-			Obligations:  []policy.Obligation{{Type: "approval_request"}},
-			When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
-		},
-	})))
-
-	req := types.PolicyRequest{
-		RequestID:   "req_dup_1",
-		RequestKind: types.RequestKindToolAttempt,
-		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
-		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1", AttemptID: "att_1"},
-		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
-		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
-		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
-	}
-
-	first, err := engine.Decide(context.Background(), req)
-	if err != nil {
-		t.Fatalf("first decide: %v", err)
-	}
-	firstApprovalID := approvalIDFromDecision(t, first)
-
-	// Second call for same attempt should return SAME approval ID.
-	req.RequestID = "req_dup_2"
-	second, err := engine.Decide(context.Background(), req)
-	if err != nil {
-		t.Fatalf("second decide: %v", err)
-	}
-	secondApprovalID := approvalIDFromDecision(t, second)
-
-	if firstApprovalID != secondApprovalID {
-		t.Fatalf("approval IDs differ: %q != %q", firstApprovalID, secondApprovalID)
-	}
-
-	// Verify only one approval exists in memory.
-	approvals := testApprovals(engine).SnapshotApprovals(context.Background())
-	if len(approvals) != 1 {
-		t.Fatalf("expected 1 approval in memory, got %d", len(approvals))
-	}
-}
-
-func TestDuplicateApprovalExpiredCreatesNew(t *testing.T) {
-	engine := NewEngine(WithPolicyBundle(coreTestBundle([]policy.Rule{
-		{
-			ID:           "runtime.bash.approval",
-			Priority:     100,
-			Surface:      types.SurfaceRuntime,
-			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
-			Effect:       types.EffectApprovalRequired,
-			ReasonCode:   "runtime_high_risk_requires_approval",
-			Obligations:  []policy.Obligation{{Type: "approval_request"}},
-			When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
-		},
-	})))
-
-	req := types.PolicyRequest{
-		RequestID:   "req_exp_dup_1",
-		RequestKind: types.RequestKindToolAttempt,
-		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
-		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1", AttemptID: "att_1"},
-		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
-		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
-		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
-	}
-
-	first, err := engine.Decide(context.Background(), req)
-	if err != nil {
-		t.Fatalf("first decide: %v", err)
-	}
-	firstApprovalID := approvalIDFromDecision(t, first)
-
-	// Expire the approval manually.
-	for _, a := range testApprovals(engine).SnapshotApprovals(context.Background()) {
-		if a.ApprovalID == firstApprovalID {
-			a.ExpiresAt = time.Now().Add(-1 * time.Minute)
-			testApprovals(engine).OverrideApproval(context.Background(), a)
-		}
-	}
-
-	// Second call should create a NEW approval (not reuse the expired one).
-	second, err := engine.Decide(context.Background(), types.PolicyRequest{
-		RequestID:   "req_exp_dup_2",
-		RequestKind: types.RequestKindToolAttempt,
-		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
-		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1", AttemptID: "att_1"},
-		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
-		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
-		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
-	})
-	if err != nil {
-		t.Fatalf("second decide: %v", err)
-	}
-	secondApprovalID := approvalIDFromDecision(t, second)
-
-	if firstApprovalID == secondApprovalID {
-		t.Fatalf("expected new approval ID after expiration, got same %q", firstApprovalID)
-	}
-
-	// Original expired one is gone from pending, new one is there.
-	approvals := testApprovals(engine).SnapshotApprovals(context.Background())
-	if len(approvals) != 1 {
-		t.Fatalf("expected 1 active approval in memory, got %d", len(approvals))
-	}
-}
-
-func TestApprovalTimeoutFromRuntimePolicy(t *testing.T) {
-	bundle := coreTestBundle([]policy.Rule{
-		{
-			ID:           "runtime.bash.approval",
-			Priority:     100,
-			Surface:      types.SurfaceRuntime,
-			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
-			Effect:       types.EffectApprovalRequired,
-			ReasonCode:   "runtime_high_risk_requires_approval",
-			Obligations:  []policy.Obligation{{Type: "approval_request"}},
-			When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
-		},
-	})
-	bundle.RuntimePolicy.ApprovalTimeout = policy.Duration{Duration: 30 * time.Second}
-
-	engine := NewEngine(WithPolicyBundle(bundle))
-	now := time.Now().UTC()
-	decision, err := engine.Decide(context.Background(), types.PolicyRequest{
-		RequestID:   "req_timeout",
-		RequestKind: types.RequestKindToolAttempt,
-		Actor:       types.ActorContext{UserID: "u1"},
-		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1", AttemptID: "att_1"},
-		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
-		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
-		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
 	})
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-
-	var expiresAt time.Time
-	for _, ob := range decision.Obligations {
-		if ob.Type == types.ObligationApprovalRequest {
-			expiresAt = ob.Params["expires_at"].(time.Time)
-		}
-	}
-
-	diff := expiresAt.Sub(now)
-	if diff > 35*time.Second || diff < 25*time.Second {
-		t.Fatalf("approval timeout too long: %v, expected ~30s", diff)
+	if dec.Disposition != types.DispositionDeny || dec.ReasonCode != "input_denied" {
+		t.Fatalf("disposition = %q reason = %q", dec.Disposition, dec.ReasonCode)
 	}
 }
 
-func TestApprovalReasonFromPolicy(t *testing.T) {
-	bundle := coreTestBundle([]policy.Rule{
-		{
-			ID:           "runtime.bash.approval",
-			Priority:     100,
-			Surface:      types.SurfaceRuntime,
-			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
-			Effect:       types.EffectApprovalRequired,
-			ReasonCode:   "CUSTOM_REASON_CODE",
-			Obligations:  []policy.Obligation{{Type: "approval_request"}},
-			When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
-		},
-	})
+func TestConcurrentSameAttemptSharesSingleApproval(t *testing.T) {
+	engine := NewEngine(WithPolicyBundle(approvalPolicyBundle("runtime_high_risk_requires_approval", 0)))
+	req1 := approvalRequest("req_dup_1", "att_1")
+	req2 := approvalRequest("req_dup_2", "att_1")
 
-	engine := NewEngine(WithPolicyBundle(bundle))
-	decision, err := engine.Decide(context.Background(), types.PolicyRequest{
-		RequestID:   "req_reason",
-		RequestKind: types.RequestKindToolAttempt,
-		Actor:       types.ActorContext{UserID: "u1"},
-		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1", AttemptID: "att_1"},
-		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
-		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
-		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
-	})
+	result1 := make(chan types.PolicyDecision, 1)
+	result2 := make(chan types.PolicyDecision, 1)
+	errCh := make(chan error, 2)
+	go func() {
+		dec, err := engine.Decide(context.Background(), req1)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		result1 <- dec
+	}()
+	go func() {
+		dec, err := engine.Decide(context.Background(), req2)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		result2 <- dec
+	}()
+
+	approvalID := waitForPendingApprovalID(t, engine)
+	if len(testApprovals(engine).SnapshotApprovals(context.Background())) != 1 {
+		t.Fatal("expected exactly one pending approval")
+	}
+	if _, err := engine.ResolveApproval(context.Background(), approvalID, types.ApprovalResolveRequest{Decision: "allow_once", OperatorID: "op_1"}); err != nil {
+		t.Fatalf("resolve approval: %v", err)
+	}
+
+	var first, second types.PolicyDecision
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-errCh:
+			t.Fatalf("decide failed: %v", err)
+		case dec := <-result1:
+			first = dec
+		case dec := <-result2:
+			second = dec
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for concurrent decisions")
+		}
+	}
+	if approvalIDFromDecision(t, first) != approvalID || approvalIDFromDecision(t, second) != approvalID {
+		t.Fatalf("concurrent decisions should share approval %q", approvalID)
+	}
+}
+
+func TestApprovalTimeoutUsesRuntimePolicy(t *testing.T) {
+	engine := NewEngine(WithPolicyBundle(approvalPolicyBundle("runtime_high_risk_requires_approval", 50*time.Millisecond)))
+	start := time.Now()
+	decision, err := engine.Decide(context.Background(), approvalRequest("req_timeout", "att_1"))
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
+	if decision.Disposition != types.DispositionDeny || decision.ReasonCode != "approval_expired" {
+		t.Fatalf("disposition = %q reason = %q", decision.Disposition, decision.ReasonCode)
+	}
+	if elapsed := time.Since(start); elapsed < 40*time.Millisecond || elapsed > 2*time.Second {
+		t.Fatalf("unexpected approval timeout duration: %v", elapsed)
+	}
+	if len(testApprovals(engine).SnapshotApprovals(context.Background())) != 0 {
+		t.Fatal("expired approval should no longer remain pending")
+	}
+}
 
-	var reason string
-	for _, ob := range decision.Obligations {
-		if ob.Type == types.ObligationApprovalRequest {
-			reason, _ = ob.Params["reason"].(string)
+func TestApprovalReasonUsesPolicyReason(t *testing.T) {
+	engine := NewEngine(WithPolicyBundle(approvalPolicyBundle("CUSTOM_REASON_CODE", 0)))
+	resultCh := make(chan types.PolicyDecision, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		dec, err := engine.Decide(context.Background(), approvalRequest("req_reason", "att_1"))
+		if err != nil {
+			errCh <- err
+			return
 		}
-	}
+		resultCh <- dec
+	}()
 
-	if reason == "" {
-		t.Fatal("approval_request missing reason")
+	approvalID := waitForPendingApprovalID(t, engine)
+	approval := testApprovals(engine).SnapshotApprovals(context.Background())[approvalID]
+	if approval.Reason != "CUSTOM_REASON_CODE" {
+		t.Fatalf("reason = %q, want CUSTOM_REASON_CODE", approval.Reason)
 	}
-	if reason != "CUSTOM_REASON_CODE" {
-		t.Fatalf("reason = %q, want CUSTOM_REASON_CODE", reason)
+	if _, err := engine.ResolveApproval(context.Background(), approvalID, types.ApprovalResolveRequest{Decision: "deny", OperatorID: "op_1"}); err != nil {
+		t.Fatalf("resolve approval: %v", err)
 	}
+	select {
+	case err := <-errCh:
+		t.Fatalf("decide: %v", err)
+	case <-resultCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for final decision")
+	}
+}
+
+type failingApprovalStateStore struct {
+	StateStore
+	failCreate bool
+}
+
+func (s *failingApprovalStateStore) CreateApprovalAtomic(ctx context.Context, approval types.ApprovalRecord, event types.EventEnvelope) error {
+	if s.failCreate {
+		return fmt.Errorf("simulated db failure")
+	}
+	return s.StateStore.CreateApprovalAtomic(ctx, approval, event)
 }
 
 type failingStateStore struct {
 	StateStore
-	failEvents bool
+	failResolve bool
 }
 
 func (s *failingStateStore) AppendEvent(ctx context.Context, event types.EventEnvelope) error {
-	if s.failEvents {
-		return fmt.Errorf("simulated db failure")
-	}
 	return nil
 }
-
-func (s *failingStateStore) ListEvents(ctx context.Context, limit int) ([]types.EventEnvelope, error) { return nil, nil }
+func (s *failingStateStore) ListEvents(ctx context.Context, limit int) ([]types.EventEnvelope, error) {
+	return nil, nil
+}
 func (s *failingStateStore) GetEventByDecisionID(ctx context.Context, id string) (types.EventEnvelope, bool, error) {
 	return types.EventEnvelope{}, false, nil
 }
-func (s *failingStateStore) PruneEvents(ctx context.Context, before time.Time) (int64, error) { return 0, nil }
+func (s *failingStateStore) PruneEvents(ctx context.Context, before time.Time) (int64, error) {
+	return 0, nil
+}
 
 func (s *failingStateStore) ResolveApprovalAtomic(ctx context.Context, command types.ApprovalResolveCommand, event types.EventEnvelope) (types.ApprovalResolveResult, error) {
-	if s.failEvents {
+	if s.failResolve {
 		return types.ApprovalResolveResult{}, fmt.Errorf("simulated db failure")
 	}
 	return s.StateStore.ResolveApprovalAtomic(ctx, command, event)
 }
 
+func approvalPolicyBundle(reasonCode string, timeout time.Duration) policy.Bundle {
+	bundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "runtime.bash.approval",
+			Priority:     100,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectApprovalRequired,
+			ReasonCode:   reasonCode,
+			Obligations:  []policy.Obligation{{Type: "approval_request"}},
+			When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
+		},
+	})
+	if timeout > 0 {
+		bundle.RuntimePolicy.ApprovalTimeout = policy.Duration{Duration: timeout}
+	}
+	return bundle
+}
+
+func approvalRequest(requestID string, attemptID string) types.PolicyRequest {
+	return types.PolicyRequest{
+		RequestID:   requestID,
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1", AttemptID: attemptID},
+		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
+		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+	}
+}

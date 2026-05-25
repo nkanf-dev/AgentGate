@@ -48,8 +48,12 @@ type cleanupEventStore struct {
 	deletedCount int64
 }
 
-func (s *cleanupEventStore) AppendEvent(ctx context.Context, event types.EventEnvelope) error { return nil }
-func (s *cleanupEventStore) ListEvents(ctx context.Context, limit int) ([]types.EventEnvelope, error) { return nil, nil }
+func (s *cleanupEventStore) AppendEvent(ctx context.Context, event types.EventEnvelope) error {
+	return nil
+}
+func (s *cleanupEventStore) ListEvents(ctx context.Context, limit int) ([]types.EventEnvelope, error) {
+	return nil, nil
+}
 func (s *cleanupEventStore) GetEventByDecisionID(ctx context.Context, id string) (types.EventEnvelope, bool, error) {
 	return types.EventEnvelope{}, false, nil
 }

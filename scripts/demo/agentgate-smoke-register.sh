@@ -16,8 +16,7 @@ curl -fsS -X POST "${base_url}/v1/register" \
     "capabilities": {
       "can_block": true,
       "can_rewrite_input": true,
-      "can_rewrite_tool_args": true,
-      "can_pause_for_approval": true
+      "can_rewrite_tool_args": true
     }
   }'
 
@@ -33,8 +32,7 @@ curl -fsS -X POST "${base_url}/v1/register" \
     "capabilities": {
       "can_block": true,
       "can_rewrite_input": false,
-      "can_rewrite_tool_args": false,
-      "can_pause_for_approval": false
+      "can_rewrite_tool_args": false
     }
   }'
 

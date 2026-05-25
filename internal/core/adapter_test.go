@@ -17,10 +17,9 @@ func TestRegisterAdapterRejectsDuplicateSurfaces(t *testing.T) {
 		Host:        types.HostDescriptor{Kind: "openclaw"},
 		Surfaces:    []types.Surface{types.SurfaceInput, types.SurfaceInput},
 		Capabilities: types.AdapterCapabilities{
-			CanBlock:            true,
-			CanRewriteInput:     true,
-			CanRewriteToolArgs:  true,
-			CanPauseForApproval: true,
+			CanBlock:           true,
+			CanRewriteInput:    true,
+			CanRewriteToolArgs: true,
 		},
 	})
 	if err == nil {

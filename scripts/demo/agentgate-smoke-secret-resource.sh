@@ -13,8 +13,7 @@ resource_registration='{
   "capabilities": {
     "can_block": true,
     "can_rewrite_input": false,
-    "can_rewrite_tool_args": false,
-    "can_pause_for_approval": false
+    "can_rewrite_tool_args": false
   }
 }'
 
@@ -64,7 +63,7 @@ resource_decision="$(
 
 printf 'handle_id=%s\n' "${handle_id}"
 printf 'resource_decision=%s\n' "$(
-  printf '%s' "${resource_decision}" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const j=JSON.parse(s);console.log(j.effect+":"+j.reason_code);})'
+  printf '%s' "${resource_decision}" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const j=JSON.parse(s);console.log(j.disposition+":"+j.reason_code);})'
 )"
 printf 'events='
 curl -fsS "${base_url}/v1/events?limit=20" \

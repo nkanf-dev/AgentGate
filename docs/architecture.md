@@ -56,15 +56,15 @@ AI Agent  → [Runtime Hook] → AgentGate 决策 → allow / 审批 / block
 ```
 ① Input Surface
    输入携带 taints: ["possible_prompt_injection", "embedded_instruction"]
-   决策: allow_with_audit —— 污点写入 session，后续所有请求继承
+   最终返回给 PEP: disposition=allow —— Core 同时写审计并把污点写入 session，后续所有请求继承
 
 ② Runtime Surface（bash 工具尝试）
    tool=bash, side_effects=[filesystem_read, network_egress, process_spawn]
    taints=[possible_prompt_injection]（从 session 继承）
    命中规则：runtime.bash.requires_approval（priority 100）
             runtime.untrusted_write.requires_approval（污点 + 高危副作用，priority 105）
-   决策: approval_required
-   → Feishu 卡片推送，运营人员收到带完整上下文的审批请求
+   规则引擎内部效果: approval_required
+   → Core 创建 approval_requested 事件并推送 Feishu 卡片
 
 ③ 运营人员在 Feishu / Web Console 选择 Deny
    Agent 收到 block: true，bash 命令不执行
@@ -165,14 +165,10 @@ export function createAgentGateToolHook(client, config) {
     // 1. 把工具调用意图映射为 PolicyRequest（含 side_effects 推断）
     const request = mapToolAttemptToPolicyRequest(event, ctx, config.integrationId);
 
-    // 2. 提交 PDP，获取带义务的 Decision
+    // 2. 提交 PDP，获取最终 allow / deny Decision
     const decision = await decideOrDeny(client, request);
-
-    // 3. 若 approval_required → 轮询等待人工决策（Feishu 推送在后台异步完成）
-    const finalDecision = await resolveApprovalIfNeeded(client, decision, config.operatorToken);
-
-    await reportDecision(client, config.adapterId, "runtime", finalDecision, "runtime_hook_decided");
-    return applyRuntimeDecision(finalDecision); // block: true 或 直接放行
+    await reportDecision(client, config.adapterId, "runtime", decision, "runtime_hook_decided");
+    return applyRuntimeDecision(decision); // block: true 或 直接放行
   };
 }
 ```
@@ -191,11 +187,11 @@ type AttemptGrant struct {
 ```
 
 ```
-tool_attempt → approval_required
+tool_attempt → internal approval_required
   → 运营人员 allow_once
   → Core 创建 AttemptGrant{attempt=att_001}
-  → 适配器重试 att_001 → allow_with_audit（Grant 匹配）
-  → 同 session 内新 att_002 → 重新进入 approval_required（Grant 不复用）
+  → Core 直接向 PEP 返回 disposition=allow（Grant 匹配）
+  → 同 session 内新 att_002 → 重新进入 internal approval_required（Grant 不复用）
   → Grant 过期 → fail closed
 ```
 
@@ -240,19 +236,18 @@ func TestReportRedactsSensitiveMetadata(t *testing.T) {
 
 三层都是强制检查点，不存在绕过路径。任何一层检测到问题都可以在执行前阻断，而不是事后告警。
 
-### 亮点二：完整义务链——不只是 allow / deny
+### 亮点二：完整义务链——对外只有 allow / deny，细粒度动作由 Core 消化
 
-决策返回可执行义务列表，适配器必须按序执行：
+规则引擎仍可产出细粒度义务，但其中一部分只在 Core 内部消化；PEP 最终只执行 allow / deny，以及少量仍然属于执行面的改写义务：
 
 | 义务类型 | 含义 | 典型场景 |
 |----------|------|---------|
 | `rewrite_input` | 重写输入内容 | 密钥替换为 SecretHandle placeholder |
 | `rewrite_tool_args` | 重写工具参数 | 路径白化、参数净化 |
-| `approval_request` | 创建审批请求 | bash 执行、网络外发 |
-| `task_control` | 控制任务状态 | `pause_for_approval` / `abort_task` |
+| `resolve_secret_handle` | 返回受控资源内容 | Resource Surface 解析 handle |
 | `audit_event` | 写入补充审计 | 上下文说明 |
 
-义务由 Core 指定、由 PEP 执行——安全决策层和安全执行层解耦，Core 不直接操控业务系统。
+`approval_request` 和 `task_control` 仍然存在于内部策略语义里，但不会再下发给 PEP；它们由 Core 触发审批工作流并折叠成最终 disposition。
 
 ### 亮点三：SecretHandle 全链防护
 

@@ -101,10 +101,10 @@ func Load(configPath string) (*Config, error) {
 // loadSliceEnvVars processes environment variables that should be treated as slices.
 func loadSliceEnvVars(k *koanf.Koanf) error {
 	sliceEnvVars := map[string]string{
-		"AGENTGATE_SERVER_CORS_ORIGINS":     "server.cors_origins",
-		"AGENTGATE_AUTH_ADAPTER_TOKENS":     "auth.adapter_tokens",
-		"AGENTGATE_AUTH_OPERATOR_TOKENS":    "auth.operator_tokens",
-		"AGENTGATE_AUTH_ADMIN_TOKENS":       "auth.admin_tokens",
+		"AGENTGATE_SERVER_CORS_ORIGINS":  "server.cors_origins",
+		"AGENTGATE_AUTH_ADAPTER_TOKENS":  "auth.adapter_tokens",
+		"AGENTGATE_AUTH_OPERATOR_TOKENS": "auth.operator_tokens",
+		"AGENTGATE_AUTH_ADMIN_TOKENS":    "auth.admin_tokens",
 	}
 
 	for envKey, configKey := range sliceEnvVars {
