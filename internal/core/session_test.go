@@ -2,9 +2,11 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/agentgate/agentgate/internal/policy"
 	"github.com/agentgate/agentgate/internal/store"
 	"github.com/agentgate/agentgate/internal/types"
 )
@@ -84,4 +86,54 @@ func TestTaintsMergedFromSessionIntoDecision(t *testing.T) {
 	// But we want to see if the taint was available during evaluation.
 	// We can check the decision event metadata if we had it, or just rely on the logic being tested in integration tests.
 	_ = decision
+}
+
+func TestSessionFactsReadFailureDeniesDecision(t *testing.T) {
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+
+	engine := NewEngine(
+		WithEventStore(stateStore),
+		WithStateStore(&failingSessionFactsStore{StateStore: stateStore}),
+		WithPolicyBundle(coreTestBundle([]policy.Rule{
+			{
+				ID:           "input.allow.all",
+				Priority:     100,
+				Surface:      types.SurfaceInput,
+				RequestKinds: []types.RequestKind{types.RequestKindInput},
+				Effect:       types.EffectAllow,
+				ReasonCode:   "input_allow_all",
+				When:         policy.Condition{Language: "cel", Expression: `true`},
+			},
+		})),
+	)
+
+	decision, err := engine.Decide(context.Background(), types.PolicyRequest{
+		RequestID:   "req_session_facts_failure",
+		RequestKind: types.RequestKindInput,
+		Session:     types.SessionContext{SessionID: "sess_fail", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "model_input"},
+		Target:      types.TargetContext{Kind: "model_context"},
+		Context:     types.DecisionContext{Surface: types.SurfaceInput, Raw: map[string]interface{}{"text": "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Disposition != types.DispositionDeny {
+		t.Fatalf("disposition = %q, want deny", decision.Disposition)
+	}
+	if decision.ReasonCode != "session_facts_unavailable" {
+		t.Fatalf("reason = %q, want session_facts_unavailable", decision.ReasonCode)
+	}
+}
+
+type failingSessionFactsStore struct {
+	StateStore
+}
+
+func (s *failingSessionFactsStore) GetSessionFacts(ctx context.Context, sessionID string) (types.SessionFactsRecord, bool, error) {
+	return types.SessionFactsRecord{}, false, fmt.Errorf("simulated session facts read failure")
 }

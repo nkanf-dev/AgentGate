@@ -2,7 +2,9 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -24,21 +26,34 @@ type ApprovalStore interface {
 
 type sqliteApprovalStore struct {
 	stateStore StateStore
+	eventStore EventStore
 
 	mu        sync.RWMutex
 	approvals map[string]types.ApprovalRecord
 	resolved  map[string]types.ApprovalRecord
 	grants    map[string]types.AttemptGrant
 	waiters   map[string][]chan types.ApprovalRecord
+	timers    map[string]*time.Timer
+	contexts  map[string]approvalEventContext
 }
 
-func newApprovalStore(stateStore StateStore) ApprovalStore {
+type approvalEventContext struct {
+	surface     types.Surface
+	requestKind types.RequestKind
+}
+
+var approvalExpirationRetryDelay = 1 * time.Second
+
+func newApprovalStore(stateStore StateStore, eventStore EventStore) ApprovalStore {
 	return &sqliteApprovalStore{
 		stateStore: stateStore,
+		eventStore: eventStore,
 		approvals:  make(map[string]types.ApprovalRecord),
 		resolved:   make(map[string]types.ApprovalRecord),
 		grants:     make(map[string]types.AttemptGrant),
 		waiters:    make(map[string][]chan types.ApprovalRecord),
+		timers:     make(map[string]*time.Timer),
+		contexts:   make(map[string]approvalEventContext),
 	}
 }
 
@@ -55,17 +70,27 @@ func (s *sqliteApprovalStore) Hydrate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	contexts, err := s.loadApprovalEventContexts(ctx, records)
+	if err != nil {
+		return err
+	}
+	pending := make([]types.ApprovalRecord, 0, len(records))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, record := range records {
 		if record.Status == types.ApprovalPending {
 			s.approvals[record.ApprovalID] = record
+			s.contexts[record.ApprovalID] = contexts[record.ApprovalID]
+			pending = append(pending, record)
 			continue
 		}
 		s.resolved[record.ApprovalID] = record
 	}
 	for _, grant := range grants {
 		s.grants[attemptKey(grant.SessionID, grant.TaskID, grant.AttemptID)] = grant.Grant
+	}
+	for _, record := range pending {
+		s.scheduleExpirationLocked(record)
 	}
 	return nil
 }
@@ -79,6 +104,8 @@ func (s *sqliteApprovalStore) Create(ctx context.Context, approval types.Approva
 	s.mu.Lock()
 	s.approvals[approval.ApprovalID] = approval
 	delete(s.resolved, approval.ApprovalID)
+	s.contexts[approval.ApprovalID] = approvalEventContextFromEvent(event)
+	s.scheduleExpirationLocked(approval)
 	s.mu.Unlock()
 	return nil
 }
@@ -178,7 +205,7 @@ func (s *sqliteApprovalStore) Await(ctx context.Context, approvalID string, expi
 
 	waitDuration := time.Until(expiresAt)
 	if waitDuration <= 0 {
-		return types.ApprovalRecord{ApprovalID: approvalID, Status: types.ApprovalExpired, ExpiresAt: expiresAt}, nil
+		return s.expirePending(context.Background(), approvalID, time.Now().UTC())
 	}
 	timer := time.NewTimer(waitDuration)
 	defer timer.Stop()
@@ -193,7 +220,7 @@ func (s *sqliteApprovalStore) Await(ctx context.Context, approvalID string, expi
 		case <-ctx.Done():
 			return types.ApprovalRecord{}, ctx.Err()
 		case <-timer.C:
-			return types.ApprovalRecord{ApprovalID: approvalID, Status: types.ApprovalExpired, ExpiresAt: expiresAt}, nil
+			return s.expirePending(context.Background(), approvalID, time.Now().UTC())
 		case <-ticker.C:
 			record, found, err := s.currentRecord(ctx, approvalID)
 			if err != nil {
@@ -274,14 +301,7 @@ func (s *sqliteApprovalStore) List(ctx context.Context, limit int) ([]types.Appr
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	results := make([]types.ApprovalRecord, 0, len(s.approvals)+len(s.resolved))
-	for id, a := range s.approvals {
-		if !a.ExpiresAt.After(time.Now().UTC()) {
-			a.Status = types.ApprovalExpired
-			delete(s.approvals, id)
-			s.resolved[id] = a
-			results = append(results, a)
-			continue
-		}
+	for _, a := range s.approvals {
 		results = append(results, a)
 	}
 	for _, a := range s.resolved {
@@ -347,6 +367,9 @@ func (s *sqliteApprovalStore) currentRecord(ctx context.Context, approvalID stri
 	if record.Status == types.ApprovalPending {
 		s.mu.Lock()
 		s.approvals[approvalID] = record
+		if _, exists := s.timers[approvalID]; !exists {
+			s.scheduleExpirationLocked(record)
+		}
 		s.mu.Unlock()
 		return record, true, nil
 	}
@@ -363,6 +386,11 @@ func (s *sqliteApprovalStore) cacheResolved(record types.ApprovalRecord, grant *
 func (s *sqliteApprovalStore) finishLocked(record types.ApprovalRecord, grant *types.AttemptGrant) {
 	delete(s.approvals, record.ApprovalID)
 	s.resolved[record.ApprovalID] = record
+	if timer := s.timers[record.ApprovalID]; timer != nil {
+		timer.Stop()
+		delete(s.timers, record.ApprovalID)
+	}
+	delete(s.contexts, record.ApprovalID)
 	if grant != nil {
 		key := attemptKey(record.SessionID, record.TaskID, record.AttemptID)
 		s.grants[key] = *grant
@@ -376,6 +404,141 @@ func (s *sqliteApprovalStore) finishLocked(record types.ApprovalRecord, grant *t
 		}
 		close(ch)
 	}
+}
+
+func (s *sqliteApprovalStore) scheduleExpirationLocked(approval types.ApprovalRecord) {
+	if approval.Status != types.ApprovalPending {
+		return
+	}
+	if existing := s.timers[approval.ApprovalID]; existing != nil {
+		existing.Stop()
+	}
+	delay := time.Until(approval.ExpiresAt)
+	if delay < 0 {
+		delay = 0
+	}
+	s.timers[approval.ApprovalID] = time.AfterFunc(delay, func() {
+		s.expireInBackground(approval.ApprovalID)
+	})
+}
+
+func (s *sqliteApprovalStore) expireInBackground(approvalID string) {
+	if _, err := s.expirePending(context.Background(), approvalID, time.Now().UTC()); err != nil {
+		s.rescheduleExpirationRetry(approvalID, approvalExpirationRetryDelay)
+		var coreErr *Error
+		if errors.As(err, &coreErr) && coreErr.Code == "approval_not_found" {
+			return
+		}
+		log.Printf("expire approval %s: %v", approvalID, err)
+	}
+}
+
+func (s *sqliteApprovalStore) rescheduleExpirationRetry(approvalID string, delay time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	record, ok := s.approvals[approvalID]
+	if !ok || record.Status != types.ApprovalPending {
+		delete(s.timers, approvalID)
+		return
+	}
+	if existing := s.timers[approvalID]; existing != nil {
+		existing.Stop()
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	s.timers[approvalID] = time.AfterFunc(delay, func() {
+		s.expireInBackground(approvalID)
+	})
+}
+
+func (s *sqliteApprovalStore) expirePending(ctx context.Context, approvalID string, expiredAt time.Time) (types.ApprovalRecord, error) {
+	record, found, err := s.currentRecord(ctx, approvalID)
+	if err != nil {
+		return types.ApprovalRecord{}, err
+	}
+	if !found {
+		return types.ApprovalRecord{}, errStatus(http.StatusNotFound, "approval_not_found", "approval was not found")
+	}
+	if record.Status != types.ApprovalPending {
+		return record, nil
+	}
+	return s.Expire(ctx, approvalID, expiredAt, s.approvalExpiredEvent(record, expiredAt))
+}
+
+func (s *sqliteApprovalStore) approvalExpiredEvent(approval types.ApprovalRecord, occurredAt time.Time) types.EventEnvelope {
+	approvalCtx := s.approvalContext(approval.ApprovalID)
+	metadata := map[string]interface{}{
+		"approval_id": approval.ApprovalID,
+		"channel":     approval.Channel,
+		"task_id":     approval.TaskID,
+		"attempt_id":  approval.AttemptID,
+	}
+	if approvalCtx.requestKind != "" {
+		metadata["request_kind"] = approvalCtx.requestKind
+	}
+	return types.EventEnvelope{
+		EventID:    newID("evt_approval"),
+		EventType:  "approval_expired",
+		RequestID:  approval.RequestID,
+		SessionID:  approval.SessionID,
+		Surface:    approvalCtx.surface,
+		Effect:     types.EffectDeny,
+		Summary:    "approval_expired",
+		Metadata:   metadata,
+		OccurredAt: occurredAt,
+	}
+}
+
+func (s *sqliteApprovalStore) approvalContext(approvalID string) approvalEventContext {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.contexts[approvalID]
+}
+
+func approvalEventContextFromEvent(event types.EventEnvelope) approvalEventContext {
+	ctx := approvalEventContext{surface: event.Surface}
+	switch value := event.Metadata["request_kind"].(type) {
+	case string:
+		ctx.requestKind = types.RequestKind(value)
+	case types.RequestKind:
+		ctx.requestKind = value
+	}
+	return ctx
+}
+
+func (s *sqliteApprovalStore) loadApprovalEventContexts(ctx context.Context, approvals []types.ApprovalRecord) (map[string]approvalEventContext, error) {
+	contexts := make(map[string]approvalEventContext, len(approvals))
+	if s.eventStore == nil || len(approvals) == 0 {
+		return contexts, nil
+	}
+
+	pendingIDs := make(map[string]struct{}, len(approvals))
+	for _, approval := range approvals {
+		if approval.Status == types.ApprovalPending {
+			pendingIDs[approval.ApprovalID] = struct{}{}
+		}
+	}
+	if len(pendingIDs) == 0 {
+		return contexts, nil
+	}
+
+	events, err := s.eventStore.ListEvents(ctx, 1000000)
+	if err != nil {
+		return nil, err
+	}
+	for _, event := range events {
+		if event.EventType != "approval_requested" {
+			continue
+		}
+		approvalID, _ := event.Metadata["approval_id"].(string)
+		if _, ok := pendingIDs[approvalID]; !ok {
+			continue
+		}
+		contexts[approvalID] = approvalEventContextFromEvent(event)
+	}
+	return contexts, nil
 }
 
 func (s *sqliteApprovalStore) addWaiter(approvalID string, ch chan types.ApprovalRecord) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -450,6 +451,277 @@ func TestApprovalReasonUsesPolicyReason(t *testing.T) {
 	}
 }
 
+func TestApprovalWorkflowPreservesExternalObligations(t *testing.T) {
+	engine := NewEngine(WithPolicyBundle(coreTestBundle([]policy.Rule{
+		{
+			ID:           "runtime.bash.approval.audit",
+			Priority:     100,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectApprovalRequired,
+			ReasonCode:   "runtime_high_risk_requires_approval",
+			Obligations: []policy.Obligation{
+				{Type: "approval_request"},
+				{Type: "audit_event", Params: map[string]interface{}{"message": "preserved_external_audit"}},
+			},
+			When: policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
+		},
+	})))
+
+	resultCh := make(chan types.PolicyDecision, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		dec, err := engine.Decide(context.Background(), approvalRequest("req_preserve_obligations", "att_1"))
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- dec
+	}()
+
+	approvalID := waitForPendingApprovalID(t, engine)
+	if _, err := engine.ResolveApproval(context.Background(), approvalID, types.ApprovalResolveRequest{
+		Decision:   "allow_once",
+		OperatorID: "op_1",
+	}); err != nil {
+		t.Fatalf("resolve approval: %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("decide: %v", err)
+	case dec := <-resultCh:
+		if dec.Disposition != types.DispositionAllow {
+			t.Fatalf("disposition = %q, want allow", dec.Disposition)
+		}
+		var preserved bool
+		for _, obligation := range dec.Obligations {
+			if obligation.Type != types.ObligationAuditEvent {
+				continue
+			}
+			if message, _ := obligation.Params["message"].(string); message == "preserved_external_audit" {
+				preserved = true
+				break
+			}
+		}
+		if !preserved {
+			t.Fatalf("expected preserved external audit obligation, got %+v", dec.Obligations)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for final decision")
+	}
+}
+
+func TestApprovalExpiresAfterCallerCancellationWithoutListAccess(t *testing.T) {
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+
+	engine := NewEngine(
+		WithEventStore(stateStore),
+		WithStateStore(stateStore),
+		WithPolicyBundle(approvalPolicyBundle("runtime_high_risk_requires_approval", 80*time.Millisecond)),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := engine.Decide(ctx, approvalRequest("req_cancelled", "att_cancelled"))
+		errCh <- err
+	}()
+
+	approvalID := waitForPendingApprovalID(t, engine)
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected context deadline exceeded, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for decide cancellation")
+	}
+
+	time.Sleep(120 * time.Millisecond)
+
+	record, found, err := stateStore.GetApproval(context.Background(), approvalID)
+	if err != nil {
+		t.Fatalf("get approval: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected approval %q in state store", approvalID)
+	}
+	if record.Status != types.ApprovalExpired {
+		t.Fatalf("approval status = %q, want expired", record.Status)
+	}
+	if len(testApprovals(engine).SnapshotApprovals(context.Background())) != 0 {
+		t.Fatal("expired approval should not remain pending in memory cache")
+	}
+}
+
+func TestHydratedPendingApprovalExpiresWithFullAuditContext(t *testing.T) {
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+
+	now := time.Now().UTC()
+	approval := types.ApprovalRecord{
+		ApprovalID: "appr_hydrated_expiry",
+		RequestID:  "req_hydrated_expiry",
+		SessionID:  "sess_hydrated_expiry",
+		TaskID:     "task_hydrated_expiry",
+		AttemptID:  "att_hydrated_expiry",
+		Status:     types.ApprovalPending,
+		Reason:     "runtime_high_risk_requires_approval",
+		Channel:    "slack",
+		CreatedAt:  now,
+		ExpiresAt:  now.Add(60 * time.Millisecond),
+	}
+	requestedEvent := types.EventEnvelope{
+		EventID:   newID("evt_approval"),
+		EventType: "approval_requested",
+		RequestID: approval.RequestID,
+		SessionID: approval.SessionID,
+		Surface:   types.SurfaceRuntime,
+		Summary:   "approval_requested",
+		Metadata: map[string]interface{}{
+			"approval_id":  approval.ApprovalID,
+			"request_kind": string(types.RequestKindToolAttempt),
+			"task_id":      approval.TaskID,
+			"attempt_id":   approval.AttemptID,
+			"channel":      approval.Channel,
+		},
+		OccurredAt: now,
+	}
+	if err := stateStore.CreateApprovalAtomic(context.Background(), approval, requestedEvent); err != nil {
+		t.Fatalf("create approval: %v", err)
+	}
+
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(stateStore))
+	defer engine.Close()
+
+	time.Sleep(160 * time.Millisecond)
+
+	record, found, err := stateStore.GetApproval(context.Background(), approval.ApprovalID)
+	if err != nil {
+		t.Fatalf("get approval: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected approval %q in state store", approval.ApprovalID)
+	}
+	if record.Status != types.ApprovalExpired {
+		t.Fatalf("approval status = %q, want expired", record.Status)
+	}
+
+	events, err := stateStore.ListEvents(context.Background(), 20)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	var expired *types.EventEnvelope
+	for i := range events {
+		event := events[i]
+		if event.EventType != "approval_expired" {
+			continue
+		}
+		if approvalID, _ := event.Metadata["approval_id"].(string); approvalID == approval.ApprovalID {
+			expired = &event
+			break
+		}
+	}
+	if expired == nil {
+		t.Fatalf("expected approval_expired event for %q", approval.ApprovalID)
+	}
+	if expired.Surface != types.SurfaceRuntime {
+		t.Fatalf("expired event surface = %q, want %q", expired.Surface, types.SurfaceRuntime)
+	}
+	if got, _ := expired.Metadata["request_kind"].(string); got != string(types.RequestKindToolAttempt) {
+		t.Fatalf("expired event request_kind = %q, want %q", got, types.RequestKindToolAttempt)
+	}
+	if got, _ := expired.Metadata["task_id"].(string); got != approval.TaskID {
+		t.Fatalf("expired event task_id = %q, want %q", got, approval.TaskID)
+	}
+	if got, _ := expired.Metadata["attempt_id"].(string); got != approval.AttemptID {
+		t.Fatalf("expired event attempt_id = %q, want %q", got, approval.AttemptID)
+	}
+	if got, _ := expired.Metadata["channel"].(string); got != approval.Channel {
+		t.Fatalf("expired event channel = %q, want %q", got, approval.Channel)
+	}
+}
+
+func TestApprovalExpiryRetriesAfterTransientStoreFailure(t *testing.T) {
+	stateStore, err := store.OpenSQLite(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer stateStore.Close()
+
+	failing := &flakyExpireStateStore{StateStore: stateStore, failCount: 1}
+	previousRetryDelay := approvalExpirationRetryDelay
+	approvalExpirationRetryDelay = 20 * time.Millisecond
+	defer func() {
+		approvalExpirationRetryDelay = previousRetryDelay
+	}()
+
+	engine := NewEngine(WithEventStore(stateStore), WithStateStore(failing))
+	defer engine.Close()
+
+	now := time.Now().UTC()
+	approval := types.ApprovalRecord{
+		ApprovalID: "appr_retry_expiry",
+		RequestID:  "req_retry_expiry",
+		SessionID:  "sess_retry_expiry",
+		TaskID:     "task_retry_expiry",
+		AttemptID:  "att_retry_expiry",
+		Status:     types.ApprovalPending,
+		Reason:     "runtime_high_risk_requires_approval",
+		Channel:    "slack",
+		CreatedAt:  now,
+		ExpiresAt:  now.Add(30 * time.Millisecond),
+	}
+	requestedEvent := types.EventEnvelope{
+		EventID:   newID("evt_approval"),
+		EventType: "approval_requested",
+		RequestID: approval.RequestID,
+		SessionID: approval.SessionID,
+		Surface:   types.SurfaceRuntime,
+		Summary:   "approval_requested",
+		Metadata: map[string]interface{}{
+			"approval_id":  approval.ApprovalID,
+			"request_kind": string(types.RequestKindToolAttempt),
+			"task_id":      approval.TaskID,
+			"attempt_id":   approval.AttemptID,
+			"channel":      approval.Channel,
+		},
+		OccurredAt: now,
+	}
+	if err := testApprovals(engine).Create(context.Background(), approval, requestedEvent); err != nil {
+		t.Fatalf("create approval: %v", err)
+	}
+
+	time.Sleep(180 * time.Millisecond)
+
+	record, found, err := stateStore.GetApproval(context.Background(), approval.ApprovalID)
+	if err != nil {
+		t.Fatalf("get approval: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected approval %q in state store", approval.ApprovalID)
+	}
+	if record.Status != types.ApprovalExpired {
+		t.Fatalf("approval status = %q, want expired", record.Status)
+	}
+	if failing.ExpireCalls() < 2 {
+		t.Fatalf("expected retry after transient expire failure, got %d attempts", failing.ExpireCalls())
+	}
+	if len(testApprovals(engine).SnapshotApprovals(context.Background())) != 0 {
+		t.Fatal("expired approval should not remain pending in memory cache")
+	}
+}
+
 type failingApprovalStateStore struct {
 	StateStore
 	failCreate bool
@@ -485,6 +757,31 @@ func (s *failingStateStore) ResolveApprovalAtomic(ctx context.Context, command t
 		return types.ApprovalResolveResult{}, fmt.Errorf("simulated db failure")
 	}
 	return s.StateStore.ResolveApprovalAtomic(ctx, command, event)
+}
+
+type flakyExpireStateStore struct {
+	StateStore
+	mu        sync.Mutex
+	failCount int
+	attempts  int
+}
+
+func (s *flakyExpireStateStore) ExpireApprovalAtomic(ctx context.Context, approvalID string, expiredAt time.Time, event types.EventEnvelope) (types.ApprovalRecord, error) {
+	s.mu.Lock()
+	s.attempts++
+	if s.failCount > 0 {
+		s.failCount--
+		s.mu.Unlock()
+		return types.ApprovalRecord{}, fmt.Errorf("simulated transient expire failure")
+	}
+	s.mu.Unlock()
+	return s.StateStore.ExpireApprovalAtomic(ctx, approvalID, expiredAt, event)
+}
+
+func (s *flakyExpireStateStore) ExpireCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attempts
 }
 
 func approvalPolicyBundle(reasonCode string, timeout time.Duration) policy.Bundle {

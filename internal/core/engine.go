@@ -190,7 +190,7 @@ func NewEngine(options ...Option) *Engine {
 	}
 
 	// Initialize subsystems
-	engine.approvals = newApprovalStore(engine.stateStore)
+	engine.approvals = newApprovalStore(engine.stateStore, engine.eventStore)
 	engine.vault = newSecretVault(engine.stateStore, engine.init.detector, engine.init.injectionDetector)
 	engine.policy = newPolicyManager(engine.stateStore, engine.init.policyBundle, engine.init.policyBundles)
 	engine.runtimes = newRuntimeSupervisor()
@@ -959,16 +959,28 @@ func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.Pol
 		var err error
 		sessionFacts, err = e.sessionFactsForDecision(ctx, req.Session.SessionID)
 		if err != nil {
-			log.Printf("session facts read failed, proceeding with empty facts: %v", err)
-			sessionFacts = types.SessionFacts{}
+			patch := &decisionPatch{
+				effect:       types.EffectDeny,
+				reason:       "session_facts_unavailable",
+				appliedRules: []string{"core.session_facts.fail_closed"},
+				obligations:  []types.Obligation{abortTaskObligation()},
+			}
+			policyEvaluation = requestValidationEvaluation(patch)
+			policyEffect = patch.effect
+			reason = patch.reason
+			appliedRules = patch.appliedRules
+			obligations = append([]types.Obligation(nil), patch.obligations...)
+			decisionReady = true
 		}
 
-		req.Context.Taints = mergeTaints(req.Context.Taints, sessionFacts.Taints)
-		if len(inputFacts.findings) > 0 {
-			if req.Context.Raw == nil {
-				req.Context.Raw = make(map[string]interface{})
+		if !decisionReady {
+			req.Context.Taints = mergeTaints(req.Context.Taints, sessionFacts.Taints)
+			if len(inputFacts.findings) > 0 {
+				if req.Context.Raw == nil {
+					req.Context.Raw = make(map[string]interface{})
+				}
+				req.Context.Raw["has_secret_findings"] = true
 			}
-			req.Context.Raw["has_secret_findings"] = true
 		}
 	}
 
@@ -1019,6 +1031,9 @@ func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.Pol
 	if policyEffect == types.EffectApprovalRequired {
 		workflowResult, err := e.completeApprovalWorkflow(ctx, req, policyEvaluation, reason, now, warnings)
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return types.PolicyDecision{}, err
+			}
 			var coreErr *Error
 			if errors.As(err, &coreErr) {
 				return types.PolicyDecision{}, err
@@ -1028,7 +1043,7 @@ func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.Pol
 		approval = &workflowResult.approval
 		disposition = workflowResult.disposition
 		finalReason = workflowResult.reason
-		finalObligations = workflowResult.obligations
+		finalObligations = mergeObligations(finalObligations, workflowResult.obligations)
 	}
 
 	decision := types.PolicyDecision{
@@ -1216,6 +1231,13 @@ func stripInternalObligations(obligations []types.Obligation) []types.Obligation
 	return filtered
 }
 
+func mergeObligations(primary []types.Obligation, extras []types.Obligation) []types.Obligation {
+	merged := make([]types.Obligation, 0, len(primary)+len(extras))
+	merged = append(merged, primary...)
+	merged = append(merged, extras...)
+	return merged
+}
+
 func (e *Engine) completeApprovalWorkflow(ctx context.Context, req types.PolicyRequest, evaluation policy.Evaluation, reason string, now time.Time, warnings []string) (approvalWorkflowResult, error) {
 	pending, err := e.approvals.FindPending(ctx, req.Session.SessionID, req.Session.TaskID, req.Session.AttemptID, now)
 	if err != nil {
@@ -1259,28 +1281,6 @@ func (e *Engine) completeApprovalWorkflow(ctx context.Context, req types.PolicyR
 	}
 	if resolved.ApprovalID != "" {
 		approval = resolved
-	}
-	if approval.Status == types.ApprovalPending || approval.Status == types.ApprovalExpired {
-		expiredAt := time.Now().UTC()
-		expiredEvent := types.EventEnvelope{
-			EventID:   newID("evt_approval"),
-			EventType: "approval_expired",
-			RequestID: req.RequestID,
-			SessionID: req.Session.SessionID,
-			Surface:   req.Context.Surface,
-			Effect:    types.EffectDeny,
-			Summary:   "approval_expired",
-			Metadata: map[string]interface{}{
-				"approval_id": approval.ApprovalID,
-				"channel":     approval.Channel,
-			},
-			OccurredAt: expiredAt,
-		}
-		expired, expireErr := e.approvals.Expire(ctx, approval.ApprovalID, expiredAt, expiredEvent)
-		if expireErr != nil {
-			return approvalWorkflowResult{}, errStatus(http.StatusInternalServerError, "approval_store_write_failed", expireErr.Error())
-		}
-		approval = expired
 	}
 
 	switch approval.Status {
