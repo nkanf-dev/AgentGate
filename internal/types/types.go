@@ -54,3 +54,11 @@ type ApprovalResolveResult struct {
 	Approval ApprovalRecord
 	Grant    *AttemptGrant
 }
+
+type AgentType string
+
+const (
+	AgentTypeOpenClaw AgentType = "openclaw"
+	AgentTypeGateway  AgentType = "gateway"
+	AgentTypeCustom   AgentType = "custom"
+)

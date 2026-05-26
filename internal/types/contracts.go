@@ -55,9 +55,10 @@ type HostDescriptor struct {
 }
 
 type AdapterCapabilities struct {
-	CanBlock           bool `json:"can_block"`
-	CanRewriteInput    bool `json:"can_rewrite_input"`
-	CanRewriteToolArgs bool `json:"can_rewrite_tool_args"`
+	CanBlock            bool `json:"can_block"`
+	CanRewriteInput     bool `json:"can_rewrite_input"`
+	CanRewriteToolArgs  bool `json:"can_rewrite_tool_args"`
+	CanPauseForApproval bool `json:"can_pause_for_approval,omitempty"`
 }
 
 type RegistrationResult struct {
@@ -102,6 +103,8 @@ type IntegrationDefinition struct {
 	Kind             string                      `json:"kind"`
 	Enabled          bool                        `json:"enabled"`
 	ApprovalChannel  string                      `json:"approval_channel,omitempty"`
+	AgentType        AgentType                   `json:"agent_type,omitempty"`
+	PolicyBundleIDs  []string                    `json:"policy_bundle_ids,omitempty"`
 	ExpectedSurfaces []Surface                   `json:"expected_surfaces,omitempty"`
 	Runtime          *IntegrationRuntimeSpec     `json:"runtime,omitempty"`
 	Health           IntegrationHealth           `json:"health"`
@@ -157,6 +160,17 @@ type IntegrationRuntimeView struct {
 
 type IntegrationsResponse struct {
 	Integrations []IntegrationDefinition `json:"integrations"`
+}
+
+type AgentTypeDescriptor struct {
+	Type               AgentType `json:"type"`
+	Name               string    `json:"name"`
+	DefaultSurfaces    []Surface `json:"default_surfaces,omitempty"`
+	CanInitiateSession bool      `json:"can_initiate_session"`
+}
+
+type AgentTypesResponse struct {
+	AgentTypes []AgentTypeDescriptor `json:"agent_types"`
 }
 
 type PolicyRequest struct {
@@ -258,6 +272,7 @@ type PolicyDecision struct {
 	DecisionID   string              `json:"decision_id"`
 	RequestID    string              `json:"request_id"`
 	Disposition  Disposition         `json:"disposition"`
+	Effect       Effect              `json:"effect,omitempty"`
 	ReasonCode   string              `json:"reason_code"`
 	Obligations  []Obligation        `json:"obligations"`
 	AppliedRules []string            `json:"applied_rules,omitempty"`

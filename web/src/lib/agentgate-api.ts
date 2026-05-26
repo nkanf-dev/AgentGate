@@ -91,6 +91,8 @@ export type IntegrationDefinition = {
   kind: string
   enabled: boolean
   approval_channel?: string
+  agent_type?: "openclaw" | "gateway" | "custom"
+  policy_bundle_ids?: string[]
   expected_surfaces?: Surface[]
   runtime?: IntegrationRuntimeSpec
   health: IntegrationHealth
@@ -103,6 +105,8 @@ export type IntegrationDefinitionInput = {
   kind: string
   enabled: boolean
   approval_channel?: string
+  agent_type?: "openclaw" | "gateway" | "custom"
+  policy_bundle_ids?: string[]
   expected_surfaces?: Surface[]
   runtime?: IntegrationRuntimeSpec
 }
@@ -713,6 +717,17 @@ function normalizeIntegrationsResponse(
     integrations: Array.isArray(response.integrations)
       ? response.integrations.map((definition) => ({
           ...definition,
+          agent_type:
+            definition.agent_type === "openclaw" ||
+            definition.agent_type === "gateway" ||
+            definition.agent_type === "custom"
+              ? definition.agent_type
+              : "custom",
+          policy_bundle_ids: Array.isArray(definition.policy_bundle_ids)
+            ? definition.policy_bundle_ids.filter(
+                (bundleID): bundleID is string => typeof bundleID === "string"
+              )
+            : [],
           expected_surfaces: Array.isArray(definition.expected_surfaces)
             ? definition.expected_surfaces
             : [],

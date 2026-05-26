@@ -175,6 +175,8 @@ func TestSQLiteStoreStateRoundTrip(t *testing.T) {
 		Name:             "OpenClaw main adapter",
 		Kind:             "adapter",
 		Enabled:          true,
+		AgentType:        types.AgentTypeOpenClaw,
+		PolicyBundleIDs:  []string{"bundle-finance", "bundle-runtime"},
 		ApprovalChannel:  "approval-local",
 		ExpectedSurfaces: []types.Surface{types.SurfaceInput, types.SurfaceRuntime},
 	}
@@ -190,6 +192,12 @@ func TestSQLiteStoreStateRoundTrip(t *testing.T) {
 	}
 	if foundDefinition.ApprovalChannel != "approval-local" {
 		t.Fatalf("integration definition approval channel did not round trip: %#v", foundDefinition)
+	}
+	if foundDefinition.AgentType != types.AgentTypeOpenClaw {
+		t.Fatalf("integration definition agent_type did not round trip: %#v", foundDefinition)
+	}
+	if len(foundDefinition.PolicyBundleIDs) != 2 || foundDefinition.PolicyBundleIDs[0] != "bundle-finance" {
+		t.Fatalf("integration definition policy_bundle_ids did not round trip: %#v", foundDefinition)
 	}
 	definitions, err := store.ListIntegrationDefinitions(context.Background())
 	if err != nil {

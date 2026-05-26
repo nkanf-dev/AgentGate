@@ -119,7 +119,7 @@ type RuntimePolicy struct {
 	RequireApprovalTools       []string           `json:"require_approval_tools,omitempty"`
 	RequireApprovalSideEffects []types.SideEffect `json:"require_approval_side_effects,omitempty"`
 	RequireApprovalOpenWorld   bool               `json:"require_approval_open_world,omitempty"`
-	ApprovalTimeout            Duration           `json:"approval_timeout,omitempty"`
+	ApprovalTimeout            Duration           `json:"approval_timeout,omitempty" swaggertype:"string" example:"10m"`
 }
 
 type ResourcePolicy struct {
