@@ -1,3 +1,14 @@
+// Package main boots the AgentGate HTTP service.
+//
+// @title           AgentGate API
+// @version         1.0.0
+// @description     Policy decision and control plane for agentic systems.
+// @host            localhost:8080
+// @BasePath        /
+// @securityDefinitions.apikey BearerAuth
+// @in              header
+// @name            Authorization
+// @description     Bearer token authentication. Roles: adapter, operator, admin.
 package main
 
 import (

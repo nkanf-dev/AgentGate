@@ -107,6 +107,8 @@ CREATE TABLE IF NOT EXISTS adapter_registrations (
 
 CREATE TABLE IF NOT EXISTS integration_definitions (
 	integration_id TEXT PRIMARY KEY,
+	agent_type TEXT NOT NULL DEFAULT 'custom',
+	policy_bundle_ids TEXT NOT NULL DEFAULT '[]',
 	definition_json TEXT NOT NULL,
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL
@@ -186,6 +188,8 @@ CREATE TABLE IF NOT EXISTS policy_bundles (
 	// ALTER TABLE ... ADD COLUMN fails if the column already exists; ignore that error.
 	for _, stmt := range []string{
 		`ALTER TABLE secret_handles ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE integration_definitions ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'custom'`,
+		`ALTER TABLE integration_definitions ADD COLUMN policy_bundle_ids TEXT NOT NULL DEFAULT '[]'`,
 	} {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			if !strings.Contains(err.Error(), "duplicate column") {
@@ -276,18 +280,28 @@ func (s *SQLiteStore) SaveIntegrationDefinition(ctx context.Context, definition 
 	if err != nil {
 		return fmt.Errorf("marshal integration definition: %w", err)
 	}
+	policyBundleIDsJSON, err := json.Marshal(definition.PolicyBundleIDs)
+	if err != nil {
+		return fmt.Errorf("marshal integration policy bundle ids: %w", err)
+	}
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO integration_definitions (
 	integration_id,
+	agent_type,
+	policy_bundle_ids,
 	definition_json,
 	created_at,
 	updated_at
-) VALUES (?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT(integration_id) DO UPDATE SET
+	agent_type = excluded.agent_type,
+	policy_bundle_ids = excluded.policy_bundle_ids,
 	definition_json = excluded.definition_json,
 	updated_at = excluded.updated_at
 `,
 		definition.ID,
+		string(definition.AgentType),
+		string(policyBundleIDsJSON),
 		string(definitionJSON),
 		now.Format(time.RFC3339Nano),
 		now.Format(time.RFC3339Nano),
@@ -299,12 +313,14 @@ ON CONFLICT(integration_id) DO UPDATE SET
 }
 
 func (s *SQLiteStore) GetIntegrationDefinition(ctx context.Context, integrationID string) (types.IntegrationDefinition, bool, error) {
+	var agentType string
+	var policyBundleIDsJSON string
 	var definitionJSON string
 	err := s.db.QueryRowContext(ctx, `
-SELECT definition_json
+SELECT agent_type, policy_bundle_ids, definition_json
 FROM integration_definitions
 WHERE integration_id = ?
-`, integrationID).Scan(&definitionJSON)
+`, integrationID).Scan(&agentType, &policyBundleIDsJSON, &definitionJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return types.IntegrationDefinition{}, false, nil
 	}
@@ -315,12 +331,20 @@ WHERE integration_id = ?
 	if err := json.Unmarshal([]byte(definitionJSON), &definition); err != nil {
 		return types.IntegrationDefinition{}, false, fmt.Errorf("unmarshal integration definition: %w", err)
 	}
+	if definition.AgentType == "" {
+		definition.AgentType = types.AgentType(agentType)
+	}
+	if len(definition.PolicyBundleIDs) == 0 && policyBundleIDsJSON != "" {
+		if err := json.Unmarshal([]byte(policyBundleIDsJSON), &definition.PolicyBundleIDs); err != nil {
+			return types.IntegrationDefinition{}, false, fmt.Errorf("unmarshal integration policy bundle ids: %w", err)
+		}
+	}
 	return definition, true, nil
 }
 
 func (s *SQLiteStore) ListIntegrationDefinitions(ctx context.Context) ([]types.IntegrationDefinition, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT definition_json
+SELECT agent_type, policy_bundle_ids, definition_json
 FROM integration_definitions
 ORDER BY integration_id ASC
 `)
@@ -331,13 +355,23 @@ ORDER BY integration_id ASC
 
 	definitions := []types.IntegrationDefinition{}
 	for rows.Next() {
+		var agentType string
+		var policyBundleIDsJSON string
 		var definitionJSON string
-		if err := rows.Scan(&definitionJSON); err != nil {
+		if err := rows.Scan(&agentType, &policyBundleIDsJSON, &definitionJSON); err != nil {
 			return nil, fmt.Errorf("scan integration definition: %w", err)
 		}
 		var definition types.IntegrationDefinition
 		if err := json.Unmarshal([]byte(definitionJSON), &definition); err != nil {
 			return nil, fmt.Errorf("unmarshal integration definition: %w", err)
+		}
+		if definition.AgentType == "" {
+			definition.AgentType = types.AgentType(agentType)
+		}
+		if len(definition.PolicyBundleIDs) == 0 && policyBundleIDsJSON != "" {
+			if err := json.Unmarshal([]byte(policyBundleIDsJSON), &definition.PolicyBundleIDs); err != nil {
+				return nil, fmt.Errorf("unmarshal integration policy bundle ids: %w", err)
+			}
 		}
 		definitions = append(definitions, definition)
 	}

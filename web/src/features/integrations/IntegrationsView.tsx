@@ -50,6 +50,7 @@ import {
 type IntegrationPage = "list" | "detail" | "edit" | "new"
 
 const integrationKindOptions = ["adapter", "transport", "resource_provider"]
+const agentTypeOptions = ["openclaw", "gateway", "custom"] as const
 const healthVariant: Record<
   IntegrationHealthStatus,
   "default" | "secondary" | "destructive" | "outline"
@@ -371,6 +372,7 @@ function IntegrationDetail({
         <CardContent className="space-y-4">
           <div className="grid gap-3 md:grid-cols-4">
             <DetailTile label="Kind" value={statusLabel(definition.kind)} />
+            <DetailTile label="Agent Type" value={statusLabel(definition.agent_type)} />
             <DetailTile
               label="Health"
               value={
@@ -425,6 +427,24 @@ function IntegrationDetail({
           </CardContent>
         </Card>
       ) : null}
+
+      <Card className="min-w-0">
+        <CardHeader className="border-b">
+          <CardTitle>Policy Binding</CardTitle>
+          <CardDescription>Bundles bound to this integration for request evaluation.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <DetailTile label="Agent Type" value={statusLabel(definition.agent_type)} />
+          <DetailTile
+            label="Policy Bundles"
+            value={
+              definition.policy_bundle_ids?.length
+                ? definition.policy_bundle_ids.join(", ")
+                : "Global default"
+            }
+          />
+        </CardContent>
+      </Card>
 
       <Card className="min-w-0">
         <CardHeader className="border-b">
@@ -609,6 +629,32 @@ function IntegrationEditor({
                 }
               />
             </LabeledField>
+            <LabeledField label="Agent Type">
+              <Select
+                value={definition.agent_type ?? "custom"}
+                onValueChange={(agent_type) =>
+                  onChange({
+                    ...definition,
+                    agent_type: agent_type as IntegrationDefinitionInput["agent_type"],
+                    expected_surfaces:
+                      agent_type === "gateway"
+                        ? ["input"]
+                        : definition.expected_surfaces,
+                  })
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {agentTypeOptions.map((agentType) => (
+                    <SelectItem key={agentType} value={agentType}>
+                      {statusLabel(agentType)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </LabeledField>
             <LabeledField label="Enabled">
               <Select
                 value={definition.enabled ? "true" : "false"}
@@ -624,6 +670,18 @@ function IntegrationEditor({
                   <SelectItem value="false">Disabled</SelectItem>
                 </SelectContent>
               </Select>
+            </LabeledField>
+            <LabeledField label="Policy Bundle IDs">
+              <Input
+                value={(definition.policy_bundle_ids ?? []).join(", ")}
+                placeholder="bundle-finance, bundle-runtime"
+                onChange={(event) =>
+                  onChange({
+                    ...definition,
+                    policy_bundle_ids: splitCSV(event.target.value),
+                  })
+                }
+              />
             </LabeledField>
           </div>
 
@@ -761,12 +819,16 @@ function IntegrationEditor({
             </div>
             <div className="flex flex-wrap gap-2">
               {(["input", "runtime", "resource"] as Surface[]).map((surface) => {
+                const gatewayLocked =
+                  (definition.agent_type ?? "custom") === "gateway" &&
+                  surface !== "input"
                 const active = (definition.expected_surfaces ?? []).includes(surface)
                 return (
                   <Button
                     key={surface}
                     type="button"
                     variant={active ? "default" : "outline"}
+                    disabled={gatewayLocked}
                     onClick={() => toggleSurface(surface)}
                   >
                     {surfaceLabel(surface)}
@@ -969,6 +1031,8 @@ function blankDefinition(): IntegrationDefinitionInput {
     kind: "adapter",
     enabled: true,
     approval_channel: "",
+    agent_type: "custom",
+    policy_bundle_ids: [],
     expected_surfaces: ["input", "runtime"],
     runtime: {
       managed: true,
@@ -995,6 +1059,8 @@ function toDefinitionInput(
     kind: definition.kind,
     enabled: definition.enabled,
     approval_channel: definition.approval_channel,
+    agent_type: definition.agent_type ?? "custom",
+    policy_bundle_ids: definition.policy_bundle_ids ?? [],
     expected_surfaces: definition.expected_surfaces ?? [],
     runtime: definition.runtime,
   }
@@ -1034,6 +1100,13 @@ function updateRuntimeEnv(
 function splitCommand(value: string) {
   return value
     .split(/\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+}
+
+function splitCSV(value: string) {
+  return value
+    .split(",")
     .map((part) => part.trim())
     .filter(Boolean)
 }

@@ -1,15 +1,15 @@
 basePath: /
 definitions:
-  core.PolicyPublishRequest:
+  github_com_agentgate_agentgate_internal_core.PolicyPublishRequest:
     properties:
       bundle:
-        $ref: '#/definitions/policy.Bundle'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle'
       message:
         type: string
       operator_id:
         type: string
     type: object
-  core.PolicyRollbackRequest:
+  github_com_agentgate_agentgate_internal_core.PolicyRollbackRequest:
     properties:
       message:
         type: string
@@ -18,12 +18,12 @@ definitions:
       version:
         type: integer
     type: object
-  core.PolicyValidateRequest:
+  github_com_agentgate_agentgate_internal_core.PolicyValidateRequest:
     properties:
       bundle:
-        $ref: '#/definitions/policy.Bundle'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle'
     type: object
-  policy.Bundle:
+  github_com_agentgate_agentgate_internal_policy.Bundle:
     properties:
       bundle_id:
         type: string
@@ -32,25 +32,25 @@ definitions:
       description:
         type: string
       egress_policy:
-        $ref: '#/definitions/policy.EgressPolicy'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.EgressPolicy'
       input_policy:
-        $ref: '#/definitions/policy.InputPolicy'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.InputPolicy'
       issued_at:
         type: string
       name:
         type: string
       path_policy:
-        $ref: '#/definitions/policy.PathPolicy'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.PathPolicy'
       priority:
         type: integer
       resource_policy:
-        $ref: '#/definitions/policy.ResourcePolicy'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.ResourcePolicy'
       rules:
         items:
-          $ref: '#/definitions/policy.Rule'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.Rule'
         type: array
       runtime_policy:
-        $ref: '#/definitions/policy.RuntimePolicy'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.RuntimePolicy'
       status:
         type: string
       updated_at:
@@ -58,14 +58,14 @@ definitions:
       version:
         type: integer
     type: object
-  policy.Condition:
+  github_com_agentgate_agentgate_internal_policy.Condition:
     properties:
       expression:
         type: string
       language:
         type: string
     type: object
-  policy.EgressPolicy:
+  github_com_agentgate_agentgate_internal_policy.EgressPolicy:
     properties:
       block_sensitive_query_params:
         items:
@@ -78,20 +78,20 @@ definitions:
       require_purpose_declaration:
         type: boolean
     type: object
-  policy.InputPolicy:
+  github_com_agentgate_agentgate_internal_policy.InputPolicy:
     properties:
       secret_mode:
         type: string
     type: object
-  policy.Obligation:
+  github_com_agentgate_agentgate_internal_policy.Obligation:
     properties:
       params:
         additionalProperties: true
         type: object
       type:
-        type: string
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.ObligationType'
     type: object
-  policy.PathPolicy:
+  github_com_agentgate_agentgate_internal_policy.PathPolicy:
     properties:
       allow_worktree_siblings:
         type: boolean
@@ -102,22 +102,22 @@ definitions:
       workspace_root:
         type: string
     type: object
-  policy.ResourcePolicy:
+  github_com_agentgate_agentgate_internal_policy.ResourcePolicy:
     properties:
       secret_handle_scope:
         type: string
     type: object
-  policy.Rule:
+  github_com_agentgate_agentgate_internal_policy.Rule:
     properties:
       description:
         type: string
       effect:
-        $ref: '#/definitions/types.Effect'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.Effect'
       id:
         type: string
       obligations:
         items:
-          $ref: '#/definitions/policy.Obligation'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.Obligation'
         type: array
       priority:
         type: integer
@@ -125,27 +125,30 @@ definitions:
         type: string
       request_kinds:
         items:
-          $ref: '#/definitions/types.RequestKind'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.RequestKind'
         type: array
       surface:
-        $ref: '#/definitions/types.Surface'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.Surface'
       when:
-        $ref: '#/definitions/policy.Condition'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.Condition'
     type: object
-  policy.RuntimePolicy:
+  github_com_agentgate_agentgate_internal_policy.RuntimePolicy:
     properties:
+      approval_timeout:
+        example: 10m
+        type: string
       require_approval_open_world:
         type: boolean
       require_approval_side_effects:
         items:
-          type: string
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.SideEffect'
         type: array
       require_approval_tools:
         items:
           type: string
         type: array
     type: object
-  types.ActionContext:
+  github_com_agentgate_agentgate_internal_types.ActionContext:
     properties:
       open_world:
         type: boolean
@@ -153,12 +156,12 @@ definitions:
         type: string
       side_effects:
         items:
-          type: string
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.SideEffect'
         type: array
       tool:
         type: string
     type: object
-  types.ActorContext:
+  github_com_agentgate_agentgate_internal_types.ActorContext:
     properties:
       agent_id:
         type: string
@@ -167,25 +170,27 @@ definitions:
       user_id:
         type: string
     type: object
-  types.AdapterCapabilities:
+  github_com_agentgate_agentgate_internal_types.AdapterCapabilities:
     properties:
       can_block:
+        type: boolean
+      can_pause_for_approval:
         type: boolean
       can_rewrite_input:
         type: boolean
       can_rewrite_tool_args:
         type: boolean
     type: object
-  types.AdapterRegistration:
+  github_com_agentgate_agentgate_internal_types.AdapterRegistration:
     properties:
       adapter_id:
         type: string
       adapter_kind:
         type: string
       capabilities:
-        $ref: '#/definitions/types.AdapterCapabilities'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.AdapterCapabilities'
       host:
-        $ref: '#/definitions/types.HostDescriptor'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.HostDescriptor'
       integration_id:
         type: string
       metadata:
@@ -197,10 +202,40 @@ definitions:
         type: array
       surfaces:
         items:
-          $ref: '#/definitions/types.Surface'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.Surface'
         type: array
     type: object
-  types.ApprovalRecord:
+  github_com_agentgate_agentgate_internal_types.AgentType:
+    enum:
+    - openclaw
+    - gateway
+    - custom
+    type: string
+    x-enum-varnames:
+    - AgentTypeOpenClaw
+    - AgentTypeGateway
+    - AgentTypeCustom
+  github_com_agentgate_agentgate_internal_types.AgentTypeDescriptor:
+    properties:
+      can_initiate_session:
+        type: boolean
+      default_surfaces:
+        items:
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.Surface'
+        type: array
+      name:
+        type: string
+      type:
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.AgentType'
+    type: object
+  github_com_agentgate_agentgate_internal_types.AgentTypesResponse:
+    properties:
+      agent_types:
+        items:
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.AgentTypeDescriptor'
+        type: array
+    type: object
+  github_com_agentgate_agentgate_internal_types.ApprovalRecord:
     properties:
       approval_id:
         type: string
@@ -223,11 +258,11 @@ definitions:
       session_id:
         type: string
       status:
-        $ref: '#/definitions/types.ApprovalStatus'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.ApprovalStatus'
       task_id:
         type: string
     type: object
-  types.ApprovalResolveRequest:
+  github_com_agentgate_agentgate_internal_types.ApprovalResolveRequest:
     properties:
       channel:
         type: string
@@ -236,7 +271,7 @@ definitions:
       operator_id:
         type: string
     type: object
-  types.ApprovalStatus:
+  github_com_agentgate_agentgate_internal_types.ApprovalStatus:
     enum:
     - pending
     - approved
@@ -248,16 +283,16 @@ definitions:
     - ApprovalApproved
     - ApprovalDenied
     - ApprovalExpired
-  types.ContentContext:
+  github_com_agentgate_agentgate_internal_types.ContentContext:
     properties:
       data_classes:
         items:
-          $ref: '#/definitions/types.DataClass'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.DataClass'
         type: array
       summary:
         type: string
     type: object
-  types.DataClass:
+  github_com_agentgate_agentgate_internal_types.DataClass:
     enum:
     - pii
     - secret
@@ -271,22 +306,22 @@ definitions:
     - DataClassBusiness
     - DataClassFinancial
     - DataClassCredential
-  types.DecisionContext:
+  github_com_agentgate_agentgate_internal_types.DecisionContext:
     properties:
       raw:
         additionalProperties: true
         type: object
       surface:
-        $ref: '#/definitions/types.Surface'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.Surface'
       taints:
         items:
-          $ref: '#/definitions/types.Taint'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.Taint'
         type: array
     type: object
-  types.DecisionExplanation:
+  github_com_agentgate_agentgate_internal_types.DecisionExplanation:
     properties:
       policy_trace:
-        $ref: '#/definitions/types.PolicyTrace'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.PolicyTrace'
       summary:
         type: string
       warnings:
@@ -294,7 +329,15 @@ definitions:
           type: string
         type: array
     type: object
-  types.Effect:
+  github_com_agentgate_agentgate_internal_types.Disposition:
+    enum:
+    - allow
+    - deny
+    type: string
+    x-enum-varnames:
+    - DispositionAllow
+    - DispositionDeny
+  github_com_agentgate_agentgate_internal_types.Effect:
     enum:
     - allow
     - allow_with_audit
@@ -308,43 +351,45 @@ definitions:
     - EffectApprovalRequired
     - EffectDeny
     - EffectExclusion
-  types.Disposition:
-    enum:
-    - allow
-    - deny
-    type: string
-    x-enum-varnames:
-    - DispositionAllow
-    - DispositionDeny
-  types.HostDescriptor:
+  github_com_agentgate_agentgate_internal_types.HostDescriptor:
     properties:
       kind:
         type: string
       version:
         type: string
     type: object
-  types.IntegrationDefinition:
+  github_com_agentgate_agentgate_internal_types.IntegrationDefinition:
     properties:
+      agent_type:
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.AgentType'
+      approval_channel:
+        type: string
       enabled:
         type: boolean
       expected_surfaces:
         items:
-          $ref: '#/definitions/types.Surface'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.Surface'
         type: array
       health:
-        $ref: '#/definitions/types.IntegrationHealth'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationHealth'
       id:
         type: string
       kind:
         type: string
       matched_adapters:
         items:
-          $ref: '#/definitions/types.IntegrationMatchedAdapter'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationMatchedAdapter'
         type: array
       name:
         type: string
+      policy_bundle_ids:
+        items:
+          type: string
+        type: array
+      runtime:
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationRuntimeSpec'
     type: object
-  types.IntegrationHealth:
+  github_com_agentgate_agentgate_internal_types.IntegrationHealth:
     properties:
       computed_at:
         type: string
@@ -354,12 +399,16 @@ definitions:
         type: integer
       matched_adapter_id:
         type: string
+      runtime:
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationRuntimeView'
       status:
-        $ref: '#/definitions/types.IntegrationHealthStatus'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationHealthStatus'
     type: object
-  types.IntegrationHealthStatus:
+  github_com_agentgate_agentgate_internal_types.IntegrationHealthStatus:
     enum:
     - connected
+    - starting
+    - degraded
     - stale
     - missing
     - unmanaged
@@ -367,18 +416,20 @@ definitions:
     type: string
     x-enum-varnames:
     - IntegrationHealthConnected
+    - IntegrationHealthStarting
+    - IntegrationHealthDegraded
     - IntegrationHealthStale
     - IntegrationHealthMissing
     - IntegrationHealthUnmanaged
     - IntegrationHealthDisabled
-  types.IntegrationMatchedAdapter:
+  github_com_agentgate_agentgate_internal_types.IntegrationMatchedAdapter:
     properties:
       adapter_id:
         type: string
       adapter_kind:
         type: string
       host:
-        $ref: '#/definitions/types.HostDescriptor'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.HostDescriptor'
       integration_id:
         type: string
       last_seen_at:
@@ -386,25 +437,87 @@ definitions:
       registered_at:
         type: string
       status:
-        $ref: '#/definitions/types.IntegrationHealthStatus'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationHealthStatus'
       supporting_channels:
         items:
           type: string
         type: array
       surfaces:
         items:
-          $ref: '#/definitions/types.Surface'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.Surface'
         type: array
     type: object
-  types.Obligation:
+  github_com_agentgate_agentgate_internal_types.IntegrationRestartSpec:
+    properties:
+      backoff_ms:
+        type: integer
+      enabled:
+        type: boolean
+      max_attempts:
+        type: integer
+    type: object
+  github_com_agentgate_agentgate_internal_types.IntegrationRuntimeSpec:
+    properties:
+      command:
+        items:
+          type: string
+        type: array
+      enabled:
+        type: boolean
+      env:
+        additionalProperties: true
+        type: object
+      managed:
+        type: boolean
+      restart:
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationRestartSpec'
+    type: object
+  github_com_agentgate_agentgate_internal_types.IntegrationRuntimeView:
+    properties:
+      command:
+        items:
+          type: string
+        type: array
+      last_error:
+        type: string
+      last_exited_at:
+        type: string
+      last_healthy_at:
+        type: string
+      last_started_at:
+        type: string
+      managed:
+        type: boolean
+      pid:
+        type: integer
+      restart_count:
+        type: integer
+      status:
+        type: string
+    type: object
+  github_com_agentgate_agentgate_internal_types.Obligation:
     properties:
       params:
         additionalProperties: true
         type: object
       type:
-        type: string
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.ObligationType'
     type: object
-  types.PolicyDecision:
+  github_com_agentgate_agentgate_internal_types.ObligationType:
+    enum:
+    - rewrite_input
+    - approval_request
+    - resolve_secret_handle
+    - task_control
+    - audit_event
+    type: string
+    x-enum-varnames:
+    - ObligationRewriteInput
+    - ObligationApprovalRequest
+    - ObligationResolveSecretHandle
+    - ObligationTaskControl
+    - ObligationAuditEvent
+  github_com_agentgate_agentgate_internal_types.PolicyDecision:
     properties:
       applied_rules:
         items:
@@ -415,48 +528,50 @@ definitions:
       decision_id:
         type: string
       disposition:
-        $ref: '#/definitions/types.Disposition'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.Disposition'
+      effect:
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.Effect'
       explanation:
-        $ref: '#/definitions/types.DecisionExplanation'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.DecisionExplanation'
       obligations:
         items:
-          $ref: '#/definitions/types.Obligation'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.Obligation'
         type: array
       reason_code:
         type: string
       request_id:
         type: string
     type: object
-  types.PolicyRequest:
+  github_com_agentgate_agentgate_internal_types.PolicyRequest:
     properties:
       action:
-        $ref: '#/definitions/types.ActionContext'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.ActionContext'
       actor:
-        $ref: '#/definitions/types.ActorContext'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.ActorContext'
       content:
-        $ref: '#/definitions/types.ContentContext'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.ContentContext'
       context:
-        $ref: '#/definitions/types.DecisionContext'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.DecisionContext'
       policy:
         additionalProperties: true
         type: object
       request_id:
         type: string
       request_kind:
-        $ref: '#/definitions/types.RequestKind'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.RequestKind'
       session:
-        $ref: '#/definitions/types.SessionContext'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.SessionContext'
       target:
-        $ref: '#/definitions/types.TargetContext'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.TargetContext'
     type: object
-  types.PolicyRuleTrace:
+  github_com_agentgate_agentgate_internal_types.PolicyRuleTrace:
     properties:
       bundle_id:
         type: string
       bundle_priority:
         type: integer
       effect:
-        $ref: '#/definitions/types.Effect'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.Effect'
       priority:
         type: integer
       reason_code:
@@ -464,7 +579,7 @@ definitions:
       rule_id:
         type: string
     type: object
-  types.PolicyTrace:
+  github_com_agentgate_agentgate_internal_types.PolicyTrace:
     properties:
       bundle_priority:
         type: integer
@@ -472,7 +587,7 @@ definitions:
         type: boolean
       matched_rules:
         items:
-          $ref: '#/definitions/types.PolicyRuleTrace'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.PolicyRuleTrace'
         type: array
       policy_status:
         type: string
@@ -485,7 +600,7 @@ definitions:
       top_priority:
         type: integer
     type: object
-  types.ReportRequest:
+  github_com_agentgate_agentgate_internal_types.ReportRequest:
     properties:
       adapter_id:
         type: string
@@ -498,16 +613,16 @@ definitions:
         type: object
       obligations:
         items:
-          $ref: '#/definitions/types.Obligation'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.Obligation'
         type: array
       outcome:
         type: string
       request_id:
         type: string
       surface:
-        $ref: '#/definitions/types.Surface'
+        $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.Surface'
     type: object
-  types.RequestKind:
+  github_com_agentgate_agentgate_internal_types.RequestKind:
     enum:
     - input
     - tool_attempt
@@ -523,7 +638,7 @@ definitions:
     - RequestKindResourceAccess
     - RequestKindInitialEnvelope
     - RequestKindEnvelopeAmendment
-  types.SessionContext:
+  github_com_agentgate_agentgate_internal_types.SessionContext:
     properties:
       attempt_id:
         type: string
@@ -532,7 +647,19 @@ definitions:
       task_id:
         type: string
     type: object
-  types.Surface:
+  github_com_agentgate_agentgate_internal_types.SideEffect:
+    enum:
+    - network_egress
+    - filesystem_write
+    - process_spawn
+    - secret_resolve
+    type: string
+    x-enum-varnames:
+    - SideEffectNetworkEgress
+    - SideEffectFilesystemWrite
+    - SideEffectProcessSpawn
+    - SideEffectSecretResolve
+  github_com_agentgate_agentgate_internal_types.Surface:
     enum:
     - input
     - runtime
@@ -542,7 +669,7 @@ definitions:
     - SurfaceInput
     - SurfaceRuntime
     - SurfaceResource
-  types.Taint:
+  github_com_agentgate_agentgate_internal_types.Taint:
     enum:
     - untrusted_external
     - possible_prompt_injection
@@ -554,7 +681,7 @@ definitions:
     - TaintPossibleInjection
     - TaintEmbeddedInstruction
     - TaintSecretBearing
-  types.TargetContext:
+  github_com_agentgate_agentgate_internal_types.TargetContext:
     properties:
       identifier:
         type: string
@@ -582,6 +709,21 @@ paths:
       summary: Health check
       tags:
       - health
+  /internal/agent-types:
+    get:
+      description: Returns the built-in agent types and their default capabilities.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.AgentTypesResponse'
+      security:
+      - BearerAuth: []
+      summary: List supported agent types
+      tags:
+      - integrations
   /internal/integrations:
     get:
       description: Returns all registered integration definitions.
@@ -592,7 +734,7 @@ paths:
           description: OK
           schema:
             items:
-              $ref: '#/definitions/types.IntegrationDefinition'
+              $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationDefinition'
             type: array
       security:
       - BearerAuth: []
@@ -609,14 +751,14 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/types.IntegrationDefinition'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationDefinition'
       produces:
       - application/json
       responses:
         "201":
           description: Created
           schema:
-            $ref: '#/definitions/types.IntegrationDefinition'
+            $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationDefinition'
         "400":
           description: Bad Request
           schema:
@@ -660,7 +802,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/types.IntegrationDefinition'
+            $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationDefinition'
       security:
       - BearerAuth: []
       summary: Get an integration definition
@@ -681,14 +823,14 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/types.IntegrationDefinition'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationDefinition'
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/types.IntegrationDefinition'
+            $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationDefinition'
         "400":
           description: Bad Request
           schema:
@@ -714,7 +856,7 @@ paths:
           description: OK
           schema:
             items:
-              $ref: '#/definitions/policy.Bundle'
+              $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle'
             type: array
       security:
       - BearerAuth: []
@@ -731,14 +873,14 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/policy.Bundle'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle'
       produces:
       - application/json
       responses:
         "201":
           description: Created
           schema:
-            $ref: '#/definitions/policy.Bundle'
+            $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle'
         "400":
           description: Bad Request
           schema:
@@ -782,7 +924,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/policy.Bundle'
+            $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle'
       security:
       - BearerAuth: []
       summary: Get a policy bundle
@@ -803,14 +945,14 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/policy.Bundle'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle'
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/policy.Bundle'
+            $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle'
         "400":
           description: Bad Request
           schema:
@@ -874,7 +1016,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/policy.Bundle'
+            $ref: '#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle'
       security:
       - BearerAuth: []
       summary: Get active policy
@@ -891,7 +1033,7 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/core.PolicyPublishRequest'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_core.PolicyPublishRequest'
       produces:
       - application/json
       responses:
@@ -921,7 +1063,7 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/core.PolicyRollbackRequest'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_core.PolicyRollbackRequest'
       produces:
       - application/json
       responses:
@@ -951,7 +1093,7 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/core.PolicyValidateRequest'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_core.PolicyValidateRequest'
       produces:
       - application/json
       responses:
@@ -1013,7 +1155,7 @@ paths:
           description: OK
           schema:
             items:
-              $ref: '#/definitions/types.ApprovalRecord'
+              $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.ApprovalRecord'
             type: array
         "400":
           description: Bad Request
@@ -1041,7 +1183,7 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/types.ApprovalResolveRequest'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.ApprovalResolveRequest'
       produces:
       - application/json
       responses:
@@ -1089,14 +1231,14 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/types.PolicyRequest'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.PolicyRequest'
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/types.PolicyDecision'
+            $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.PolicyDecision'
         "400":
           description: Bad Request
           schema:
@@ -1145,7 +1287,7 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/types.AdapterRegistration'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.AdapterRegistration'
       produces:
       - application/json
       responses:
@@ -1176,7 +1318,7 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/types.ReportRequest'
+          $ref: '#/definitions/github_com_agentgate_agentgate_internal_types.ReportRequest'
       produces:
       - application/json
       responses:

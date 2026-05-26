@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -196,5 +197,142 @@ func TestPolicyDecisionEventIncludesPolicyTraceMetadata(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("policy decision event not found")
+	}
+}
+
+func TestIntegrationPolicyBindingOverridesGlobalDefault(t *testing.T) {
+	stateStore := newMemoryStateStore()
+	globalBundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "runtime.bash.deny.global",
+			Priority:     50,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectDeny,
+			ReasonCode:   "runtime_bash_denied_global",
+			When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
+		},
+	})
+	globalBundle.BundleID = "default"
+	engine := NewEngine(WithStateStore(stateStore), WithPolicyBundle(globalBundle))
+
+	tenantBundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "runtime.bash.allow.integration",
+			Priority:     10,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "runtime_bash_allowed_integration",
+			When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
+		},
+	})
+	tenantBundle.BundleID = "bundle-allow-bash"
+	tenantBundle.Name = "Tenant allow bash"
+	tenantBundle.Status = policy.BundleStatusActive
+	if err := stateStore.SavePolicyBundle(context.Background(), tenantBundle); err != nil {
+		t.Fatalf("save policy bundle: %v", err)
+	}
+	if _, err := engine.SaveIntegration(context.Background(), types.IntegrationDefinition{
+		ID:               "openclaw-main",
+		Name:             "OpenClaw main",
+		Kind:             "adapter",
+		Enabled:          true,
+		AgentType:        types.AgentTypeOpenClaw,
+		ExpectedSurfaces: []types.Surface{types.SurfaceInput, types.SurfaceRuntime},
+		PolicyBundleIDs:  []string{"bundle-allow-bash"},
+	}); err != nil {
+		t.Fatalf("save integration: %v", err)
+	}
+
+	decision, err := engine.Decide(context.Background(), types.PolicyRequest{
+		RequestID:   "req_integration_policy",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1", AttemptID: "att_1"},
+		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
+		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+		Policy:      map[string]interface{}{"integration_id": "openclaw-main"},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectAllowWithAudit {
+		t.Fatalf("effect = %q, want allow_with_audit", decision.Effect)
+	}
+	if decision.ReasonCode != "runtime_bash_allowed_integration" {
+		t.Fatalf("reason = %q, want runtime_bash_allowed_integration", decision.ReasonCode)
+	}
+
+	events, err := engine.Events(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	for _, event := range events {
+		if event.EventType != "policy_decision" || event.RequestID != "req_integration_policy" {
+			continue
+		}
+		if got := event.Metadata["policy_source"]; got != "integration" {
+			t.Fatalf("policy_source = %#v, want integration", got)
+		}
+		rawIDs, err := json.Marshal(event.Metadata["integration_policy_bundles"])
+		if err != nil {
+			t.Fatalf("marshal integration_policy_bundles: %v", err)
+		}
+		if string(rawIDs) != `["bundle-allow-bash"]` {
+			t.Fatalf("integration_policy_bundles = %s", string(rawIDs))
+		}
+		return
+	}
+	t.Fatal("policy decision event not found")
+}
+
+func TestIntegrationPolicyBindingFallsBackToGlobalDefaultWhenBundleMissing(t *testing.T) {
+	stateStore := newMemoryStateStore()
+	globalBundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "runtime.bash.deny.global",
+			Priority:     50,
+			Surface:      types.SurfaceRuntime,
+			RequestKinds: []types.RequestKind{types.RequestKindToolAttempt},
+			Effect:       types.EffectDeny,
+			ReasonCode:   "runtime_bash_denied_global",
+			When:         policy.Condition{Language: "cel", Expression: `action.tool == "bash"`},
+		},
+	})
+	globalBundle.BundleID = "default"
+	engine := NewEngine(WithStateStore(stateStore), WithPolicyBundle(globalBundle))
+
+	if _, err := engine.SaveIntegration(context.Background(), types.IntegrationDefinition{
+		ID:               "openclaw-main",
+		Name:             "OpenClaw main",
+		Kind:             "adapter",
+		Enabled:          true,
+		AgentType:        types.AgentTypeOpenClaw,
+		ExpectedSurfaces: []types.Surface{types.SurfaceInput, types.SurfaceRuntime},
+		PolicyBundleIDs:  []string{"missing-bundle"},
+	}); err != nil {
+		t.Fatalf("save integration: %v", err)
+	}
+
+	decision, err := engine.Decide(context.Background(), types.PolicyRequest{
+		RequestID:   "req_missing_bundle",
+		RequestKind: types.RequestKindToolAttempt,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1", AttemptID: "att_1"},
+		Action:      types.ActionContext{Tool: "bash", Operation: "execute"},
+		Target:      types.TargetContext{Kind: "process", Identifier: "shell"},
+		Context:     types.DecisionContext{Surface: types.SurfaceRuntime},
+		Policy:      map[string]interface{}{"integration_id": "openclaw-main"},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectDeny {
+		t.Fatalf("effect = %q, want deny", decision.Effect)
+	}
+	if decision.ReasonCode != "runtime_bash_denied_global" {
+		t.Fatalf("reason = %q, want runtime_bash_denied_global", decision.ReasonCode)
 	}
 }

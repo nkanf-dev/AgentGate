@@ -36,6 +36,31 @@ const docTemplate = `{
                 }
             }
         },
+        "/internal/agent-types": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns the built-in agent types and their default capabilities.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "integrations"
+                ],
+                "summary": "List supported agent types",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.AgentTypesResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/internal/integrations": {
             "get": {
                 "security": [
@@ -57,7 +82,7 @@ const docTemplate = `{
                         "schema": {
                             "type": "array",
                             "items": {
-                                "$ref": "#/definitions/types.IntegrationDefinition"
+                                "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationDefinition"
                             }
                         }
                     }
@@ -87,7 +112,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/types.IntegrationDefinition"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationDefinition"
                         }
                     }
                 ],
@@ -95,7 +120,7 @@ const docTemplate = `{
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "$ref": "#/definitions/types.IntegrationDefinition"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationDefinition"
                         }
                     },
                     "400": {
@@ -136,7 +161,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/types.IntegrationDefinition"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationDefinition"
                         }
                     }
                 }
@@ -201,7 +226,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/types.IntegrationDefinition"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationDefinition"
                         }
                     }
                 ],
@@ -209,7 +234,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/types.IntegrationDefinition"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationDefinition"
                         }
                     },
                     "400": {
@@ -251,7 +276,7 @@ const docTemplate = `{
                         "schema": {
                             "type": "array",
                             "items": {
-                                "$ref": "#/definitions/policy.Bundle"
+                                "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle"
                             }
                         }
                     }
@@ -281,7 +306,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/policy.Bundle"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle"
                         }
                     }
                 ],
@@ -289,7 +314,7 @@ const docTemplate = `{
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "$ref": "#/definitions/policy.Bundle"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle"
                         }
                     },
                     "400": {
@@ -330,7 +355,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/policy.Bundle"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle"
                         }
                     }
                 }
@@ -395,7 +420,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/policy.Bundle"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle"
                         }
                     }
                 ],
@@ -403,7 +428,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/policy.Bundle"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle"
                         }
                     },
                     "400": {
@@ -505,7 +530,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/policy.Bundle"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle"
                         }
                     }
                 }
@@ -536,7 +561,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/core.PolicyPublishRequest"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_core.PolicyPublishRequest"
                         }
                     }
                 ],
@@ -583,7 +608,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/core.PolicyRollbackRequest"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_core.PolicyRollbackRequest"
                         }
                     }
                 ],
@@ -630,7 +655,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/core.PolicyValidateRequest"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_core.PolicyValidateRequest"
                         }
                     }
                 ],
@@ -725,7 +750,7 @@ const docTemplate = `{
                         "schema": {
                             "type": "array",
                             "items": {
-                                "$ref": "#/definitions/types.ApprovalRecord"
+                                "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.ApprovalRecord"
                             }
                         }
                     },
@@ -771,7 +796,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/types.ApprovalResolveRequest"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.ApprovalResolveRequest"
                         }
                     }
                 ],
@@ -844,7 +869,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/types.PolicyRequest"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.PolicyRequest"
                         }
                     }
                 ],
@@ -852,7 +877,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/types.PolicyDecision"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.PolicyDecision"
                         }
                     },
                     "400": {
@@ -931,7 +956,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/types.AdapterRegistration"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.AdapterRegistration"
                         }
                     }
                 ],
@@ -978,7 +1003,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/types.ReportRequest"
+                            "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.ReportRequest"
                         }
                     }
                 ],
@@ -1002,11 +1027,11 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "core.PolicyPublishRequest": {
+        "github_com_agentgate_agentgate_internal_core.PolicyPublishRequest": {
             "type": "object",
             "properties": {
                 "bundle": {
-                    "$ref": "#/definitions/policy.Bundle"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle"
                 },
                 "message": {
                     "type": "string"
@@ -1016,7 +1041,7 @@ const docTemplate = `{
                 }
             }
         },
-        "core.PolicyRollbackRequest": {
+        "github_com_agentgate_agentgate_internal_core.PolicyRollbackRequest": {
             "type": "object",
             "properties": {
                 "message": {
@@ -1030,15 +1055,15 @@ const docTemplate = `{
                 }
             }
         },
-        "core.PolicyValidateRequest": {
+        "github_com_agentgate_agentgate_internal_core.PolicyValidateRequest": {
             "type": "object",
             "properties": {
                 "bundle": {
-                    "$ref": "#/definitions/policy.Bundle"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.Bundle"
                 }
             }
         },
-        "policy.Bundle": {
+        "github_com_agentgate_agentgate_internal_policy.Bundle": {
             "type": "object",
             "properties": {
                 "bundle_id": {
@@ -1051,10 +1076,10 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "egress_policy": {
-                    "$ref": "#/definitions/policy.EgressPolicy"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.EgressPolicy"
                 },
                 "input_policy": {
-                    "$ref": "#/definitions/policy.InputPolicy"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.InputPolicy"
                 },
                 "issued_at": {
                     "type": "string"
@@ -1063,22 +1088,22 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "path_policy": {
-                    "$ref": "#/definitions/policy.PathPolicy"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.PathPolicy"
                 },
                 "priority": {
                     "type": "integer"
                 },
                 "resource_policy": {
-                    "$ref": "#/definitions/policy.ResourcePolicy"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.ResourcePolicy"
                 },
                 "rules": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/policy.Rule"
+                        "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.Rule"
                     }
                 },
                 "runtime_policy": {
-                    "$ref": "#/definitions/policy.RuntimePolicy"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.RuntimePolicy"
                 },
                 "status": {
                     "type": "string"
@@ -1091,7 +1116,7 @@ const docTemplate = `{
                 }
             }
         },
-        "policy.Condition": {
+        "github_com_agentgate_agentgate_internal_policy.Condition": {
             "type": "object",
             "properties": {
                 "expression": {
@@ -1102,7 +1127,7 @@ const docTemplate = `{
                 }
             }
         },
-        "policy.EgressPolicy": {
+        "github_com_agentgate_agentgate_internal_policy.EgressPolicy": {
             "type": "object",
             "properties": {
                 "block_sensitive_query_params": {
@@ -1122,7 +1147,7 @@ const docTemplate = `{
                 }
             }
         },
-        "policy.InputPolicy": {
+        "github_com_agentgate_agentgate_internal_policy.InputPolicy": {
             "type": "object",
             "properties": {
                 "secret_mode": {
@@ -1130,7 +1155,7 @@ const docTemplate = `{
                 }
             }
         },
-        "policy.Obligation": {
+        "github_com_agentgate_agentgate_internal_policy.Obligation": {
             "type": "object",
             "properties": {
                 "params": {
@@ -1138,11 +1163,11 @@ const docTemplate = `{
                     "additionalProperties": true
                 },
                 "type": {
-                    "type": "string"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.ObligationType"
                 }
             }
         },
-        "policy.PathPolicy": {
+        "github_com_agentgate_agentgate_internal_policy.PathPolicy": {
             "type": "object",
             "properties": {
                 "allow_worktree_siblings": {
@@ -1159,7 +1184,7 @@ const docTemplate = `{
                 }
             }
         },
-        "policy.ResourcePolicy": {
+        "github_com_agentgate_agentgate_internal_policy.ResourcePolicy": {
             "type": "object",
             "properties": {
                 "secret_handle_scope": {
@@ -1167,14 +1192,14 @@ const docTemplate = `{
                 }
             }
         },
-        "policy.Rule": {
+        "github_com_agentgate_agentgate_internal_policy.Rule": {
             "type": "object",
             "properties": {
                 "description": {
                     "type": "string"
                 },
                 "effect": {
-                    "$ref": "#/definitions/types.Effect"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.Effect"
                 },
                 "id": {
                     "type": "string"
@@ -1182,7 +1207,7 @@ const docTemplate = `{
                 "obligations": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/policy.Obligation"
+                        "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.Obligation"
                     }
                 },
                 "priority": {
@@ -1194,27 +1219,31 @@ const docTemplate = `{
                 "request_kinds": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/types.RequestKind"
+                        "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.RequestKind"
                     }
                 },
                 "surface": {
-                    "$ref": "#/definitions/types.Surface"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.Surface"
                 },
                 "when": {
-                    "$ref": "#/definitions/policy.Condition"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_policy.Condition"
                 }
             }
         },
-        "policy.RuntimePolicy": {
+        "github_com_agentgate_agentgate_internal_policy.RuntimePolicy": {
             "type": "object",
             "properties": {
+                "approval_timeout": {
+                    "type": "string",
+                    "example": "10m"
+                },
                 "require_approval_open_world": {
                     "type": "boolean"
                 },
                 "require_approval_side_effects": {
                     "type": "array",
                     "items": {
-                        "type": "string"
+                        "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.SideEffect"
                     }
                 },
                 "require_approval_tools": {
@@ -1225,7 +1254,7 @@ const docTemplate = `{
                 }
             }
         },
-        "types.ActionContext": {
+        "github_com_agentgate_agentgate_internal_types.ActionContext": {
             "type": "object",
             "properties": {
                 "open_world": {
@@ -1237,7 +1266,7 @@ const docTemplate = `{
                 "side_effects": {
                     "type": "array",
                     "items": {
-                        "type": "string"
+                        "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.SideEffect"
                     }
                 },
                 "tool": {
@@ -1245,7 +1274,7 @@ const docTemplate = `{
                 }
             }
         },
-        "types.ActorContext": {
+        "github_com_agentgate_agentgate_internal_types.ActorContext": {
             "type": "object",
             "properties": {
                 "agent_id": {
@@ -1259,10 +1288,13 @@ const docTemplate = `{
                 }
             }
         },
-        "types.AdapterCapabilities": {
+        "github_com_agentgate_agentgate_internal_types.AdapterCapabilities": {
             "type": "object",
             "properties": {
                 "can_block": {
+                    "type": "boolean"
+                },
+                "can_pause_for_approval": {
                     "type": "boolean"
                 },
                 "can_rewrite_input": {
@@ -1273,7 +1305,7 @@ const docTemplate = `{
                 }
             }
         },
-        "types.AdapterRegistration": {
+        "github_com_agentgate_agentgate_internal_types.AdapterRegistration": {
             "type": "object",
             "properties": {
                 "adapter_id": {
@@ -1283,10 +1315,10 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "capabilities": {
-                    "$ref": "#/definitions/types.AdapterCapabilities"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.AdapterCapabilities"
                 },
                 "host": {
-                    "$ref": "#/definitions/types.HostDescriptor"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.HostDescriptor"
                 },
                 "integration_id": {
                     "type": "string"
@@ -1304,12 +1336,56 @@ const docTemplate = `{
                 "surfaces": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/types.Surface"
+                        "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.Surface"
                     }
                 }
             }
         },
-        "types.ApprovalRecord": {
+        "github_com_agentgate_agentgate_internal_types.AgentType": {
+            "type": "string",
+            "enum": [
+                "openclaw",
+                "gateway",
+                "custom"
+            ],
+            "x-enum-varnames": [
+                "AgentTypeOpenClaw",
+                "AgentTypeGateway",
+                "AgentTypeCustom"
+            ]
+        },
+        "github_com_agentgate_agentgate_internal_types.AgentTypeDescriptor": {
+            "type": "object",
+            "properties": {
+                "can_initiate_session": {
+                    "type": "boolean"
+                },
+                "default_surfaces": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.Surface"
+                    }
+                },
+                "name": {
+                    "type": "string"
+                },
+                "type": {
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.AgentType"
+                }
+            }
+        },
+        "github_com_agentgate_agentgate_internal_types.AgentTypesResponse": {
+            "type": "object",
+            "properties": {
+                "agent_types": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.AgentTypeDescriptor"
+                    }
+                }
+            }
+        },
+        "github_com_agentgate_agentgate_internal_types.ApprovalRecord": {
             "type": "object",
             "properties": {
                 "approval_id": {
@@ -1343,14 +1419,14 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "status": {
-                    "$ref": "#/definitions/types.ApprovalStatus"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.ApprovalStatus"
                 },
                 "task_id": {
                     "type": "string"
                 }
             }
         },
-        "types.ApprovalResolveRequest": {
+        "github_com_agentgate_agentgate_internal_types.ApprovalResolveRequest": {
             "type": "object",
             "properties": {
                 "channel": {
@@ -1364,7 +1440,7 @@ const docTemplate = `{
                 }
             }
         },
-        "types.ApprovalStatus": {
+        "github_com_agentgate_agentgate_internal_types.ApprovalStatus": {
             "type": "string",
             "enum": [
                 "pending",
@@ -1379,13 +1455,13 @@ const docTemplate = `{
                 "ApprovalExpired"
             ]
         },
-        "types.ContentContext": {
+        "github_com_agentgate_agentgate_internal_types.ContentContext": {
             "type": "object",
             "properties": {
                 "data_classes": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/types.DataClass"
+                        "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.DataClass"
                     }
                 },
                 "summary": {
@@ -1393,7 +1469,7 @@ const docTemplate = `{
                 }
             }
         },
-        "types.DataClass": {
+        "github_com_agentgate_agentgate_internal_types.DataClass": {
             "type": "string",
             "enum": [
                 "pii",
@@ -1410,7 +1486,7 @@ const docTemplate = `{
                 "DataClassCredential"
             ]
         },
-        "types.DecisionContext": {
+        "github_com_agentgate_agentgate_internal_types.DecisionContext": {
             "type": "object",
             "properties": {
                 "raw": {
@@ -1418,21 +1494,21 @@ const docTemplate = `{
                     "additionalProperties": true
                 },
                 "surface": {
-                    "$ref": "#/definitions/types.Surface"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.Surface"
                 },
                 "taints": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/types.Taint"
+                        "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.Taint"
                     }
                 }
             }
         },
-        "types.DecisionExplanation": {
+        "github_com_agentgate_agentgate_internal_types.DecisionExplanation": {
             "type": "object",
             "properties": {
                 "policy_trace": {
-                    "$ref": "#/definitions/types.PolicyTrace"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.PolicyTrace"
                 },
                 "summary": {
                     "type": "string"
@@ -1445,7 +1521,18 @@ const docTemplate = `{
                 }
             }
         },
-        "types.Effect": {
+        "github_com_agentgate_agentgate_internal_types.Disposition": {
+            "type": "string",
+            "enum": [
+                "allow",
+                "deny"
+            ],
+            "x-enum-varnames": [
+                "DispositionAllow",
+                "DispositionDeny"
+            ]
+        },
+        "github_com_agentgate_agentgate_internal_types.Effect": {
             "type": "string",
             "enum": [
                 "allow",
@@ -1462,18 +1549,7 @@ const docTemplate = `{
                 "EffectExclusion"
             ]
         },
-        "types.Disposition": {
-            "type": "string",
-            "enum": [
-                "allow",
-                "deny"
-            ],
-            "x-enum-varnames": [
-                "DispositionAllow",
-                "DispositionDeny"
-            ]
-        },
-        "types.HostDescriptor": {
+        "github_com_agentgate_agentgate_internal_types.HostDescriptor": {
             "type": "object",
             "properties": {
                 "kind": {
@@ -1484,20 +1560,26 @@ const docTemplate = `{
                 }
             }
         },
-        "types.IntegrationDefinition": {
+        "github_com_agentgate_agentgate_internal_types.IntegrationDefinition": {
             "type": "object",
             "properties": {
+                "agent_type": {
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.AgentType"
+                },
+                "approval_channel": {
+                    "type": "string"
+                },
                 "enabled": {
                     "type": "boolean"
                 },
                 "expected_surfaces": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/types.Surface"
+                        "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.Surface"
                     }
                 },
                 "health": {
-                    "$ref": "#/definitions/types.IntegrationHealth"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationHealth"
                 },
                 "id": {
                     "type": "string"
@@ -1508,15 +1590,24 @@ const docTemplate = `{
                 "matched_adapters": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/types.IntegrationMatchedAdapter"
+                        "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationMatchedAdapter"
                     }
                 },
                 "name": {
                     "type": "string"
+                },
+                "policy_bundle_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "runtime": {
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationRuntimeSpec"
                 }
             }
         },
-        "types.IntegrationHealth": {
+        "github_com_agentgate_agentgate_internal_types.IntegrationHealth": {
             "type": "object",
             "properties": {
                 "computed_at": {
@@ -1531,15 +1622,20 @@ const docTemplate = `{
                 "matched_adapter_id": {
                     "type": "string"
                 },
+                "runtime": {
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationRuntimeView"
+                },
                 "status": {
-                    "$ref": "#/definitions/types.IntegrationHealthStatus"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationHealthStatus"
                 }
             }
         },
-        "types.IntegrationHealthStatus": {
+        "github_com_agentgate_agentgate_internal_types.IntegrationHealthStatus": {
             "type": "string",
             "enum": [
                 "connected",
+                "starting",
+                "degraded",
                 "stale",
                 "missing",
                 "unmanaged",
@@ -1547,13 +1643,15 @@ const docTemplate = `{
             ],
             "x-enum-varnames": [
                 "IntegrationHealthConnected",
+                "IntegrationHealthStarting",
+                "IntegrationHealthDegraded",
                 "IntegrationHealthStale",
                 "IntegrationHealthMissing",
                 "IntegrationHealthUnmanaged",
                 "IntegrationHealthDisabled"
             ]
         },
-        "types.IntegrationMatchedAdapter": {
+        "github_com_agentgate_agentgate_internal_types.IntegrationMatchedAdapter": {
             "type": "object",
             "properties": {
                 "adapter_id": {
@@ -1563,7 +1661,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "host": {
-                    "$ref": "#/definitions/types.HostDescriptor"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.HostDescriptor"
                 },
                 "integration_id": {
                     "type": "string"
@@ -1575,7 +1673,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "status": {
-                    "$ref": "#/definitions/types.IntegrationHealthStatus"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationHealthStatus"
                 },
                 "supporting_channels": {
                     "type": "array",
@@ -1586,12 +1684,85 @@ const docTemplate = `{
                 "surfaces": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/types.Surface"
+                        "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.Surface"
                     }
                 }
             }
         },
-        "types.Obligation": {
+        "github_com_agentgate_agentgate_internal_types.IntegrationRestartSpec": {
+            "type": "object",
+            "properties": {
+                "backoff_ms": {
+                    "type": "integer"
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "max_attempts": {
+                    "type": "integer"
+                }
+            }
+        },
+        "github_com_agentgate_agentgate_internal_types.IntegrationRuntimeSpec": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "env": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "managed": {
+                    "type": "boolean"
+                },
+                "restart": {
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.IntegrationRestartSpec"
+                }
+            }
+        },
+        "github_com_agentgate_agentgate_internal_types.IntegrationRuntimeView": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "last_error": {
+                    "type": "string"
+                },
+                "last_exited_at": {
+                    "type": "string"
+                },
+                "last_healthy_at": {
+                    "type": "string"
+                },
+                "last_started_at": {
+                    "type": "string"
+                },
+                "managed": {
+                    "type": "boolean"
+                },
+                "pid": {
+                    "type": "integer"
+                },
+                "restart_count": {
+                    "type": "integer"
+                },
+                "status": {
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_agentgate_agentgate_internal_types.Obligation": {
             "type": "object",
             "properties": {
                 "params": {
@@ -1599,11 +1770,28 @@ const docTemplate = `{
                     "additionalProperties": true
                 },
                 "type": {
-                    "type": "string"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.ObligationType"
                 }
             }
         },
-        "types.PolicyDecision": {
+        "github_com_agentgate_agentgate_internal_types.ObligationType": {
+            "type": "string",
+            "enum": [
+                "rewrite_input",
+                "approval_request",
+                "resolve_secret_handle",
+                "task_control",
+                "audit_event"
+            ],
+            "x-enum-varnames": [
+                "ObligationRewriteInput",
+                "ObligationApprovalRequest",
+                "ObligationResolveSecretHandle",
+                "ObligationTaskControl",
+                "ObligationAuditEvent"
+            ]
+        },
+        "github_com_agentgate_agentgate_internal_types.PolicyDecision": {
             "type": "object",
             "properties": {
                 "applied_rules": {
@@ -1619,15 +1807,18 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "disposition": {
-                    "$ref": "#/definitions/types.Disposition"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.Disposition"
+                },
+                "effect": {
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.Effect"
                 },
                 "explanation": {
-                    "$ref": "#/definitions/types.DecisionExplanation"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.DecisionExplanation"
                 },
                 "obligations": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/types.Obligation"
+                        "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.Obligation"
                     }
                 },
                 "reason_code": {
@@ -1638,20 +1829,20 @@ const docTemplate = `{
                 }
             }
         },
-        "types.PolicyRequest": {
+        "github_com_agentgate_agentgate_internal_types.PolicyRequest": {
             "type": "object",
             "properties": {
                 "action": {
-                    "$ref": "#/definitions/types.ActionContext"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.ActionContext"
                 },
                 "actor": {
-                    "$ref": "#/definitions/types.ActorContext"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.ActorContext"
                 },
                 "content": {
-                    "$ref": "#/definitions/types.ContentContext"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.ContentContext"
                 },
                 "context": {
-                    "$ref": "#/definitions/types.DecisionContext"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.DecisionContext"
                 },
                 "policy": {
                     "type": "object",
@@ -1661,17 +1852,17 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "request_kind": {
-                    "$ref": "#/definitions/types.RequestKind"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.RequestKind"
                 },
                 "session": {
-                    "$ref": "#/definitions/types.SessionContext"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.SessionContext"
                 },
                 "target": {
-                    "$ref": "#/definitions/types.TargetContext"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.TargetContext"
                 }
             }
         },
-        "types.PolicyRuleTrace": {
+        "github_com_agentgate_agentgate_internal_types.PolicyRuleTrace": {
             "type": "object",
             "properties": {
                 "bundle_id": {
@@ -1681,7 +1872,7 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "effect": {
-                    "$ref": "#/definitions/types.Effect"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.Effect"
                 },
                 "priority": {
                     "type": "integer"
@@ -1694,7 +1885,7 @@ const docTemplate = `{
                 }
             }
         },
-        "types.PolicyTrace": {
+        "github_com_agentgate_agentgate_internal_types.PolicyTrace": {
             "type": "object",
             "properties": {
                 "bundle_priority": {
@@ -1706,7 +1897,7 @@ const docTemplate = `{
                 "matched_rules": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/types.PolicyRuleTrace"
+                        "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.PolicyRuleTrace"
                     }
                 },
                 "policy_status": {
@@ -1726,7 +1917,7 @@ const docTemplate = `{
                 }
             }
         },
-        "types.ReportRequest": {
+        "github_com_agentgate_agentgate_internal_types.ReportRequest": {
             "type": "object",
             "properties": {
                 "adapter_id": {
@@ -1745,7 +1936,7 @@ const docTemplate = `{
                 "obligations": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/types.Obligation"
+                        "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.Obligation"
                     }
                 },
                 "outcome": {
@@ -1755,11 +1946,11 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "surface": {
-                    "$ref": "#/definitions/types.Surface"
+                    "$ref": "#/definitions/github_com_agentgate_agentgate_internal_types.Surface"
                 }
             }
         },
-        "types.RequestKind": {
+        "github_com_agentgate_agentgate_internal_types.RequestKind": {
             "type": "string",
             "enum": [
                 "input",
@@ -1778,7 +1969,7 @@ const docTemplate = `{
                 "RequestKindEnvelopeAmendment"
             ]
         },
-        "types.SessionContext": {
+        "github_com_agentgate_agentgate_internal_types.SessionContext": {
             "type": "object",
             "properties": {
                 "attempt_id": {
@@ -1792,7 +1983,22 @@ const docTemplate = `{
                 }
             }
         },
-        "types.Surface": {
+        "github_com_agentgate_agentgate_internal_types.SideEffect": {
+            "type": "string",
+            "enum": [
+                "network_egress",
+                "filesystem_write",
+                "process_spawn",
+                "secret_resolve"
+            ],
+            "x-enum-varnames": [
+                "SideEffectNetworkEgress",
+                "SideEffectFilesystemWrite",
+                "SideEffectProcessSpawn",
+                "SideEffectSecretResolve"
+            ]
+        },
+        "github_com_agentgate_agentgate_internal_types.Surface": {
             "type": "string",
             "enum": [
                 "input",
@@ -1805,7 +2011,7 @@ const docTemplate = `{
                 "SurfaceResource"
             ]
         },
-        "types.Taint": {
+        "github_com_agentgate_agentgate_internal_types.Taint": {
             "type": "string",
             "enum": [
                 "untrusted_external",
@@ -1820,7 +2026,7 @@ const docTemplate = `{
                 "TaintSecretBearing"
             ]
         },
-        "types.TargetContext": {
+        "github_com_agentgate_agentgate_internal_types.TargetContext": {
             "type": "object",
             "properties": {
                 "identifier": {

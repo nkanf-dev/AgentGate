@@ -105,6 +105,19 @@ func TestIntegrationsRequireAdmin(t *testing.T) {
 	}
 }
 
+func TestAgentTypesRequireAdmin(t *testing.T) {
+	router := testRouter()
+	request := httptest.NewRequest(http.MethodGet, "/internal/agent-types", nil)
+	request.Header.Set("Authorization", "Bearer operator-token")
+	recorder := httptest.NewRecorder()
+
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestIntegrationDefinitionMatchesRegisteredAdapterByIntegrationID(t *testing.T) {
 	router := testRouter()
 	create := httptest.NewRequest(http.MethodPost, "/internal/integrations", strings.NewReader(`{
@@ -164,6 +177,73 @@ func TestIntegrationDefinitionMatchesRegisteredAdapterByIntegrationID(t *testing
 	}
 	if !strings.Contains(body, `"matched_adapter_id":"openclaw-main-01"`) {
 		t.Fatalf("expected exact matched adapter, got %s", body)
+	}
+}
+
+func TestAgentTypesEndpoint(t *testing.T) {
+	router := testRouter()
+	request := httptest.NewRequest(http.MethodGet, "/internal/agent-types", nil)
+	request.Header.Set("Authorization", "Bearer admin-token")
+	recorder := httptest.NewRecorder()
+
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"type":"gateway"`) {
+		t.Fatalf("expected gateway agent type, got %s", body)
+	}
+	if !strings.Contains(body, `"default_surfaces":["input"]`) {
+		t.Fatalf("expected gateway default surfaces, got %s", body)
+	}
+}
+
+func TestGatewayIntegrationRejectsRuntimeRegistration(t *testing.T) {
+	router := testRouter()
+	create := httptest.NewRequest(http.MethodPost, "/internal/integrations", strings.NewReader(`{
+		"id": "gateway-main",
+		"name": "Gateway main adapter",
+		"kind": "adapter",
+		"enabled": true,
+		"agent_type": "gateway",
+		"expected_surfaces": ["input"]
+	}`))
+	create.Header.Set("Authorization", "Bearer admin-token")
+	create.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	router.ServeHTTP(recorder, create)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	register := httptest.NewRequest(http.MethodPost, "/v1/register", strings.NewReader(`{
+		"adapter_id": "gateway-main-01",
+		"integration_id": "gateway-main",
+		"adapter_kind": "host_plugin",
+		"host": {"kind": "gateway"},
+		"surfaces": ["input", "runtime"],
+		"capabilities": {
+			"can_block": true,
+			"can_rewrite_input": true,
+			"can_rewrite_tool_args": true,
+			"can_pause_for_approval": true
+		}
+	}`))
+	register.Header.Set("Authorization", "Bearer adapter-token")
+	register.Header.Set("Content-Type", "application/json")
+	recorder = httptest.NewRecorder()
+
+	router.ServeHTTP(recorder, register)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "gateway integration") {
+		t.Fatalf("expected gateway integration validation error, got %s", recorder.Body.String())
 	}
 }
 

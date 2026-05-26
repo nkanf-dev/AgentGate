@@ -676,6 +676,63 @@ func (e *Engine) integrationDefinition(ctx context.Context, integrationID string
 	return types.IntegrationDefinition{}, false, nil
 }
 
+func (e *Engine) AgentTypes(ctx context.Context) types.AgentTypesResponse {
+	return types.AgentTypesResponse{
+		AgentTypes: []types.AgentTypeDescriptor{
+			{
+				Type:               types.AgentTypeOpenClaw,
+				Name:               "OpenClaw",
+				DefaultSurfaces:    []types.Surface{types.SurfaceInput, types.SurfaceRuntime},
+				CanInitiateSession: false,
+			},
+			{
+				Type:               types.AgentTypeGateway,
+				Name:               "Gateway",
+				DefaultSurfaces:    []types.Surface{types.SurfaceInput},
+				CanInitiateSession: true,
+			},
+			{
+				Type:               types.AgentTypeCustom,
+				Name:               "Custom",
+				DefaultSurfaces:    []types.Surface{},
+				CanInitiateSession: false,
+			},
+		},
+	}
+}
+
+func (e *Engine) policyBundlesForRequest(ctx context.Context, req types.PolicyRequest) ([]policy.Bundle, string, []string, error) {
+	active := e.policy.Active(ctx)
+	integrationID := requestIntegrationID(req)
+	if integrationID == "" {
+		return active.bundles, "global_default", nil, nil
+	}
+
+	definition, found, err := e.integrationDefinition(ctx, integrationID)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	if !found || len(definition.PolicyBundleIDs) == 0 {
+		return active.bundles, "global_default", nil, nil
+	}
+
+	bundles := make([]policy.Bundle, 0, len(definition.PolicyBundleIDs))
+	for i, bundleID := range definition.PolicyBundleIDs {
+		bundle, err := e.GetPolicyBundle(ctx, bundleID)
+		if err != nil {
+			log.Printf("policy bundle not found for integration %s: bundle %s: %v", integrationID, bundleID, err)
+			continue
+		}
+		bundle.Priority = len(definition.PolicyBundleIDs) - i
+		bundles = append(bundles, bundle)
+	}
+	if len(bundles) == 0 {
+		return active.bundles, "global_default", append([]string(nil), definition.PolicyBundleIDs...), nil
+	}
+
+	return ensureCorePolicy(bundles), "integration", append([]string(nil), definition.PolicyBundleIDs...), nil
+}
+
 func (e *Engine) adapterCoverages(ctx context.Context) ([]types.AdapterCoverage, error) {
 	if e.stateStore != nil {
 		adapters, err := e.stateStore.ListAdapterRegistrations(ctx)
@@ -764,6 +821,20 @@ func (e *Engine) RegisterAdapter(ctx context.Context, req types.AdapterRegistrat
 	}
 	if err := validateRegistration(req); err != nil {
 		return types.RegistrationResult{}, errBadRequest("invalid_registration", err.Error())
+	}
+	if req.IntegrationID != "" {
+		definition, found, err := e.integrationDefinition(ctx, req.IntegrationID)
+		if err != nil {
+			return types.RegistrationResult{}, err
+		}
+		if found && definition.AgentType == types.AgentTypeGateway {
+			for _, surface := range req.Surfaces {
+				if surface != types.SurfaceInput {
+					return types.RegistrationResult{}, errBadRequest("invalid_registration",
+						fmt.Sprintf("gateway integration %q only supports input surface, got %q", req.IntegrationID, surface))
+				}
+			}
+		}
 	}
 
 	// Enforce identity binding if configured.
@@ -916,8 +987,10 @@ func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.Pol
 	var appliedRules []string
 	var obligations []types.Obligation
 	var newTaints []types.Taint
-
 	activePolicy := e.policy.Active(ctx)
+	evaluatedBundles := activePolicy.bundles
+	policySource := "global_default"
+	var integrationPolicyBundles []string
 
 	decisionReady := false
 	if patch := validateDecisionRequest(req, surface); patch != nil {
@@ -996,7 +1069,12 @@ func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.Pol
 	}
 
 	if !decisionReady {
-		policyEvaluation = policy.EvaluateBundles(activePolicy.bundles, req, sessionFacts)
+		var err error
+		evaluatedBundles, policySource, integrationPolicyBundles, err = e.policyBundlesForRequest(ctx, req)
+		if err != nil {
+			return types.PolicyDecision{}, err
+		}
+		policyEvaluation = policy.EvaluateBundles(evaluatedBundles, req, sessionFacts)
 		policyEffect = policyEvaluation.Effect
 		reason = policyEvaluation.ReasonCode
 		appliedRules = append([]string(nil), policyEvaluation.AppliedRules...)
@@ -1050,43 +1128,50 @@ func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.Pol
 		DecisionID:   newID("dec"),
 		RequestID:    req.RequestID,
 		Disposition:  disposition,
+		Effect:       policyEffect,
 		ReasonCode:   finalReason,
 		Obligations:  finalObligations,
 		AppliedRules: appliedRules,
 		Explanation: types.DecisionExplanation{
 			Summary:     decisionSummary(finalReason),
 			Warnings:    warnings,
-			PolicyTrace: policyTrace(activePolicy.bundle, policyEvaluation),
+			PolicyTrace: policyTrace(aggregateBundles(evaluatedBundles), policyEvaluation),
 		},
 		DecidedAt: now,
 	}
 	traceMetadata := decision.Explanation.PolicyTrace
 
 	metadata := map[string]interface{}{
-		"request_kind":      req.RequestKind,
-		"policy_effect":     policyEffect,
-		"disposition":       disposition,
-		"actor_user":        req.Actor.UserID,
-		"host_id":           req.Actor.HostID,
-		"integration_id":    mapStringValue(req.Policy, "integration_id"),
-		"operation":         req.Action.Operation,
-		"tool":              req.Action.Tool,
-		"content_summary":   req.Content.Summary,
-		"side_effects":      append([]types.SideEffect(nil), req.Action.SideEffects...),
-		"open_world":        req.Action.OpenWorld,
-		"target_kind":       req.Target.Kind,
-		"target_identifier": req.Target.Identifier,
-		"applied_rules":     appliedRules,
-		"obligations":       obligationTypes(finalObligations),
-		"task_id":           req.Session.TaskID,
-		"attempt_id":        req.Session.AttemptID,
-		"warnings":          warnings,
-		"policy_version":    traceMetadata.PolicyVersion,
-		"policy_status":     traceMetadata.PolicyStatus,
-		"selected_rule":     traceMetadata.SelectedRule,
-		"top_priority":      traceMetadata.TopPriority,
-		"defaulted":         traceMetadata.Defaulted,
-		"matched_rules":     policyRuleTraceIDs(traceMetadata.MatchedRules),
+		"request_kind":               req.RequestKind,
+		"policy_effect":              policyEffect,
+		"disposition":                disposition,
+		"actor_user":                 req.Actor.UserID,
+		"host_id":                    req.Actor.HostID,
+		"integration_id":             requestIntegrationID(req),
+		"operation":                  req.Action.Operation,
+		"tool":                       req.Action.Tool,
+		"content_summary":            req.Content.Summary,
+		"side_effects":               append([]types.SideEffect(nil), req.Action.SideEffects...),
+		"open_world":                 req.Action.OpenWorld,
+		"target_kind":                req.Target.Kind,
+		"target_identifier":          req.Target.Identifier,
+		"applied_rules":              appliedRules,
+		"obligations":                obligationTypes(obligations),
+		"task_id":                    req.Session.TaskID,
+		"attempt_id":                 req.Session.AttemptID,
+		"approval_id":                approvalIDFromObligations(obligations),
+		"approval_scope":             approvalScopeFromObligations(obligations),
+		"approval_channel":           approvalChannelFromObligations(obligations),
+		"approval_expires_at":        approvalExpiresAtFromObligations(obligations),
+		"warnings":                   warnings,
+		"policy_version":             traceMetadata.PolicyVersion,
+		"policy_status":              traceMetadata.PolicyStatus,
+		"policy_source":              firstNonEmpty(policySource, "global_default"),
+		"integration_policy_bundles": integrationPolicyBundles,
+		"selected_rule":              traceMetadata.SelectedRule,
+		"top_priority":               traceMetadata.TopPriority,
+		"defaulted":                  traceMetadata.Defaulted,
+		"matched_rules":              policyRuleTraceIDs(traceMetadata.MatchedRules),
 	}
 	if approval != nil {
 		metadata["approval_id"] = approval.ApprovalID
@@ -1699,6 +1784,23 @@ func stringValue(value interface{}) string {
 	}
 }
 
+func requestIntegrationID(req types.PolicyRequest) string {
+	integrationID := strings.TrimSpace(mapStringValue(req.Policy, "integration_id"))
+	if integrationID == "" {
+		integrationID = strings.TrimSpace(mapStringValue(req.Context.Raw, "integration_id"))
+	}
+	return integrationID
+}
+
+func dispositionForEffect(effect types.Effect) types.Disposition {
+	switch effect {
+	case types.EffectAllow, types.EffectAllowWithAudit:
+		return types.DispositionAllow
+	default:
+		return types.DispositionDeny
+	}
+}
+
 func stringSliceValue(value interface{}) []string {
 	switch typed := value.(type) {
 	case []string:
@@ -2256,8 +2358,10 @@ func normalizeIntegrationDefinition(definition types.IntegrationDefinition) (typ
 	definition.Name = strings.TrimSpace(definition.Name)
 	definition.Kind = strings.TrimSpace(definition.Kind)
 	definition.ApprovalChannel = strings.TrimSpace(definition.ApprovalChannel)
+	definition.AgentType = types.AgentType(strings.TrimSpace(string(definition.AgentType)))
 	definition.Health = types.IntegrationHealth{}
 	definition.MatchedAdapters = nil
+	definition.PolicyBundleIDs = append([]string(nil), definition.PolicyBundleIDs...)
 	if definition.ID == "" {
 		return types.IntegrationDefinition{}, fmt.Errorf("id is required")
 	}
@@ -2276,6 +2380,14 @@ func normalizeIntegrationDefinition(definition types.IntegrationDefinition) (typ
 	if definition.ApprovalChannel != "" && !isCompactToken(definition.ApprovalChannel) {
 		return types.IntegrationDefinition{}, fmt.Errorf("approval_channel must be a compact token")
 	}
+	if definition.AgentType == "" {
+		definition.AgentType = types.AgentTypeCustom
+	}
+	switch definition.AgentType {
+	case types.AgentTypeOpenClaw, types.AgentTypeGateway, types.AgentTypeCustom:
+	default:
+		return types.IntegrationDefinition{}, fmt.Errorf("unsupported agent_type %q", definition.AgentType)
+	}
 	if definition.Runtime != nil {
 		if err := validateIntegrationRuntimeSpec(*definition.Runtime); err != nil {
 			return types.IntegrationDefinition{}, err
@@ -2291,6 +2403,30 @@ func normalizeIntegrationDefinition(definition types.IntegrationDefinition) (typ
 		}
 		seenSurfaces[surface] = struct{}{}
 	}
+	if definition.AgentType == types.AgentTypeGateway {
+		for _, surface := range definition.ExpectedSurfaces {
+			if surface != types.SurfaceInput {
+				return types.IntegrationDefinition{}, fmt.Errorf("gateway agent type only supports input surface, got %q", surface)
+			}
+		}
+	}
+	seenBundleIDs := make(map[string]struct{}, len(definition.PolicyBundleIDs))
+	normalizedBundleIDs := make([]string, 0, len(definition.PolicyBundleIDs))
+	for _, bundleID := range definition.PolicyBundleIDs {
+		bundleID = strings.TrimSpace(bundleID)
+		if bundleID == "" {
+			return types.IntegrationDefinition{}, fmt.Errorf("policy_bundle_ids must not contain empty values")
+		}
+		if !isCompactToken(bundleID) {
+			return types.IntegrationDefinition{}, fmt.Errorf("policy_bundle_ids entry %q must be a compact token", bundleID)
+		}
+		if _, exists := seenBundleIDs[bundleID]; exists {
+			return types.IntegrationDefinition{}, fmt.Errorf("duplicate policy bundle id %q", bundleID)
+		}
+		seenBundleIDs[bundleID] = struct{}{}
+		normalizedBundleIDs = append(normalizedBundleIDs, bundleID)
+	}
+	definition.PolicyBundleIDs = normalizedBundleIDs
 	return definition, nil
 }
 

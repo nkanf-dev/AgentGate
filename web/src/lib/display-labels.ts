@@ -66,6 +66,9 @@ export const statusLabels: Record<string, string> = {
   adapter: "Adapter",
   transport: "Transport",
   resource_provider: "Resource Provider",
+  openclaw: "OpenClaw",
+  gateway: "Gateway",
+  custom: "Custom",
 }
 
 export const integrationHealthLabels: Record<IntegrationHealthStatus, string> = {

@@ -79,6 +79,7 @@ func (s *Server) Router() http.Handler {
 		r.Delete("/policy/bundles/{bundle_id}", s.deletePolicyBundle)
 		r.Post("/policy/bundles/{bundle_id}/validate", s.validatePolicyBundle)
 		r.Post("/policy/bundles/{bundle_id}/publish", s.publishPolicyBundle)
+		r.Get("/agent-types", s.agentTypes)
 		r.Get("/integrations", s.integrationDefinitions)
 		r.Post("/integrations", s.createIntegrationDefinition)
 		r.Get("/integrations/{integration_id}", s.getIntegrationDefinition)
@@ -396,6 +397,17 @@ func (s *Server) publishPolicyBundle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// @Summary      List supported agent types
+// @Description  Returns the built-in agent types and their default capabilities.
+// @Tags         integrations
+// @Security     BearerAuth
+// @Produce      json
+// @Success      200  {object}  types.AgentTypesResponse
+// @Router       /internal/agent-types [get]
+func (s *Server) agentTypes(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.engine.AgentTypes(r.Context()))
 }
 
 // @Summary      List integration definitions

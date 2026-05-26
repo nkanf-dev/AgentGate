@@ -15,6 +15,7 @@ type memoryStateStore struct {
 	mu            sync.RWMutex
 	integrations  map[string]types.IntegrationDefinition
 	policyHistory map[int]policy.Bundle
+	policyBundles map[string]policy.Bundle
 	policyRecords []policy.VersionRecord
 	registrations map[string]types.AdapterCoverage
 	approvals     map[string]types.ApprovalRecord
@@ -28,6 +29,7 @@ func newMemoryStateStore() *memoryStateStore {
 	return &memoryStateStore{
 		integrations:  make(map[string]types.IntegrationDefinition),
 		policyHistory: make(map[int]policy.Bundle),
+		policyBundles: make(map[string]policy.Bundle),
 		registrations: make(map[string]types.AdapterCoverage),
 		approvals:     make(map[string]types.ApprovalRecord),
 		grants:        make(map[string]types.AttemptGrant),
@@ -290,18 +292,40 @@ func (m *memoryStateStore) GetActivePolicyBundle(ctx context.Context) (policy.Bu
 func (m *memoryStateStore) SavePolicyBundle(ctx context.Context, bundle policy.Bundle) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.policyBundles[bundle.BundleID] = bundle
 	return nil
 }
 
 func (m *memoryStateStore) GetPolicyBundle(ctx context.Context, bundleID string) (policy.Bundle, bool, error) {
-	return policy.Bundle{}, false, nil
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	bundle, ok := m.policyBundles[bundleID]
+	return bundle, ok, nil
 }
 
 func (m *memoryStateStore) ListPolicyBundles(ctx context.Context, includeArchived bool) ([]policy.Bundle, error) {
-	return nil, nil
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make([]policy.Bundle, 0, len(m.policyBundles))
+	for _, bundle := range m.policyBundles {
+		if !includeArchived && bundle.Status == policy.BundleStatusArchived {
+			continue
+		}
+		result = append(result, bundle)
+	}
+	return result, nil
 }
 
 func (m *memoryStateStore) ArchivePolicyBundle(ctx context.Context, bundleID string, updatedAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	bundle, ok := m.policyBundles[bundleID]
+	if !ok {
+		return sql.ErrNoRows
+	}
+	bundle.Status = policy.BundleStatusArchived
+	bundle.UpdatedAt = updatedAt
+	m.policyBundles[bundleID] = bundle
 	return nil
 }
 
