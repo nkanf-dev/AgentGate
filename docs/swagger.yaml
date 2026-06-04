@@ -174,8 +174,6 @@ definitions:
     properties:
       can_block:
         type: boolean
-      can_pause_for_approval:
-        type: boolean
       can_rewrite_input:
         type: boolean
       can_rewrite_tool_args:

@@ -229,8 +229,7 @@ func TestGatewayIntegrationRejectsRuntimeRegistration(t *testing.T) {
 		"capabilities": {
 			"can_block": true,
 			"can_rewrite_input": true,
-			"can_rewrite_tool_args": true,
-			"can_pause_for_approval": true
+			"can_rewrite_tool_args": true
 		}
 	}`))
 	register.Header.Set("Authorization", "Bearer adapter-token")
