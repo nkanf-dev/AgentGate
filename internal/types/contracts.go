@@ -55,10 +55,9 @@ type HostDescriptor struct {
 }
 
 type AdapterCapabilities struct {
-	CanBlock            bool `json:"can_block"`
-	CanRewriteInput     bool `json:"can_rewrite_input"`
-	CanRewriteToolArgs  bool `json:"can_rewrite_tool_args"`
-	CanPauseForApproval bool `json:"can_pause_for_approval,omitempty"`
+	CanBlock           bool `json:"can_block"`
+	CanRewriteInput    bool `json:"can_rewrite_input"`
+	CanRewriteToolArgs bool `json:"can_rewrite_tool_args"`
 }
 
 type RegistrationResult struct {

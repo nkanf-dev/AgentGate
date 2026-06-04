@@ -1294,9 +1294,6 @@ const docTemplate = `{
                 "can_block": {
                     "type": "boolean"
                 },
-                "can_pause_for_approval": {
-                    "type": "boolean"
-                },
                 "can_rewrite_input": {
                     "type": "boolean"
                 },
