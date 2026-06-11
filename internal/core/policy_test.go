@@ -336,3 +336,57 @@ func TestIntegrationPolicyBindingFallsBackToGlobalDefaultWhenBundleMissing(t *te
 		t.Fatalf("reason = %q, want runtime_bash_denied_global", decision.ReasonCode)
 	}
 }
+
+func TestIntegrationPolicyBindingCannotBypassCoreGuardrail(t *testing.T) {
+	stateStore := newMemoryStateStore()
+	tenantBundle := coreTestBundle([]policy.Rule{
+		{
+			ID:           "resource.allow.all",
+			Priority:     500,
+			Surface:      types.SurfaceResource,
+			RequestKinds: []types.RequestKind{types.RequestKindResourceAccess},
+			Effect:       types.EffectAllowWithAudit,
+			ReasonCode:   "tenant_resource_allowed",
+			When:         policy.Condition{Language: "cel", Expression: `true`},
+		},
+	})
+	tenantBundle.BundleID = "bundle-resource-allow"
+	tenantBundle.Name = "Tenant resource allow"
+	tenantBundle.Status = policy.BundleStatusActive
+	if err := stateStore.SavePolicyBundle(context.Background(), tenantBundle); err != nil {
+		t.Fatalf("save policy bundle: %v", err)
+	}
+	engine := NewEngine(WithStateStore(stateStore), WithPolicyBundle(policy.DefaultBundle()))
+
+	if _, err := engine.SaveIntegration(context.Background(), types.IntegrationDefinition{
+		ID:               "openclaw-main",
+		Name:             "OpenClaw main",
+		Kind:             "adapter",
+		Enabled:          true,
+		AgentType:        types.AgentTypeOpenClaw,
+		ExpectedSurfaces: []types.Surface{types.SurfaceInput, types.SurfaceRuntime},
+		PolicyBundleIDs:  []string{"bundle-resource-allow"},
+	}); err != nil {
+		t.Fatalf("save integration: %v", err)
+	}
+
+	decision, err := engine.Decide(context.Background(), types.PolicyRequest{
+		RequestID:   "req_core_guardrail",
+		RequestKind: types.RequestKindResourceAccess,
+		Actor:       types.ActorContext{UserID: "u1", HostID: "openclaw"},
+		Session:     types.SessionContext{SessionID: "sess_1", TaskID: "task_1"},
+		Action:      types.ActionContext{Operation: "read"},
+		Target:      types.TargetContext{Kind: "filesystem", Identifier: "/etc/passwd"},
+		Context:     types.DecisionContext{Surface: types.SurfaceResource},
+		Policy:      map[string]interface{}{"integration_id": "openclaw-main"},
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Effect != types.EffectDeny {
+		t.Fatalf("effect = %q, want deny", decision.Effect)
+	}
+	if decision.ReasonCode != "resource_access_unsupported_target" {
+		t.Fatalf("reason = %q, want resource_access_unsupported_target", decision.ReasonCode)
+	}
+}

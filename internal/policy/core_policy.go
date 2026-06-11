@@ -34,7 +34,7 @@ func CorePolicyBundle() Bundle {
 			{
 				ID:           "resource.unsupported_target",
 				Description:  "Only secret_handle targets are supported on the resource surface.",
-				Priority:     1,
+				Priority:     10000,
 				Surface:      types.SurfaceResource,
 				RequestKinds: []types.RequestKind{types.RequestKindResourceAccess},
 				Effect:       types.EffectDeny,

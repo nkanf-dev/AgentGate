@@ -1102,12 +1102,17 @@ func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.Pol
 		warnings = append(warnings, fmt.Sprintf("no adapter registration currently covers %s surface", surface))
 	}
 
+	redactedContentSummary, err := e.vault.RedactString(ctx, req.Content.Summary)
+	if err != nil {
+		return types.PolicyDecision{}, errStatus(http.StatusInternalServerError, "audit_redaction_failed", err.Error())
+	}
+
 	finalReason := reason
 	finalObligations := stripInternalObligations(obligations)
 	disposition := dispositionFromEffect(policyEffect)
 	var approval *types.ApprovalRecord
 	if policyEffect == types.EffectApprovalRequired {
-		workflowResult, err := e.completeApprovalWorkflow(ctx, req, policyEvaluation, reason, now, warnings)
+		workflowResult, err := e.completeApprovalWorkflow(ctx, req, policyEvaluation, reason, redactedContentSummary, secretFindingLabels(inputFacts.findings), now, warnings)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return types.PolicyDecision{}, err
@@ -1150,7 +1155,10 @@ func (e *Engine) Decide(ctx context.Context, req types.PolicyRequest) (types.Pol
 		"integration_id":             requestIntegrationID(req),
 		"operation":                  req.Action.Operation,
 		"tool":                       req.Action.Tool,
-		"content_summary":            req.Content.Summary,
+		"content_summary":            redactedContentSummary,
+		"data_classes":               dataClassLabels(req.Content.DataClasses),
+		"taints":                     taintLabels(req.Context.Taints),
+		"findings":                   secretFindingLabels(inputFacts.findings),
 		"side_effects":               append([]types.SideEffect(nil), req.Action.SideEffects...),
 		"open_world":                 req.Action.OpenWorld,
 		"target_kind":                req.Target.Kind,
@@ -1323,7 +1331,7 @@ func mergeObligations(primary []types.Obligation, extras []types.Obligation) []t
 	return merged
 }
 
-func (e *Engine) completeApprovalWorkflow(ctx context.Context, req types.PolicyRequest, evaluation policy.Evaluation, reason string, now time.Time, warnings []string) (approvalWorkflowResult, error) {
+func (e *Engine) completeApprovalWorkflow(ctx context.Context, req types.PolicyRequest, evaluation policy.Evaluation, reason string, redactedContentSummary string, findingLabels []string, now time.Time, warnings []string) (approvalWorkflowResult, error) {
 	pending, err := e.approvals.FindPending(ctx, req.Session.SessionID, req.Session.TaskID, req.Session.AttemptID, now)
 	if err != nil {
 		return approvalWorkflowResult{}, errStatus(http.StatusInternalServerError, "approval_store_read_failed", err.Error())
@@ -1354,7 +1362,7 @@ func (e *Engine) completeApprovalWorkflow(ctx context.Context, req types.PolicyR
 			ExpiresAt:  now.Add(timeout),
 			Channel:    e.approvalChannelForRequest(ctx, req),
 		}
-		event := e.approvalRequestedEvent(req, approval, evaluation, warnings, now)
+		event := e.approvalRequestedEvent(req, approval, evaluation, redactedContentSummary, findingLabels, warnings, now)
 		if err := e.approvals.Create(ctx, approval, event); err != nil {
 			return approvalWorkflowResult{}, errStatus(http.StatusInternalServerError, "approval_store_write_failed", err.Error())
 		}
@@ -1408,7 +1416,7 @@ func (e *Engine) completeApprovalWorkflow(ctx context.Context, req types.PolicyR
 	}
 }
 
-func (e *Engine) approvalRequestedEvent(req types.PolicyRequest, approval types.ApprovalRecord, evaluation policy.Evaluation, warnings []string, occurredAt time.Time) types.EventEnvelope {
+func (e *Engine) approvalRequestedEvent(req types.PolicyRequest, approval types.ApprovalRecord, evaluation policy.Evaluation, redactedContentSummary string, findingLabels []string, warnings []string, occurredAt time.Time) types.EventEnvelope {
 	metadata := map[string]interface{}{
 		"request_kind":        req.RequestKind,
 		"actor_user":          req.Actor.UserID,
@@ -1416,7 +1424,10 @@ func (e *Engine) approvalRequestedEvent(req types.PolicyRequest, approval types.
 		"integration_id":      mapStringValue(req.Policy, "integration_id"),
 		"operation":           req.Action.Operation,
 		"tool":                req.Action.Tool,
-		"content_summary":     req.Content.Summary,
+		"content_summary":     redactedContentSummary,
+		"data_classes":        dataClassLabels(req.Content.DataClasses),
+		"taints":              taintLabels(req.Context.Taints),
+		"findings":            append([]string(nil), findingLabels...),
 		"side_effects":        append([]types.SideEffect(nil), req.Action.SideEffects...),
 		"open_world":          req.Action.OpenWorld,
 		"target_kind":         req.Target.Kind,
@@ -2020,7 +2031,10 @@ func extractScannableText(req *types.PolicyRequest) string {
 		if !ok {
 			text, _ = rawString(req.Context.Raw, "body")
 		}
-		return text
+		if text != "" {
+			return text
+		}
+		return req.Content.Summary
 	case types.SurfaceRuntime:
 		if text, ok := rawString(req.Context.Raw, "text"); ok {
 			return text
@@ -2047,6 +2061,34 @@ func appendTaintOnce(values []types.Taint, value types.Taint) []types.Taint {
 		}
 	}
 	return append(values, value)
+}
+
+func dataClassLabels(values []types.DataClass) []string {
+	labels := make([]string, 0, len(values))
+	for _, value := range values {
+		labels = append(labels, string(value))
+	}
+	return labels
+}
+
+func taintLabels(values []types.Taint) []string {
+	labels := make([]string, 0, len(values))
+	for _, value := range values {
+		labels = append(labels, string(value))
+	}
+	return labels
+}
+
+func secretFindingLabels(findings []scanner.SecretFinding) []string {
+	labels := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		kind := strings.TrimSpace(finding.Kind)
+		if kind == "" {
+			kind = "secret"
+		}
+		labels = append(labels, fmt.Sprintf("%s@%d:%d", kind, finding.Start, finding.End-finding.Start))
+	}
+	return labels
 }
 
 func rawString(raw map[string]interface{}, key string) (string, bool) {

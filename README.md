@@ -61,6 +61,12 @@ Policies are organized into **Bundles**, each containing ordered **Rules**. Acti
 
 AgentGate fails closed on invalid requests, missing active policy, CEL indeterminate results, and missing secret policy.
 
+### Integration Policy Binding
+
+Integration Definitions can bind an ordered `policy_bundle_ids` list. When a request includes an `integration_id`, Core loads that integration's bound bundles and evaluates them together with the globally enforced Core policy. If the integration does not exist, has no bound bundles, or all bound bundles are unavailable, Core falls back to the global default policy.
+
+Decision events record `policy_source` and `integration_policy_bundles` so operators can verify whether a request used integration-specific policy or the global default. Event diagnostics may include `findings`, `taints`, and `data_classes`, but raw sensitive evidence stays out of the audit stream.
+
 ### Default Policy
 
 The default policy (`config/default_policy.json`) ships with these rules:
@@ -180,6 +186,7 @@ flowchart TB
 | `GET` | `/v1/events` | operator | Security event log |
 | `GET` | `/v1/approvals` | operator | Pending approvals |
 | `POST` | `/v1/approvals/{id}/resolve` | operator | Allow or deny an approval |
+| `GET` | `/internal/agent-types` | admin | Supported agent type descriptors |
 | `*` | `/internal/policy/*` | admin | Bundle and rule management |
 | `*` | `/internal/integrations/*` | admin | Integration definition management |
 
