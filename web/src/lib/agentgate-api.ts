@@ -658,6 +658,7 @@ function normalizeEvent(event: EventEnvelope): SecurityEvent {
   const attemptId = stringValue(metadata.attempt_id)
   const requestKind = stringValue(metadata.request_kind) ?? event.event_type
   const warnings = stringArray(metadata.warnings)
+  const findings = stringArray(metadata.findings)
   const reason = event.summary || event.event_type
 
   return {
@@ -682,11 +683,8 @@ function normalizeEvent(event: EventEnvelope): SecurityEvent {
     applied_rules: stringArray(metadata.applied_rules),
     obligations: stringArray(metadata.obligations),
     metadata: metadataItems(metadata),
-    // TODO: findings should come from actual findings data, not warnings
-    findings: warnings,
-    // TODO: Backend never populates taints in event metadata - always empty
+    findings: findings.length > 0 ? findings : warnings,
     taints: stringArray(metadata.taints),
-    // TODO: Backend never populates data_classes in event metadata - always empty
     data_classes: stringArray(metadata.data_classes),
     event_type: event.event_type,
   }

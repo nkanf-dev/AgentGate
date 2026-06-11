@@ -550,10 +550,14 @@ func EvaluateBundles(bundles []Bundle, request types.PolicyRequest, sessionFacts
 				}
 			}
 			if matches {
+				bundlePriority := bundle.Priority
+				if isCoreGuardrailRule(bundle, rule) {
+					bundlePriority = coreGuardrailBundlePriority
+				}
 				matched = append(matched, MatchedRule{
 					BundleID:       bundle.BundleID,
 					BundleName:     bundle.Name,
-					BundlePriority: bundle.Priority,
+					BundlePriority: bundlePriority,
 					Rule:           rule,
 				})
 			}
@@ -638,6 +642,12 @@ func EvaluateBundles(bundles []Bundle, request types.PolicyRequest, sessionFacts
 		BundlePriority: topBundlePriority,
 		TopPriority:    topPriority,
 	}
+}
+
+const coreGuardrailBundlePriority = 1_000_000
+
+func isCoreGuardrailRule(bundle Bundle, rule Rule) bool {
+	return bundle.BundleID == "core" && rule.ID != "core.default_deny"
 }
 
 func (b Bundle) RequiresRuntimeApproval(request types.PolicyRequest) bool {
