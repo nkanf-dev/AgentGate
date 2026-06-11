@@ -8,6 +8,9 @@ agentgate.db
 node_modules/
 dist/
 
+# Local ISME decision records are kept out of the repository for now.
+docs/isme/
+
 .DS_Store
 HEARTBEAT.md
 IDENTITY.md
